@@ -1,0 +1,6 @@
+dependencies:
+- name: okoscope-agent
+  repository: file://../okoscope-agent
+  version: 0.1.0
+digest: sha256:5e807f18f1f18c3388e64fafd1011a114c5c5d4a82802f9ab018e4702519a0ff
+generated: "2026-09-08T22:09:09.81559+03:00"

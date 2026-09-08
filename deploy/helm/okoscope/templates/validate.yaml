@@ -1,0 +1,22 @@
+{{- if not .Values.database.existingSecret }}{{ fail "database.existingSecret is required" }}{{ end -}}
+{{- if not .Values.database.urlKey }}{{ fail "database.urlKey is required" }}{{ end -}}
+{{- if and .Values.certManager.enabled (not .Values.certManager.clusterIssuer) }}{{ fail "certManager.clusterIssuer is required when certManager.enabled=true" }}{{ end -}}
+{{- range $name, $route := dict "ingress.web" .Values.ingress.web "ingress.grpc" .Values.ingress.grpc -}}
+{{- if and $route.enabled (not $route.host) }}{{ fail (printf "%s.host is required when enabled" $name) }}{{ end -}}
+{{- if and $.Values.certManager.enabled $route.enabled (not $route.tlsSecret) }}{{ fail (printf "%s.tlsSecret is required when certManager.enabled=true" $name) }}{{ end -}}
+{{- end -}}
+{{- if and .Values.ingress.grpc.enabled (not .Values.ingress.grpc.tlsSecret) }}{{ fail "ingress.grpc.tlsSecret is required when enabled" }}{{ end -}}
+{{- $corsOrigins := include "okoscope.corsOrigins" . -}}
+{{- if and $corsOrigins (gt (len (splitList "," $corsOrigins)) 32) }}{{ fail "at most 32 total CORS origins are allowed" }}{{ end -}}
+{{- if and .Values.server.registrationEnabled (not .Values.mail.enabled) }}{{ fail "server.registrationEnabled requires mail.enabled=true" }}{{ end -}}
+{{- if .Values.mail.enabled -}}
+{{- if not .Values.mail.publicWebUrl }}{{ fail "mail.publicWebUrl is required when mail.enabled=true" }}{{ end -}}
+{{- if not .Values.mail.smtp.host }}{{ fail "mail.smtp.host is required when mail.enabled=true" }}{{ end -}}
+{{- if not .Values.mail.smtp.existingSecret }}{{ fail "mail.smtp.existingSecret is required when mail.enabled=true" }}{{ end -}}
+{{- if not .Values.mail.sender.address }}{{ fail "mail.sender.address is required when mail.enabled=true" }}{{ end -}}
+{{- if not .Values.internalSecret.mailEncryptionKey }}{{ fail "internalSecret.mailEncryptionKey is required when mail.enabled=true" }}{{ end -}}
+{{- if not .Values.mail.developmentPlaintext -}}
+{{- if not (hasPrefix "https://" .Values.mail.publicWebUrl) }}{{ fail "mail.publicWebUrl must use HTTPS outside explicit development mode" }}{{ end -}}
+{{- if eq .Values.mail.smtp.tls "plaintext" }}{{ fail "plaintext SMTP requires mail.developmentPlaintext=true" }}{{ end -}}
+{{- end -}}
+{{- end -}}

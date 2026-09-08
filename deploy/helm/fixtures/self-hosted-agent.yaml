@@ -1,0 +1,12 @@
+okoscope-agent:
+  enabled: true
+  server:
+    endpoint: http://okoscope-server:4317
+    developmentPlaintext: true
+  identity:
+    clusterName: local
+  workloads:
+    - namespace: applications
+      kind: Deployment
+      name: payment-api
+      credentialSecret: {name: okoscope-application-credentials, key: payment-api}

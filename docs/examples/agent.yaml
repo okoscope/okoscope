@@ -1,0 +1,32 @@
+apiVersion: okoscope.io/v1alpha1
+kind: AgentConfiguration
+server:
+  endpoint: http://127.0.0.1:4317
+  developmentPlaintext: true
+identity:
+  nodeName: local-node
+  clusterName: local
+scope:
+  workloads:
+    - applicationCredentialFile: /var/run/secrets/okoscope/applications/payment-api
+      namespace: okoscope-demo
+      kind: Deployment
+      name: payment-api
+      labels:
+        app: payment-api
+observation:
+  processExec: true
+  processExit: true
+  syscalls:
+    - ptrace
+    - setns
+  network:
+    connect: false
+    listen: false
+    accept: false
+    maxAcceptedEventsPerSecond: 25
+safety:
+  queueCapacity: 4096
+  batchSize: 256
+  maxEventsPerSecond: 1000
+  maxApplicationStreams: 32

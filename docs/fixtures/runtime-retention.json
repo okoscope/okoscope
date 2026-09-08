@@ -1,0 +1,70 @@
+{
+  "organization_policy": {
+    "enabled": true,
+    "raw_days": 30,
+    "history_days": 365
+  },
+  "project_inherited": {
+    "override": null,
+    "effective": {
+      "enabled": true,
+      "raw_days": 30,
+      "history_days": 365
+    },
+    "inherited": {
+      "enabled": true,
+      "raw_days": 30,
+      "history_days": 365
+    },
+    "source": "organization"
+  },
+  "project_forever": {
+    "override": {
+      "enabled": true,
+      "raw_days": 7,
+      "history_days": null
+    },
+    "effective": {
+      "enabled": true,
+      "raw_days": 7,
+      "history_days": null
+    },
+    "inherited": {
+      "enabled": true,
+      "raw_days": 30,
+      "history_days": 365
+    },
+    "source": "project"
+  },
+  "snapshot_page": {
+    "items": [
+      {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "group_id": "20000000-0000-4000-8000-000000000001",
+        "release_id": null,
+        "day": "2026-07-01",
+        "format_version": 1,
+        "occurrence_count": 1000000,
+        "first_observed_at": "2026-07-01T00:00:00Z",
+        "last_observed_at": "2026-07-01T23:59:59Z"
+      }
+    ],
+    "next_cursor": null,
+    "coverage": {
+      "closed_before": "2026-08-01T00:00:00Z",
+      "history_expired_before": "2025-09-01T00:00:00Z",
+      "detail_scope": "raw"
+    },
+    "granularity": "utc_day"
+  },
+  "empty_snapshot_page": {
+    "items": [],
+    "next_cursor": null,
+    "coverage": {
+      "closed_before": "2026-08-01T00:00:00Z",
+      "history_expired_before": "2025-09-01T00:00:00Z",
+      "detail_scope": "raw"
+    },
+    "granularity": "utc_day"
+  }
+}

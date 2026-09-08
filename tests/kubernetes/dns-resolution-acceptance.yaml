@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: okoscope-dns-acceptance
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns-fixture
+  namespace: okoscope-dns-acceptance
+spec:
+  selector:
+    app: dns-fixture
+  ports:
+    - {name: dns-udp, port: 53, targetPort: 5353, protocol: UDP}
+    - {name: dns-tcp, port: 53, targetPort: 5353, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-fixture
+  namespace: okoscope-dns-acceptance
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: dns-fixture}
+  template:
+    metadata:
+      labels: {app: dns-fixture}
+    spec:
+      containers:
+        - name: dns
+          image: coredns/coredns:1.12.4
+          args: [-conf, /etc/coredns/Corefile]
+          ports:
+            - {name: dns-udp, containerPort: 5353, protocol: UDP}
+            - {name: dns-tcp, containerPort: 5353, protocol: TCP}
+          volumeMounts:
+            - {name: config, mountPath: /etc/coredns}
+      volumes:
+        - name: config
+          configMap: {name: dns-fixture}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-fixture
+  namespace: okoscope-dns-acceptance
+data:
+  Corefile: |
+    .:5353 {
+      hosts {
+        203.0.113.7 a.fixture.test shared-one.fixture.test shared-two.fixture.test
+        2001:db8::7 aaaa.fixture.test
+        fallthrough
+      }
+      template IN A cname.fixture.test {
+        answer "{{ .Name }} 30 IN CNAME a.fixture.test."
+      }
+      template IN A nxdomain.fixture.test {
+        rcode NXDOMAIN
+      }
+      errors
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: selected-dns-fixture
+  namespace: okoscope-dns-acceptance
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {okoscope.io/dns-acceptance: selected}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fixture
+          image: alpine:3.22
+          command: [sh, -ec]
+          args:
+            - |
+              apk add --no-cache bind-tools curl
+              sleep 20
+              dig +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local a.fixture.test A
+              dig +tcp +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local aaaa.fixture.test AAAA
+              dig +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local cname.fixture.test A
+              dig @dns-fixture.okoscope-dns-acceptance.svc.cluster.local nxdomain.fixture.test A
+              dig +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local shared-one.fixture.test A
+              dig +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local shared-two.fixture.test A
+              # A repeated connection exercises immutable cached context; no reverse lookup is used.
+              nc -w 1 203.0.113.7 443 || true
+              nc -w 1 203.0.113.7 443 || true
+              # Malformed plaintext DNS must be counted and discarded.
+              printf '\0224\201\200\000\001' | nc -u -w 1 dns-fixture.okoscope-dns-acceptance.svc.cluster.local 53 || true
+              # Encrypted DNS is deliberately opaque and must produce no DNS semantic event.
+              curl --max-time 2 -fsS https://1.1.1.1/dns-query >/dev/null || true
+              sleep 60
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: unselected-dns-fixture
+  namespace: okoscope-dns-acceptance
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {okoscope.io/dns-acceptance: unselected}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: fixture
+          image: alpine:3.22
+          command: [sh, -ec]
+          args:
+            - |
+              apk add --no-cache bind-tools
+              sleep 20
+              dig +short @dns-fixture.okoscope-dns-acceptance.svc.cluster.local forbidden.fixture.test A
+              sleep 60

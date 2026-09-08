@@ -1,0 +1,14 @@
+[package]
+name = "agent-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agent-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+agent-ebpf-common.workspace = true
+aya-ebpf.workspace = true

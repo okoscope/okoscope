@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../server
+  - ../agent
+  - ../frontend
+
+# This is the GitOps deployment state. CI updates only the server newTag after
+# the corresponding immutable image has been published successfully.
+images:
+  - name: ghcr.io/okoscope/okoscope-server
+    newTag: "cd2e3651c1d21b91b5e75f633fa1af167bda8915"
+  - name: ghcr.io/okoscope/okoscope-agent
+    newTag: "cd2e3651c1d21b91b5e75f633fa1af167bda8915"
+  - name: ghcr.io/okoscope/okoscope-web
+    newTag: "4bfa5a880ee3be8089f64260366ac728fc5fee33"
+
+patches:
+  - target:
+      kind: Deployment
+      name: okoscope-server
+    patch: |-
+      - op: replace
+        path: /spec/template/metadata/annotations/okoscope.io~1notification-config
+        value: 1eea51032e02
+  - target:
+      kind: ConfigMap
+      name: okoscope-server
+    patch: |-
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_DELIVERY_ENABLED
+        value: "false"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_POLL_MS
+        value: "1000"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_CLAIM_SIZE
+        value: "50"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_CONCURRENCY
+        value: "8"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_LEASE_SECONDS
+        value: "30"
+      - op: replace
+        path: /data/OKOSCOPE_WEBHOOK_TIMEOUT_SECONDS
+        value: "10"
+      - op: replace
+        path: /data/OKOSCOPE_WEBHOOK_MAX_ATTEMPTS
+        value: "8"
+      - op: replace
+        path: /data/OKOSCOPE_WEBHOOK_BACKOFF_MIN_SECONDS
+        value: "5"
+      - op: replace
+        path: /data/OKOSCOPE_WEBHOOK_BACKOFF_MAX_SECONDS
+        value: "3600"
+      - op: replace
+        path: /data/OKOSCOPE_WEBHOOK_MAX_RESPONSE_BYTES
+        value: "4096"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_DRAIN_SECONDS
+        value: "15"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_RETENTION_ENABLED
+        value: "false"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_TERMINAL_RETENTION_DAYS
+        value: "90"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_RECOVERY_RETENTION_DAYS
+        value: "365"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_RETENTION_BATCH_SIZE
+        value: "1000"
+      - op: replace
+        path: /data/OKOSCOPE_NOTIFICATION_RETENTION_POLL_SECONDS
+        value: "3600"

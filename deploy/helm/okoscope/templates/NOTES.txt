@@ -1,0 +1,14 @@
+Okoscope uses the existing database Secret {{ .Values.database.existingSecret | quote }}; Helm does not own PostgreSQL.
+
+Wait for readiness:
+  kubectl rollout status deployment/{{ include "okoscope.fullname" . }}-server -n {{ .Release.Namespace }} --timeout=5m
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+Retrieve the one-time setup authorization (the token is never printed by Helm):
+  kubectl get secret -n {{ .Release.Namespace }} {{ default (printf "%s-setup" (include "okoscope.fullname" .)) .Values.setupAuthorization.existingSecret }} -o jsonpath='{.data.{{ .Values.setupAuthorization.tokenKey }}}' | base64 --decode
+
+{{- if not .Values.ingress.web.enabled }}
+Open the Web UI locally:
+  kubectl port-forward -n {{ .Release.Namespace }} service/{{ include "okoscope.fullname" . }}-web 8080:80
+  # http://127.0.0.1:8080
+{{- end }}

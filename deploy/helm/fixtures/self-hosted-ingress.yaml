@@ -1,0 +1,8 @@
+database: {existingSecret: production-database, urlKey: connection-url}
+internalSecret: {existingSecret: okoscope-internal-production}
+server: {replicas: 2, registrationEnabled: false}
+web: {replicas: 2}
+notifications: {enabled: true}
+ingress:
+  web: {enabled: true, className: nginx, host: okoscope.example.com, tlsSecret: okoscope-web-tls}
+  grpc: {enabled: true, className: nginx, host: grpc.okoscope.example.com, tlsSecret: okoscope-grpc-tls}

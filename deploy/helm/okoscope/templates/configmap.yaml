@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "okoscope.fullname" . }}-server
+  labels:
+    {{- include "okoscope.labels" . | nindent 4 }}
+data:
+  OKOSCOPE_MIGRATE: "false"
+  OKOSCOPE_DEVELOPMENT_PLAINTEXT: "true"
+  OKOSCOPE_REGISTRATION_ENABLED: {{ .Values.server.registrationEnabled | quote }}
+  OKOSCOPE_SESSION_LIFETIME_SECONDS: {{ .Values.server.sessionLifetimeSeconds | quote }}
+  {{- $corsOrigins := include "okoscope.corsOrigins" . }}
+  {{- if $corsOrigins }}
+  OKOSCOPE_CORS_ORIGINS: {{ $corsOrigins | quote }}
+  {{- end }}
+  {{- if .Values.agentInstallation.publicGrpcEndpoint }}
+  OKOSCOPE_AGENT_CHART_REFERENCE: {{ .Values.agentInstallation.chartReference | quote }}
+  OKOSCOPE_AGENT_CHART_VERSION: {{ .Values.agentInstallation.chartVersion | quote }}
+  OKOSCOPE_AGENT_RECOMMENDED_VERSION: {{ .Values.agentInstallation.recommendedAgentVersion | quote }}
+  OKOSCOPE_AGENT_MINIMUM_VERSION: {{ .Values.agentInstallation.minimumAgentVersion | quote }}
+  OKOSCOPE_PUBLIC_GRPC_ENDPOINT: {{ .Values.agentInstallation.publicGrpcEndpoint | quote }}
+  OKOSCOPE_AGENT_TLS_MODE: {{ .Values.agentInstallation.tlsMode | quote }}
+  {{- if eq .Values.agentInstallation.tlsMode "custom_ca" }}
+  OKOSCOPE_AGENT_CA_SECRET_NAME: {{ .Values.agentInstallation.caSecret.name | quote }}
+  OKOSCOPE_AGENT_CA_SECRET_KEY: {{ .Values.agentInstallation.caSecret.key | quote }}
+  {{- end }}
+  {{- end }}
+  OKOSCOPE_NOTIFICATION_DELIVERY_ENABLED: {{ .Values.notifications.enabled | quote }}
+  OKOSCOPE_NOTIFICATION_POLL_MS: {{ .Values.notifications.pollMilliseconds | quote }}
+  OKOSCOPE_NOTIFICATION_CLAIM_SIZE: {{ .Values.notifications.claimSize | quote }}
+  OKOSCOPE_NOTIFICATION_CONCURRENCY: {{ .Values.notifications.concurrency | quote }}
+  OKOSCOPE_NOTIFICATION_LEASE_SECONDS: {{ .Values.notifications.leaseSeconds | quote }}
+  OKOSCOPE_NOTIFICATION_DRAIN_SECONDS: {{ .Values.notifications.drainSeconds | quote }}
+  OKOSCOPE_MAIL_ENABLED: {{ .Values.mail.enabled | quote }}
+  {{- if .Values.mail.enabled }}
+  OKOSCOPE_PUBLIC_WEB_URL: {{ .Values.mail.publicWebUrl | quote }}
+  OKOSCOPE_SMTP_HOST: {{ .Values.mail.smtp.host | quote }}
+  OKOSCOPE_SMTP_PORT: {{ .Values.mail.smtp.port | quote }}
+  OKOSCOPE_SMTP_TLS: {{ .Values.mail.smtp.tls | quote }}
+  OKOSCOPE_MAIL_FROM_ADDRESS: {{ .Values.mail.sender.address | quote }}
+  OKOSCOPE_MAIL_FROM_NAME: {{ .Values.mail.sender.name | quote }}
+  OKOSCOPE_MAIL_DEFAULT_LOCALE: {{ .Values.mail.defaultLocale | quote }}
+  OKOSCOPE_MAIL_POLL_MS: {{ .Values.mail.worker.pollMilliseconds | quote }}
+  OKOSCOPE_MAIL_CLAIM_SIZE: {{ .Values.mail.worker.claimSize | quote }}
+  OKOSCOPE_MAIL_CONCURRENCY: {{ .Values.mail.worker.concurrency | quote }}
+  OKOSCOPE_MAIL_LEASE_SECONDS: {{ .Values.mail.worker.leaseSeconds | quote }}
+  OKOSCOPE_SMTP_TIMEOUT_SECONDS: {{ .Values.mail.worker.timeoutSeconds | quote }}
+  OKOSCOPE_MAIL_MAX_ATTEMPTS: {{ .Values.mail.worker.maxAttempts | quote }}
+  OKOSCOPE_MAIL_RETENTION_DAYS: {{ .Values.mail.worker.retentionDays | quote }}
+  {{- end }}
+  RUST_LOG: info

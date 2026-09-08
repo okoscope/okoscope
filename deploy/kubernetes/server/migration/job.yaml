@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: okoscope-migrate-000000000000
+  labels:
+    app.kubernetes.io/name: okoscope-migrate
+  annotations:
+    okoscope.io/required-migration: "__REQUIRED_MIGRATION__"
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: okoscope-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: ghcr.io/okoscope/okoscope-server:0000000000000000000000000000000000000000
+          args: [migrate]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          env:
+            - {name: RUST_LOG, value: info}
+            - name: OKOSCOPE_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: okoscope-secrets, key: database-url}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}

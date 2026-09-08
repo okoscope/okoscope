@@ -1,0 +1,207 @@
+name: backend-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SERVER_IMAGE: ghcr.io/${{ github.repository }}-server
+  AGENT_IMAGE: ghcr.io/${{ github.repository }}-agent
+  PRODUCTION_KUSTOMIZATION: deploy/kubernetes/common
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: okoscope_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/okoscope_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Kustomize
+        run: |
+          work=$(mktemp -d)
+          cd "$work"
+          version=v5.8.1
+          archive="kustomize_${version}_linux_amd64.tar.gz"
+          base="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}"
+          curl --fail --location --silent --show-error --remote-name "$base/$archive"
+          curl --fail --location --silent --show-error --remote-name "$base/checksums.txt"
+          grep "  $archive$" checksums.txt | sha256sum --check --strict
+          tar -xzf "$archive" kustomize
+          sudo install kustomize /usr/local/bin/kustomize
+      - name: Install pinned Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.6
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint userspace
+        run: cargo clippy --workspace --exclude agent-ebpf --all-targets -- -D warnings
+      - name: Test userspace
+        run: cargo test --workspace --exclude agent-ebpf
+      - name: Test PostgreSQL migrations and notifications
+        run: |
+          cargo test -p server --test migrations -- --ignored --test-threads=1
+          cargo test -p server --test notification -- --ignored --test-threads=1
+          cargo test -p server --test policy_api -- --ignored --test-threads=1
+      - name: Build production manifests with Kustomize
+        run: |
+          kustomize build "$PRODUCTION_KUSTOMIZATION" > /tmp/okoscope-production.yaml
+          test -s /tmp/okoscope-production.yaml
+          if grep -Eq '__[A-Z0-9_]+__|:0{40}([[:space:]]|$)' /tmp/okoscope-production.yaml; then
+            echo "production manifests contain unresolved placeholders" >&2
+            exit 1
+          fi
+          server_images=$(grep -Ec 'image: ghcr.io/.+-server:[0-9a-f]{40}$' /tmp/okoscope-production.yaml)
+          test "$server_images" -eq 1
+          agent_images=$(grep -Ec 'image: ghcr.io/.+-agent:[0-9a-f]{40}$' /tmp/okoscope-production.yaml)
+          test "$agent_images" -eq 1
+      - name: Install pinned kubeconform
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo install kubeconform /usr/local/bin/kubeconform
+      - name: Validate production manifests
+        run: kubeconform -strict -summary /tmp/okoscope-production.yaml
+      - name: Validate Helm installation contracts
+        run: deploy/helm/test-charts.sh
+      - name: Validate onboarding metadata against agent chart
+        run: deploy/helm/test-onboarding-contract.sh
+      - name: Validate installation documentation
+        run: deploy/helm/test-docs.sh
+
+  publish-server:
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          platforms: linux/amd64
+          build-args: OKOSCOPE_GIT_COMMIT=${{ github.sha }}
+          push: true
+          tags: ${{ env.SERVER_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+  publish-agent:
+    if: github.event_name != 'pull_request'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish immutable agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.agent
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.AGENT_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+
+  promote-images:
+    if: github.event_name != 'pull_request'
+    needs: [publish-server, publish-agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Install pinned Kustomize
+        run: |
+          work=$(mktemp -d)
+          cd "$work"
+          version=v5.8.1
+          archive="kustomize_${version}_linux_amd64.tar.gz"
+          base="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${version}"
+          curl --fail --location --silent --show-error --remote-name "$base/$archive"
+          curl --fail --location --silent --show-error --remote-name "$base/checksums.txt"
+          grep "  $archive$" checksums.txt | sha256sum --check --strict
+          tar -xzf "$archive" kustomize
+          sudo install kustomize /usr/local/bin/kustomize
+      - name: Update published backend image tags
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          if [[ $(git rev-parse HEAD) != "$IMAGE_TAG" ]]; then
+            echo "main advanced while the image was building; the newer run will promote its own image"
+            exit 0
+          fi
+          sed -i "/name: ghcr.io\/okoscope\/okoscope-server/{n;s/newTag:.*/newTag: \"$IMAGE_TAG\"/;}" \
+            "$PRODUCTION_KUSTOMIZATION/kustomization.yaml"
+          sed -i "/name: ghcr.io\/okoscope\/okoscope-agent/{n;s/newTag:.*/newTag: \"$IMAGE_TAG\"/;}" \
+            "$PRODUCTION_KUSTOMIZATION/kustomization.yaml"
+          changed=$(git diff --name-only)
+          test "$changed" = "$PRODUCTION_KUSTOMIZATION/kustomization.yaml"
+          kustomize build "$PRODUCTION_KUSTOMIZATION" > /tmp/okoscope-production.yaml
+          grep -q "image: $SERVER_IMAGE:$IMAGE_TAG" /tmp/okoscope-production.yaml
+          grep -q "image: $AGENT_IMAGE:$IMAGE_TAG" /tmp/okoscope-production.yaml
+      - name: Commit GitOps promotion
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          if git diff --quiet; then
+            echo "backend image tag is already promoted"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add "$PRODUCTION_KUSTOMIZATION/kustomization.yaml"
+          git commit -m "deploy: backend images $IMAGE_TAG [skip ci]"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"

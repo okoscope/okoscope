@@ -1,0 +1,99 @@
+name: release-helm-charts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic Okoscope version without v
+        required: true
+      server_image:
+        description: Immutable server image digest
+        required: true
+      agent_image:
+        description: Immutable agent image digest
+        required: true
+      web_image:
+        description: Verified immutable Web image digest
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+        with: {version: v3.18.6}
+      - uses: docker/setup-buildx-action@v3
+      - name: Resolve coordinated release inputs
+        id: release
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SERVER: ${{ inputs.server_image }}
+          INPUT_AGENT: ${{ inputs.agent_image }}
+          INPUT_WEB: ${{ inputs.web_image }}
+        run: |
+          version=$INPUT_VERSION
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must be a semantic version without a leading v" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          test -n "$INPUT_SERVER" && test -n "$INPUT_AGENT" && test -n "$INPUT_WEB"
+          echo "server=$INPUT_SERVER" >> "$GITHUB_OUTPUT"
+          echo "agent=$INPUT_AGENT" >> "$GITHUB_OUTPUT"
+          echo "web=$INPUT_WEB" >> "$GITHUB_OUTPUT"
+      - name: Pin verified immutable component images
+        env:
+          SERVER_DIGEST: ${{ steps.release.outputs.server }}
+          AGENT_DIGEST: ${{ steps.release.outputs.agent }}
+          WEB_DIGEST: ${{ steps.release.outputs.web }}
+        run: |
+          test "${SERVER_DIGEST#sha256:}" != "$SERVER_DIGEST"
+          test "${AGENT_DIGEST#sha256:}" != "$AGENT_DIGEST"
+          test "${WEB_DIGEST#sha256:}" != "$WEB_DIGEST"
+          sed -i "s/digest: \"\"/digest: \"$AGENT_DIGEST\"/" deploy/helm/okoscope-agent/values.yaml
+          sed -i "0,/digest: \"\"/s//digest: \"$SERVER_DIGEST\"/" deploy/helm/okoscope/values.yaml
+          sed -i "s/digest: \"\"/digest: \"$WEB_DIGEST\"/" deploy/helm/okoscope/values.yaml
+          if grep -q 'digest: ""' deploy/helm/okoscope/values.yaml deploy/helm/okoscope-agent/values.yaml; then
+            echo "release charts must pin every component image digest" >&2
+            exit 1
+          fi
+      - name: Verify immutable component images exist
+        env:
+          SERVER_DIGEST: ${{ steps.release.outputs.server }}
+          AGENT_DIGEST: ${{ steps.release.outputs.agent }}
+          WEB_DIGEST: ${{ steps.release.outputs.web }}
+        run: |
+          docker buildx imagetools inspect "ghcr.io/okoscope/okoscope-server@$SERVER_DIGEST"
+          docker buildx imagetools inspect "ghcr.io/okoscope/okoscope-agent@$AGENT_DIGEST"
+          docker buildx imagetools inspect "ghcr.io/okoscope/okoscope-web@$WEB_DIGEST"
+      - name: Verify and package charts
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          sed -Ei "s/^version: .*/version: $VERSION/; s/^appVersion: .*/appVersion: \"$VERSION\"/" deploy/helm/okoscope-agent/Chart.yaml
+          sed -Ei "s/^version: .*/version: $VERSION/; s/^appVersion: .*/appVersion: \"$VERSION\"/; s/^    version: .*/    version: $VERSION/" deploy/helm/okoscope/Chart.yaml
+          sed -Ei "s/^version: .*/version: $VERSION/; s/^(  (okoscope|okoscope-agent|server|agent|web):) .*/\1 $VERSION/" deploy/helm/release-metadata.yaml
+          sed -Ei "s/^(  (chartVersion|recommendedAgentVersion):) .*/\1 \"$VERSION\"/" deploy/helm/okoscope/values.yaml
+          helm dependency update deploy/helm/okoscope --skip-refresh
+          deploy/helm/test-charts.sh
+          deploy/helm/test-onboarding-contract.sh
+          mkdir -p dist
+          helm package deploy/helm/okoscope-agent --version "$VERSION" --app-version "$VERSION" --destination dist
+          helm dependency update deploy/helm/okoscope --skip-refresh
+          helm package deploy/helm/okoscope --version "$VERSION" --app-version "$VERSION" --destination dist
+      - name: Publish both OCI packages atomically after verification
+        env:
+          HELM_REGISTRY_CONFIG: ${{ runner.temp }}/helm-registry.json
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io --username '${{ github.actor }}' --password-stdin
+          if ! helm push "dist/okoscope-agent-$VERSION.tgz" oci://ghcr.io/okoscope/charts; then
+            echo "agent chart publication failed; if GHCR rejected the existing version after a partial release, publish a new patch version" >&2
+            exit 1
+          fi
+          helm push "dist/okoscope-$VERSION.tgz" oci://ghcr.io/okoscope/charts

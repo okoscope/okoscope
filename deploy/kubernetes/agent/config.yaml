@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-agent
+data:
+  agent.yaml: |
+    apiVersion: okoscope.io/v1alpha1
+    kind: AgentConfiguration
+    server:
+      endpoint: http://okoscope-server.okoscope.svc:4317
+      developmentPlaintext: true
+    identity:
+      nodeName: overridden-by-downward-api
+      clusterName: local
+    scope:
+      workloads:
+        - applicationCredentialFile: /var/run/secrets/okoscope/applications/payment-api
+          namespace: okoscope-demo
+          kind: Deployment
+          name: payment-api
+          labels: {app: payment-api}
+    observation:
+      processExec: true
+      processExit: true
+      syscalls: [ptrace, setns]
+      files:
+        enabled: false
+        operations: [create, modify, delete, rename]
+        includePaths: [/tmp/okoscope-files]
+        excludePaths: [/tmp/okoscope-files/excluded]
+      network:
+        connect: true
+        listen: true
+        accept: true
+        maxAcceptedEventsPerSecond: 25
+        dns:
+          enabled: false
+          udp: true
+          tcp: true
+          maxCapturedBytes: 1232
+          maxPendingTransactions: 4096
+          maxTcpStreams: 1024
+          maxAnswersPerResponse: 16
+          maxNamesPerAddress: 8
+          maxTtlSeconds: 86400
+          maxEventsPerSecond: 250
+    safety:
+      queueCapacity: 4096
+      batchSize: 256
+      maxEventsPerSecond: 1000
+      maxApplicationStreams: 32

@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.91-bookworm AS chef
+RUN rustup toolchain install 1.91.0 --profile minimal
+ENV RUSTUP_TOOLCHAIN=1.91.0
+RUN cargo install cargo-chef --locked --version 0.1.73
+WORKDIR /src
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS userspace
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --locked --release -p agent --recipe-path recipe.json
+COPY . .
+RUN cargo build --locked --release -p agent \
+    && cp /src/target/release/agent /tmp/okoscope-agent
+
+FROM rust:1.91-bookworm AS ebpf
+ARG TARGETARCH
+RUN rustup toolchain install nightly --profile minimal --component rust-src
+ENV RUSTUP_TOOLCHAIN=nightly
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends clang curl llvm zstd \
+    && case "$TARGETARCH" in \
+         amd64) BPF_LINKER_ARCH=x86_64 ;; \
+         arm64) BPF_LINKER_ARCH=aarch64 ;; \
+         *) echo "unsupported build architecture: $TARGETARCH" >&2; exit 1 ;; \
+       esac \
+    && curl --fail --location --output /tmp/bpf-linker.tar.zst \
+        "https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-${BPF_LINKER_ARCH}-unknown-linux-musl.tar.zst" \
+    && tar --extract --file /tmp/bpf-linker.tar.zst --directory /usr/local/bin \
+    && rm /tmp/bpf-linker.tar.zst \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --locked -p agent-ebpf --release --target bpfel-unknown-none -Z build-std=core \
+    && cp /src/target/bpfel-unknown-none/release/agent-ebpf /tmp/agent-ebpf \
+    && case "$TARGETARCH" in amd64) CORE_ARCH=x86 ;; arm64) CORE_ARCH=arm64 ;; esac \
+    && make -C crates/agent-ebpf-core CLANG=clang TARGET_ARCH="$CORE_ARCH" \
+    && cp crates/agent-ebpf-core/build/process-exit.bpf.o /tmp/process-exit.bpf.o
+
+FROM debian:bookworm-slim AS runtime-base
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates \
+    && test -s /etc/ssl/certs/ca-certificates.crt \
+    && openssl crl2pkcs7 -nocrl -certfile /etc/ssl/certs/ca-certificates.crt -out /dev/null \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base
+COPY --from=userspace /tmp/okoscope-agent /usr/local/bin/okoscope-agent
+COPY --from=ebpf /tmp/agent-ebpf /opt/okoscope/agent-ebpf
+COPY --from=ebpf /tmp/process-exit.bpf.o /opt/okoscope/process-exit.bpf.o
+ENTRYPOINT ["/usr/local/bin/okoscope-agent"]

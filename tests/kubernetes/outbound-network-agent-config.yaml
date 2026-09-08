@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-agent
+  namespace: okoscope
+data:
+  agent.yaml: |
+    apiVersion: okoscope.io/v1alpha1
+    kind: AgentConfiguration
+    server:
+      endpoint: http://okoscope-server.okoscope.svc:4317
+      developmentPlaintext: true
+    identity:
+      nodeName: overridden-by-downward-api
+      clusterName: local
+    scope:
+      workloads:
+        - applicationCredentialFile: /var/run/secrets/okoscope/applications/payment-api
+          namespace: okoscope-network-acceptance
+          kind: Job
+          name: selected-network-fixture
+          release: smoke-v2-20260817
+    observation:
+      processExec: true
+      processExit: true
+      syscalls: [ptrace, setns]
+      network:
+        connect: true
+    safety:
+      queueCapacity: 4096
+      batchSize: 256
+      maxEventsPerSecond: 10000

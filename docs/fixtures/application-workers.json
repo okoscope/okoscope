@@ -1,0 +1,41 @@
+{
+  "items": [
+    {
+      "agent_id": "018f4f9c-3f9a-7de1-8000-000000000101",
+      "cluster_id": "018f4f9c-3f9a-7de1-8000-000000000003",
+      "cluster_name": "Production",
+      "node_name": "worker-amd64-01",
+      "agent_version": "0.1.0",
+      "architecture": "x86_64",
+      "kernel_release": "6.9.2",
+      "first_observed_at": "2026-08-20T10:00:00Z",
+      "last_observed_at": "2026-08-22T09:30:00Z",
+      "agent_last_seen_at": "2026-08-22T09:30:12Z"
+    },
+    {
+      "agent_id": "018f4f9c-3f9a-7de1-8000-000000000102",
+      "cluster_id": "018f4f9c-3f9a-7de1-8000-000000000003",
+      "cluster_name": "Production",
+      "node_name": "worker-arm64-02",
+      "agent_version": "0.1.0",
+      "architecture": "aarch64",
+      "kernel_release": "6.8.12",
+      "first_observed_at": "2026-08-21T08:00:00Z",
+      "last_observed_at": "2026-08-22T09:20:00Z",
+      "agent_last_seen_at": "2026-08-22T09:30:10Z"
+    },
+    {
+      "agent_id": "018f4f9c-3f9a-7de1-8000-000000000103",
+      "cluster_id": "018f4f9c-3f9a-7de1-8000-000000000003",
+      "cluster_name": "Production",
+      "node_name": "worker-legacy-03",
+      "agent_version": "0.0.9",
+      "architecture": null,
+      "kernel_release": null,
+      "first_observed_at": "2026-08-19T07:00:00Z",
+      "last_observed_at": "2026-08-22T09:10:00Z",
+      "agent_last_seen_at": "2026-08-22T09:29:55Z"
+    }
+  ],
+  "next_cursor": "7b226c6173745f6f627365727665645f6174223a22323032362d30382d32325430393a31303a30305a222c226167656e745f6964223a2230313866346639632d336639612d376465312d383030302d303030303030303030313033227d"
+}

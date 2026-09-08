@@ -1,0 +1,11 @@
+apiVersion: v2
+name: okoscope
+description: Self-hosted Okoscope control plane using an existing PostgreSQL database
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  - name: okoscope-agent
+    version: 0.1.0
+    repository: file://../okoscope-agent
+    condition: okoscope-agent.enabled

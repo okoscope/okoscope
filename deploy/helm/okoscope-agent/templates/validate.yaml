@@ -1,0 +1,16 @@
+{{- if and (not .Values.server.developmentPlaintext) (not (hasPrefix "https://" .Values.server.endpoint)) -}}
+{{- fail "server.endpoint must use https:// unless server.developmentPlaintext=true" -}}
+{{- end -}}
+{{- $resources := .Values.observation.resources -}}
+{{- if $resources.enabled -}}
+{{- if or (lt (int $resources.sampleIntervalSeconds) 10) (gt (int $resources.sampleIntervalSeconds) 60) -}}{{ fail "observation.resources.sampleIntervalSeconds must be between 10 and 60" }}{{- end -}}
+{{- if ne (int $resources.aggregationIntervalSeconds) 60 -}}{{ fail "observation.resources.aggregationIntervalSeconds must be 60" }}{{- end -}}
+{{- if or (lt (int $resources.maxCgroupStates) 1) (gt (int $resources.maxCgroupStates) 65536) -}}{{ fail "observation.resources.maxCgroupStates must be between 1 and 65536" }}{{- end -}}
+{{- if or (lt (int $resources.maxOpenAggregates) 1) (gt (int $resources.maxOpenAggregates) 16384) -}}{{ fail "observation.resources.maxOpenAggregates must be between 1 and 16384" }}{{- end -}}
+{{- if or (lt (int $resources.queueCapacity) 1) (gt (int $resources.queueCapacity) 4096) -}}{{ fail "observation.resources.queueCapacity must be between 1 and 4096" }}{{- end -}}
+{{- if or (lt (int $resources.batchSize) 1) (gt (int $resources.batchSize) 256) (gt (int $resources.batchSize) (int $resources.queueCapacity)) -}}{{ fail "observation.resources.batchSize must be between 1 and min(queueCapacity, 256)" }}{{- end -}}
+{{- end -}}
+{{- range $index, $mapping := .Values.workloads -}}
+{{- if and $mapping.name $mapping.labels }}{{ fail (printf "workloads[%d] must use name or labels, not both" $index) }}{{ end -}}
+{{- if and (not $mapping.name) (not $mapping.labels) }}{{ fail (printf "workloads[%d] must set name or labels" $index) }}{{ end -}}
+{{- end -}}

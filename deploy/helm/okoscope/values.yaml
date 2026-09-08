@@ -1,0 +1,94 @@
+server:
+  replicas: 1
+  image: {repository: ghcr.io/okoscope/okoscope-server, tag: "0000000000000000000000000000000000000000", digest: "", pullPolicy: IfNotPresent}
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  registrationEnabled: false
+  sessionLifetimeSeconds: 43200
+  corsOrigins: []
+web:
+  replicas: 1
+  image: {repository: ghcr.io/okoscope/okoscope-web, tag: "0000000000000000000000000000000000000000", digest: "", pullPolicy: IfNotPresent}
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 250m, memory: 128Mi}
+database:
+  existingSecret: okoscope-database
+  urlKey: database-url
+internalSecret:
+  existingSecret: ""
+  adminCredentialKey: admin-credential
+  webhookEncryptionKey: webhook-encryption-key
+  identityTokenKey: identity-token-key
+  mailEncryptionKey: mail-encryption-key
+setupAuthorization:
+  existingSecret: ""
+  tokenKey: setup-token
+  expiresAtKey: setup-token-expires-at
+agentInstallation:
+  chartReference: oci://ghcr.io/okoscope/charts/okoscope-agent
+  chartVersion: "0.1.0"
+  recommendedAgentVersion: "0.1.0"
+  minimumAgentVersion: "0.1.0"
+  publicGrpcEndpoint: ""
+  tlsMode: system
+  caSecret:
+    name: ""
+    key: ca.crt
+migration:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+notifications:
+  enabled: false
+  pollMilliseconds: 1000
+  claimSize: 50
+  concurrency: 8
+  leaseSeconds: 30
+  drainSeconds: 15
+mail:
+  enabled: false
+  # Browser origin used in verification and password-reset links. Production mail requires HTTPS.
+  publicWebUrl: ""
+  developmentPlaintext: false
+  smtp:
+    host: ""
+    port: 587
+    tls: starttls
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
+  sender:
+    address: ""
+    name: Okoscope
+  defaultLocale: en
+  worker:
+    pollMilliseconds: 1000
+    claimSize: 25
+    concurrency: 4
+    leaseSeconds: 60
+    timeoutSeconds: 15
+    maxAttempts: 8
+    retentionDays: 30
+ingress:
+  web:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tlsSecret: ""
+  grpc:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tlsSecret: ""
+certManager:
+  enabled: false
+  clusterIssuer: ""
+imagePullSecrets: []
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+okoscope-agent:
+  enabled: false

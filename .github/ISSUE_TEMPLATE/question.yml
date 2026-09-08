@@ -1,0 +1,48 @@
+name: Support question
+description: Ask for help installing, configuring, or operating Okoscope
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Community support is best effort. Do not include secrets, personal data, or vulnerability details. Report security issues through SECURITY.md.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight
+      options:
+        - label: I reviewed the installation, platform support, and operations documentation.
+          required: true
+        - label: I searched existing issues for an answer.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include relevant commands, results, and redacted configuration.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Okoscope version
+      description: Release, chart version, image digest, or commit.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/kernel, Kubernetes, PostgreSQL, and deployment method as applicable.
+    validations:
+      required: true

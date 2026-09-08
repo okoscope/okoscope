@@ -1,0 +1,5 @@
+The Okoscope agent is being installed in {{ .Release.Namespace }}.
+
+Verify the rollout:
+  kubectl rollout status daemonset/{{ include "okoscope-agent.fullname" . }} -n {{ .Release.Namespace }} --timeout=5m
+  kubectl logs -n {{ .Release.Namespace }} daemonset/{{ include "okoscope-agent.fullname" . }} --tail=100

@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-agent
+  namespace: okoscope
+data:
+  agent.yaml: |
+    apiVersion: okoscope.io/v1alpha1
+    kind: AgentConfiguration
+    server:
+      endpoint: https://okoscope-server.okoscope.svc:4317
+      caFile: /var/run/secrets/okoscope/ca.crt
+    identity:
+      nodeName: ${NODE_NAME}
+      clusterName: local
+    scope:
+      workloads:
+        - applicationCredentialFile: /var/run/secrets/okoscope/applications/payment-api
+          namespace: production
+          kind: Deployment
+          name: payment-api
+          # release: 1.7.2 # Deprecated legacy fallback; Kubernetes image digests take precedence.
+          labels:
+            app.kubernetes.io/name: payment-api
+    observation:
+      processExec: true
+      processExit: true
+      syscalls:
+        - ptrace
+        - setns
+      network:
+        connect: false
+    safety:
+      queueCapacity: 4096
+      batchSize: 256
+      maxEventsPerSecond: 1000

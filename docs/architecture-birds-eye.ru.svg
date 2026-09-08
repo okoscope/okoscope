@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Архитектура Okoscope с высоты птичьего полёта</title>
+  <desc id="desc">Как Okoscope наблюдает выбранные нагрузки Kubernetes с помощью eBPF, передаёт связанные события выполнения на сервер, сохраняет и группирует их, а затем показывает результаты в веб-интерфейсе и уведомлениях.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#071425"/>
+      <stop offset="0.52" stop-color="#06111f"/>
+      <stop offset="1" stop-color="#040c17"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#3458ff"/>
+      <stop offset="0.48" stop-color="#08b9ff"/>
+      <stop offset="1" stop-color="#15f0bd"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#0b1d33" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#051120" stop-opacity="0.98"/>
+    </linearGradient>
+    <radialGradient id="blueGlow">
+      <stop stop-color="#3458ff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#3458ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="mintGlow">
+      <stop stop-color="#15f0bd" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#15f0bd" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#5b8bbf" stroke-opacity="0.08"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity="0.34"/>
+    </filter>
+    <filter id="logoGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#08cbea" flood-opacity="0.38"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M1 1l9 5-9 5" fill="none" stroke="#20dcd4" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .card { fill: url(#card); stroke: #3573a6; stroke-opacity: .48; stroke-width: 1.5; filter: url(#shadow); }
+      .inner { fill: #08182b; stroke: #2279a4; stroke-opacity: .58; stroke-width: 1.4; }
+      .title { fill: #edf5ff; font-size: 24px; font-weight: 760; }
+      .label { fill: #d8e4f2; font-size: 18px; font-weight: 650; }
+      .body { fill: #9eb4ce; font-size: 15px; font-weight: 450; }
+      .eyebrow { fill: #31e6d0; font-size: 13px; font-weight: 800; letter-spacing: 2.2px; }
+      .flow { fill: none; stroke: #20dcd4; stroke-width: 3; stroke-linecap: round; marker-end: url(#arrow); }
+      .flow-muted { fill: none; stroke: #4381ad; stroke-width: 2; stroke-dasharray: 7 7; marker-end: url(#arrow); }
+      .pill { fill: #0a2037; stroke: #2d7fa9; stroke-opacity: .6; }
+      .pill-text { fill: #bcd0e5; font-size: 13px; font-weight: 650; }
+      .number { fill: #06111f; font-size: 13px; font-weight: 850; text-anchor: middle; dominant-baseline: central; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+  <circle cx="130" cy="120" r="380" fill="url(#blueGlow)"/>
+  <circle cx="1480" cy="70" r="390" fill="url(#mintGlow)"/>
+
+  <!-- Brand lockup -->
+  <g transform="translate(64 48)" filter="url(#logoGlow)">
+    <path d="M0 30C9 17 20 11 34 11s25 6 34 19C59 43 48 49 34 49S9 43 0 30Z" fill="none" stroke="url(#brand)" stroke-width="5" stroke-linejoin="round"/>
+    <circle cx="34" cy="30" r="14" fill="#071526" stroke="url(#brand)" stroke-width="5"/>
+    <circle cx="38" cy="26" r="3" fill="#f8fafc"/>
+  </g>
+  <text x="150" y="76" fill="#fff" font-size="25" letter-spacing="2"><tspan font-weight="850">OKO</tspan><tspan font-weight="300">SCOPE</tspan></text>
+  <text x="151" y="97" fill="#8ba8cf" font-size="10" font-weight="700" letter-spacing="3">RUNTIME OBSERVABILITY</text>
+
+  <text x="64" y="169" fill="#edf5ff" font-size="40" font-weight="780">Как работает Okoscope</text>
+  <text x="64" y="202" fill="#9eb4ce" font-size="18">От сигналов ядра до полезных выводов — без изменений в коде приложений.</text>
+
+  <!-- Platform -->
+  <g transform="translate(64 258)">
+    <rect class="card" width="420" height="508" rx="22"/>
+    <text class="eyebrow" x="28" y="39">НАБЛЮДЕНИЕ</text>
+    <text class="title" x="28" y="72">Linux / Kubernetes</text>
+
+    <rect class="inner" x="28" y="100" width="364" height="98" rx="15"/>
+    <circle cx="56" cy="128" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="128">1</text>
+    <text class="label" x="80" y="134">Выбранные нагрузки</text>
+    <text class="body" x="50" y="164" style="font-size:14px">Deployments и контейнеры работают как обычно.</text>
+
+    <rect class="inner" x="28" y="216" width="364" height="112" rx="15"/>
+    <circle cx="56" cy="244" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="244">2</text>
+    <text class="label" x="80" y="250">eBPF-пробы</text>
+    <text class="body" x="50" y="280">Активность процессов, файлов, DNS и сети</text>
+    <text class="body" x="50" y="303">фиксируется на уровне ядра Linux.</text>
+
+    <rect class="inner" x="28" y="346" width="364" height="132" rx="15"/>
+    <circle cx="56" cy="374" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="374">3</text>
+    <text class="label" x="80" y="380">Агент на узле</text>
+    <text class="body" x="50" y="410">Связывает сигналы с объектами Kubernetes,</text>
+    <text class="body" x="50" y="433">фильтрует область и буферизует доставку.</text>
+    <rect class="pill" x="50" y="449" width="190" height="25" rx="12.5"/>
+    <text class="pill-text" x="64" y="467">DaemonSet · на каждом узле</text>
+  </g>
+
+  <!-- Core -->
+  <g transform="translate(590 258)">
+    <rect class="card" width="486" height="508" rx="22"/>
+    <text class="eyebrow" x="28" y="39">АНАЛИЗ</text>
+    <text class="title" x="28" y="72">Управляющий контур Okoscope</text>
+
+    <rect class="inner" x="28" y="100" width="430" height="148" rx="15"/>
+    <circle cx="56" cy="128" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="128">4</text>
+    <text class="label" x="80" y="134">Сервер</text>
+    <text class="body" x="50" y="164">Проверяет потоки приложений, принимает</text>
+    <text class="body" x="50" y="187">runtime-данные и предоставляет HTTP API.</text>
+    <rect class="pill" x="50" y="207" width="174" height="25" rx="12.5"/>
+    <text class="pill-text" x="64" y="225" style="font-size:12px">двунаправленный gRPC</text>
+    <rect class="pill" x="236" y="207" width="92" height="25" rx="12.5"/>
+    <text class="pill-text" x="250" y="225">REST API</text>
+
+    <rect class="inner" x="28" y="268" width="430" height="104" rx="15"/>
+    <circle cx="56" cy="296" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="296">5</text>
+    <text class="label" x="80" y="302">Анализ runtime-поведения</text>
+    <text class="body" x="50" y="332">Отпечатки · группы · сравнение релизов</text>
+    <text class="body" x="50" y="355">Первое появление, повторы и внимание</text>
+
+    <rect class="inner" x="28" y="392" width="430" height="86" rx="15"/>
+    <g transform="translate(50 413)">
+      <ellipse cx="20" cy="7" rx="20" ry="7" fill="#0c3150" stroke="#15cfd0" stroke-opacity=".8"/>
+      <path d="M0 7v28c0 4 9 7 20 7s20-3 20-7V7M0 21c0 4 9 7 20 7s20-3 20-7" fill="none" stroke="#15cfd0" stroke-opacity=".8" stroke-width="1.5"/>
+    </g>
+    <text class="label" x="106" y="432">PostgreSQL</text>
+    <text class="body" x="106" y="457">Надёжное хранение runtime-данных и доставки</text>
+  </g>
+
+  <!-- Outcomes -->
+  <g transform="translate(1182 258)">
+    <rect class="card" width="354" height="508" rx="22"/>
+    <text class="eyebrow" x="28" y="39">ДЕЙСТВИЕ</text>
+    <text class="title" x="28" y="72">Интерфейс оператора</text>
+
+    <rect class="inner" x="28" y="100" width="298" height="148" rx="15"/>
+    <circle cx="56" cy="128" r="12" fill="url(#brand)"/>
+    <text class="number" x="56" y="128">6</text>
+    <text class="label" x="80" y="134">Веб-интерфейс</text>
+    <text class="body" x="50" y="164">Исследуйте runtime-поведение,</text>
+    <text class="body" x="50" y="187">сравнение релизов, инвентарь</text>
+    <text class="body" x="50" y="210">и события, требующие внимания.</text>
+
+    <rect class="inner" x="28" y="268" width="298" height="116" rx="15"/>
+    <path d="M51 297h26v20H51zM55 293h18M58 321h12" fill="none" stroke="url(#brand)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="label" x="92" y="309">Доставка webhook</text>
+    <text class="body" x="50" y="342">Подписанные уведомления о новых</text>
+    <text class="body" x="50" y="365">событиях, повторы и история аудита.</text>
+
+    <rect class="inner" x="28" y="404" width="298" height="74" rx="15"/>
+    <text x="50" y="433" fill="#31e6d0" font-size="15" font-weight="760">В ВАШЕЙ ИНФРАСТРУКТУРЕ</text>
+    <text class="body" x="50" y="458">Ваш кластер · ваши runtime-данные</text>
+  </g>
+
+  <!-- Main directional flow -->
+  <path class="flow" d="M484 492H590"/>
+  <text class="pill-text" x="507" y="475">события</text>
+  <path class="flow" d="M1076 492H1182"/>
+  <text class="pill-text" x="1095" y="475">выводы</text>
+  <path class="flow-muted" d="M1182 697C1134 697 1126 621 1076 621"/>
+  <text class="pill-text" x="1098" y="682">запросы</text>
+
+  <!-- Footer legend -->
+  <g transform="translate(64 824)">
+    <path d="M0 0h44" fill="none" stroke="#20dcd4" stroke-width="3" stroke-linecap="round" marker-end="url(#arrow)"/>
+    <text class="body" x="60" y="6">Поток runtime-данных</text>
+    <path d="M233 0h44" stroke="#4381ad" stroke-width="2" stroke-dasharray="7 7" marker-end="url(#arrow)"/>
+    <text class="body" x="293" y="6">Запросы и управление</text>
+    <text x="1472" y="6" fill="#6683a5" font-size="13" text-anchor="end">okoscope.dev · обзор архитектуры</text>
+  </g>
+</svg>
