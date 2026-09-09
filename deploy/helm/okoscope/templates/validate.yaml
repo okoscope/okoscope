@@ -8,7 +8,12 @@
 {{- if and .Values.ingress.grpc.enabled (not .Values.ingress.grpc.tlsSecret) }}{{ fail "ingress.grpc.tlsSecret is required when enabled" }}{{ end -}}
 {{- $corsOrigins := include "okoscope.corsOrigins" . -}}
 {{- if and $corsOrigins (gt (len (splitList "," $corsOrigins)) 32) }}{{ fail "at most 32 total CORS origins are allowed" }}{{ end -}}
-{{- if and .Values.server.registrationEnabled (not .Values.mail.enabled) }}{{ fail "server.registrationEnabled requires mail.enabled=true" }}{{ end -}}
+{{- $publicSignupEnabled := .Values.server.publicSignupEnabled -}}
+{{- if ne .Values.server.registrationEnabled nil -}}
+{{- $publicSignupEnabled = .Values.server.registrationEnabled -}}
+{{- end -}}
+{{- if and $publicSignupEnabled (eq .Values.server.organizationMode "single") }}{{ fail "public signup requires server.organizationMode=multiple" }}{{ end -}}
+{{- if and $publicSignupEnabled (not .Values.mail.enabled) }}{{ fail "public signup requires mail.enabled=true" }}{{ end -}}
 {{- if .Values.mail.enabled -}}
 {{- if not .Values.mail.publicWebUrl }}{{ fail "mail.publicWebUrl is required when mail.enabled=true" }}{{ end -}}
 {{- if not .Values.mail.smtp.host }}{{ fail "mail.smtp.host is required when mail.enabled=true" }}{{ end -}}

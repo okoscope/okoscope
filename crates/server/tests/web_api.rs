@@ -7,7 +7,7 @@ use server::{
     health,
     notification::NotificationService,
     notification_config::NotificationArgs,
-    web_api::WebApiConfig,
+    web_api::{InvitationConfig, OrganizationMode, WebApiConfig},
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -52,6 +52,37 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
+fn policy_app(config: &WebApiConfig) -> axum::Router {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://localhost/okoscope-policy-test")
+        .unwrap();
+    health::router(pool, true, None, config)
+}
+
+#[tokio::test]
+async fn authentication_policy_reflects_public_signup_and_organization_mode() {
+    for (public_signup, mode, expected_mode) in [
+        (false, OrganizationMode::Single, "single"),
+        (true, OrganizationMode::Multiple, "multiple"),
+    ] {
+        let config = WebApiConfig::default()
+            .with_user_auth(public_signup, true, std::time::Duration::from_secs(3600))
+            .with_access_policy(mode, InvitationConfig::default());
+        let response = policy_app(&config)
+            .oneshot(request("/api/v1/auth/policy", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(response.headers().contains_key("x-request-id"));
+        let policy = json(response).await;
+        assert_eq!(policy["public_signup_enabled"], public_signup);
+        assert_eq!(policy["invitation_registration_enabled"], true);
+        assert_eq!(policy["organization_mode"], expected_mode);
+        assert_eq!(policy.as_object().unwrap().len(), 3);
+    }
+}
+
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx::PgPool) {
@@ -84,7 +115,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
     assert_eq!(build.headers()[header::CACHE_CONTROL], "no-store");
     let build = json(build).await;
     assert_eq!(build["api_version"], "v1");
-    assert_eq!(build["required_database_migration"], 26);
+    assert_eq!(build["required_database_migration"], 27);
     assert!(build.get("database_url").is_none());
 
     let notification_health = app

@@ -217,9 +217,18 @@ For browser entry points not represented by that ingress (for example an externa
 reverse proxy or a separate local UI), list each exact `http://` or `https://`
 origin under `server.corsOrigins`; do not include paths or wildcards.
 
-Ordinary registration is disabled by default, including when Web ingress is enabled. For a public service where users create their own Organizations, first configure and test transactional email, an HTTPS `mail.publicWebUrl`, its SMTP credential Secret, and sender DNS as described in the [production guide](self-hosted-deployment.md#transactional-email). Then enable both `mail.enabled=true` and `server.registrationEnabled=true`. On an empty database, enabled public registration takes precedence over the private first-owner setup screen. Registration creates an unverified owner and no session; the user must explicitly confirm the emailed link and sign in. Organization creation sends no separate email.
+Public signup is disabled by default, including when Web ingress is enabled. Setup
+and invitation registration remain available. For a public service where users
+create their own Organizations, first choose `server.organizationMode: multiple`,
+configure and test transactional email, an HTTPS `mail.publicWebUrl`, its SMTP
+credential Secret, and sender DNS as described in the [production guide](self-hosted-deployment.md#transactional-email).
+Then enable `mail.enabled=true` and `server.publicSignupEnabled=true`. Public signup
+creates an unverified user, a new Organization, and its owner membership; it never
+grants `super_admin`. The user must confirm the emailed link and sign in.
 
-For a private installation with registration disabled, retrieve the one-time setup authorization from its Kubernetes Secret, paste it into `/setup`, and create the first owner, Organization, and explicitly named Project:
+For a private installation, retrieve the one-time setup authorization from its
+Kubernetes Secret, paste it into `/setup`, and create the first verified personal
+super-administrator with email, password, display name, and locale:
 
 ```bash
 kubectl get secret -n okoscope-system okoscope-setup \
@@ -227,12 +236,27 @@ kubectl get secret -n okoscope-system okoscope-setup \
 printf '\n'
 ```
 
-Helm never prints the token. The Secret is preserved across upgrades, and setup permanently closes as soon as any owner exists. If the token is lost, use the existing `bootstrap-owner` operator command; setup never recovers or returns plaintext authorization. Application credentials are likewise shown only once. Connection readiness uses a 30-second compatible-agent heartbeat and becomes `stale` after five minutes; older agents remain usable but expose only authentication/event evidence.
+Helm never prints the token. Setup creates no Organization, Project, or tenant
+membership and permanently closes as soon as an active super-administrator exists.
+The new super-administrator next creates an Organization with a pending first-owner
+invitation, or explicitly makes their own account its owner. An owner can then
+create and operate Projects and Applications without inviting anyone else or
+creating Project-membership rows. Configure mail before sending an invitation;
+without usable SMTP and outbox encryption, issuance fails closed with
+`mail_unavailable` and creates no pending grant.
+
+If every personal super-administrator becomes inaccessible, use the audited
+operator recovery procedure in the [access-control operations guide](access-control.md#break-glass-recovery).
+Do not enable public signup or edit PostgreSQL as a recovery shortcut. Application
+credentials are likewise shown only once. Connection readiness uses a 30-second
+compatible-agent heartbeat and becomes `stale` after five minutes; older agents
+remain usable but expose only authentication/event evidence.
 
 An externally managed setup Secret may also contain an RFC 3339 expiry under
-`setup-token-expires-at` (or `setupAuthorization.expiresAtKey`). Once expired, an ownerless
+`setup-token-expires-at` (or `setupAuthorization.expiresAtKey`). Once expired, a platform-admin-less
 installation reports `setup_unavailable`; rotate the external token and expiry to recover.
-Chart-generated tokens intentionally have no expiry and remain valid until the first owner claim.
+Chart-generated tokens intentionally have no expiry and remain valid until the first
+super-administrator claim.
 
 
 See [production installation and operations](self-hosted-deployment.md) for ingress-nginx and Traefik TLS examples, external internal Secrets, upgrades, rollback, uninstall, private registries, notifications, and Kustomize transition.

@@ -10,7 +10,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    auth::{UserPrincipal, UserSessionAuthenticator},
+    access_control::resolve_project_access,
+    auth::{IdentityPrincipal, UserSessionAuthenticator},
     web_api::RequestId,
 };
 
@@ -249,12 +250,29 @@ fn idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
 async fn principal(
     headers: &HeaderMap,
     state: &NotificationApiState,
-) -> Result<UserPrincipal, ApiError> {
+) -> Result<IdentityPrincipal, ApiError> {
     state
         .authenticator
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(ApiError::Unauthorized)
+}
+
+async fn project_organization(
+    state: &NotificationApiState,
+    principal: IdentityPrincipal,
+    project_id: Uuid,
+) -> Result<Uuid, ApiError> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.service.pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    resolve_project_access(&state.service.pool, principal, organization_id, project_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(organization_id)
 }
 
 async fn validate_target(value: &str, policy: &WebhookPolicy) -> Result<(), ApiError> {
@@ -271,18 +289,9 @@ async fn list(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<Vec<WebhookDestination>>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     Ok(Json(
-        state
-            .destinations
-            .list(principal.organization_id, project_id)
-            .await?,
+        state.destinations.list(organization_id, project_id).await?,
     ))
 }
 
@@ -292,9 +301,10 @@ async fn get_destination(
     Path((project_id, destination_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<WebhookDestination>, ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     state
         .destinations
-        .get(principal.organization_id, project_id, destination_id)
+        .get(organization_id, project_id, destination_id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)
@@ -307,11 +317,12 @@ async fn create(
     Json(input): Json<CreateDestination>,
 ) -> Result<(StatusCode, Json<DestinationWithSecret>), ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     validate_target(&input.url, &state.policy).await?;
     let (destination, secret) = state
         .destinations
         .create(
-            principal.organization_id,
+            organization_id,
             project_id,
             &input.name,
             &input.url,
@@ -334,13 +345,14 @@ async fn update(
     Json(input): Json<UpdateDestination>,
 ) -> Result<Json<WebhookDestination>, ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     if let Some(url) = &input.url {
         validate_target(url, &state.policy).await?;
     }
     let destination = state
         .destinations
         .update(
-            principal.organization_id,
+            organization_id,
             project_id,
             destination_id,
             DestinationUpdate {
@@ -361,10 +373,11 @@ async fn disable(
     Path((project_id, destination_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<WebhookDestination>, ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     Ok(Json(
         state
             .destinations
-            .disable(principal.organization_id, project_id, destination_id)
+            .disable(organization_id, project_id, destination_id)
             .await?,
     ))
 }
@@ -375,9 +388,10 @@ async fn rotate_secret(
     Path((project_id, destination_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DestinationWithSecret>, ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let (destination, secret) = state
         .destinations
-        .rotate_secret(principal.organization_id, project_id, destination_id)
+        .rotate_secret(organization_id, project_id, destination_id)
         .await?;
     Ok(Json(DestinationWithSecret {
         destination,
@@ -391,18 +405,14 @@ async fn test(
     Path((project_id, destination_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeliverySummary>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    test_destination(
-        &state.service,
-        principal.organization_id,
-        project_id,
-        destination_id,
-    )
-    .await
-    .map(Json)
-    .map_err(|error| {
-        tracing::warn!(error=%error, "test webhook delivery failed");
-        ApiError::Invalid("test delivery could not be completed".into())
-    })
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    test_destination(&state.service, organization_id, project_id, destination_id)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            tracing::warn!(error=%error, "test webhook delivery failed");
+            ApiError::Invalid("test delivery could not be completed".into())
+        })
 }
 
 async fn list_delivery_history(
@@ -412,20 +422,9 @@ async fn list_delivery_history(
     axum::extract::Query(filter): axum::extract::Query<DeliveryFilter>,
 ) -> Result<Json<DeliveryList>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
-    let (items, next_cursor) = list_deliveries(
-        &state.service.pool,
-        principal.organization_id,
-        project_id,
-        &filter,
-    )
-    .await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    let (items, next_cursor) =
+        list_deliveries(&state.service.pool, organization_id, project_id, &filter).await?;
     Ok(Json(DeliveryList { items, next_cursor }))
 }
 
@@ -435,15 +434,8 @@ async fn notification_health(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<NotificationHealthResponse>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
-    let snapshot =
-        load_project_snapshot(&state.service.pool, principal.organization_id, project_id).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    let snapshot = load_project_snapshot(&state.service.pool, organization_id, project_id).await?;
     Ok(Json(NotificationHealthResponse::from_snapshot(
         state.service.config.enabled,
         crate::metrics::notification_worker_is_draining(),
@@ -457,9 +449,10 @@ async fn get_delivery_history(
     Path((project_id, delivery_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeliveryDetail>, ApiError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     delivery_detail(
         &state.service.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         delivery_id,
     )
@@ -475,19 +468,13 @@ async fn retry_delivery(
     Path((project_id, delivery_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeliveryRecoveryResult>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let key = idempotency_key(&headers)?;
     state
         .service
         .recovery
         .retry_delivery(
-            principal.organization_id,
+            organization_id,
             project_id,
             delivery_id,
             RecoveryActor {
@@ -508,19 +495,13 @@ async fn cancel_delivery(
     Path((project_id, delivery_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeliveryRecoveryResult>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let key = idempotency_key(&headers)?;
     state
         .service
         .recovery
         .cancel_delivery(
-            principal.organization_id,
+            organization_id,
             project_id,
             delivery_id,
             RecoveryActor {
@@ -542,19 +523,13 @@ async fn bulk_retry_deliveries(
     Json(filter): Json<BulkRetryFilter>,
 ) -> Result<Json<BulkRecoveryResult>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let key = idempotency_key(&headers)?;
     state
         .service
         .recovery
         .bulk_retry(
-            principal.organization_id,
+            organization_id,
             project_id,
             &filter,
             RecoveryActor {
@@ -575,17 +550,11 @@ async fn list_recovery_operations(
     axum::extract::Query(filter): axum::extract::Query<RecoveryOperationFilter>,
 ) -> Result<Json<RecoveryOperationList>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let (items, next_cursor) = state
         .service
         .recovery
-        .list_operations(principal.organization_id, project_id, &filter)
+        .list_operations(organization_id, project_id, &filter)
         .await?;
     Ok(Json(RecoveryOperationList { items, next_cursor }))
 }
@@ -596,17 +565,11 @@ async fn get_recovery_operation(
     Path((project_id, operation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<RecoveryOperationDetail>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    if !state
-        .destinations
-        .project_owned(principal.organization_id, project_id)
-        .await?
-    {
-        return Err(ApiError::NotFound);
-    }
+    let organization_id = project_organization(&state, principal, project_id).await?;
     state
         .service
         .recovery
-        .operation_detail(principal.organization_id, project_id, operation_id)
+        .operation_detail(organization_id, project_id, operation_id)
         .await?
         .map(Json)
         .ok_or(ApiError::NotFound)

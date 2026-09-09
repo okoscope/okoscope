@@ -20,12 +20,13 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::{
+    access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     application_credentials,
     auth::{
-        OrganizationRole, UserPrincipal, UserSessionAuthenticator, hash_password, normalize_email,
-        validate_password,
+        UserPrincipal, UserSessionAuthenticator, hash_password, normalize_email, validate_password,
     },
-    user_auth::{insert_session, session_cookie, valid_name, valid_slug},
+    transactional_mail::Locale,
+    user_auth::{insert_identity_session, session_cookie, valid_name},
     web_api::{RequestId, WebApiConfig},
 };
 
@@ -84,7 +85,6 @@ impl AgentInstallationMetadata {
 struct OnboardingState {
     pool: PgPool,
     auth: UserSessionAuthenticator,
-    registration_enabled: bool,
     setup_digest: Option<[u8; 32]>,
     setup_expires_at: Option<DateTime<Utc>>,
     secure_cookie: bool,
@@ -98,7 +98,6 @@ pub fn router(pool: PgPool, config: &WebApiConfig) -> Router {
     let state = OnboardingState {
         auth: UserSessionAuthenticator::new(pool.clone()),
         pool,
-        registration_enabled: config.registration_enabled,
         setup_digest: config.setup_token_digest,
         setup_expires_at: config.setup_token_expires_at,
         secure_cookie: config.secure_session_cookie,
@@ -123,26 +122,26 @@ struct SetupStatus {
     state: &'static str,
 }
 
-async fn owner_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organization_memberships WHERE role='owner')")
+async fn super_admin_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL)")
         .fetch_one(pool)
         .await
 }
 
 async fn setup_status(State(state): State<OnboardingState>) -> Result<Json<SetupStatus>, ApiError> {
-    let exists = owner_exists(&state.pool)
+    let exists = super_admin_exists(&state.pool)
         .await
         .map_err(ApiError::database)?;
     let expired = state
         .setup_expires_at
         .is_some_and(|value| value <= Utc::now());
     Ok(Json(SetupStatus {
-        state: if exists || state.registration_enabled {
+        state: if exists {
             "ready"
         } else if expired {
             "setup_unavailable"
         } else {
-            "owner_required"
+            "platform_admin_required"
         },
     }))
 }
@@ -153,18 +152,16 @@ struct SetupRequest {
     setup_token: String,
     email: String,
     password: String,
-    organization_slug: String,
-    organization_name: String,
-    project_slug: String,
-    project_name: String,
+    display_name: String,
+    locale: Locale,
 }
 
 #[derive(Serialize)]
 struct SetupResponse {
     user_id: Uuid,
-    organization_id: Uuid,
-    project_id: Uuid,
-    role: OrganizationRole,
+    platform_role: &'static str,
+    active_organization_id: Option<Uuid>,
+    privileged_until: DateTime<Utc>,
 }
 
 fn validate_setup(
@@ -174,14 +171,8 @@ fn validate_setup(
 ) -> Result<String, ApiError> {
     let email = normalize_email(&input.email).map_err(ApiError::validation)?;
     validate_password(&input.password).map_err(ApiError::validation)?;
-    if !valid_slug(&input.organization_slug)
-        || !valid_name(&input.organization_name)
-        || !valid_slug(&input.project_slug)
-        || !valid_name(&input.project_name)
-    {
-        return Err(ApiError::validation(
-            "organization or Project name is invalid",
-        ));
+    if !valid_name(&input.display_name) {
+        return Err(ApiError::validation("display name is invalid"));
     }
     let candidate: [u8; 32] = Sha256::digest(input.setup_token.as_bytes()).into();
     if expires_at.is_some_and(|value| value <= Utc::now())
@@ -213,43 +204,46 @@ async fn complete_setup(
         .execute(&mut *tx)
         .await
         .map_err(ApiError::database)?;
-    let has_owner: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM organization_memberships WHERE role='owner')",
+    let has_super_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL)",
     )
     .fetch_one(&mut *tx)
     .await
     .map_err(ApiError::database)?;
-    if has_owner {
+    if has_super_admin {
         return Err(ApiError::conflict(
             "setup_already_completed",
             "setup is already complete",
         ));
     }
     let user_id = Uuid::new_v4();
-    let organization_id = Uuid::new_v4();
-    let project_id = Uuid::new_v4();
     insert_setup_rows(
         &mut tx,
         &input,
         &email,
         &password_hash,
         user_id,
-        organization_id,
-        project_id,
+        &request_id,
     )
     .await?;
-    let (_, token) = insert_session(&mut tx, user_id, organization_id, state.session_lifetime)
-        .await
-        .map_err(ApiError::database)?;
+    let privileged_until = Utc::now() + chrono::Duration::minutes(15);
+    let (_, token) = insert_identity_session(
+        &mut tx,
+        user_id,
+        Some(privileged_until),
+        state.session_lifetime,
+    )
+    .await
+    .map_err(ApiError::database)?;
     tx.commit().await.map_err(ApiError::database)?;
-    tracing::info!(request_id=%request_id.0, "first-owner setup completed");
+    tracing::info!(request_id=%request_id.0, "first super administrator setup completed");
     let mut response = (
         StatusCode::CREATED,
         Json(SetupResponse {
             user_id,
-            organization_id,
-            project_id,
-            role: OrganizationRole::Owner,
+            platform_role: "super_admin",
+            active_organization_id: None,
+            privileged_until,
         }),
     )
         .into_response();
@@ -287,41 +281,40 @@ async fn insert_setup_rows(
     email: &str,
     password_hash: &str,
     user_id: Uuid,
-    organization_id: Uuid,
-    project_id: Uuid,
+    request_id: &RequestId,
 ) -> Result<(), ApiError> {
     sqlx::query(
-        "INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,$2,$3,now())",
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name,preferred_locale) VALUES($1,$2,$3,now(),$4,$5)",
     )
     .bind(user_id)
     .bind(email)
     .bind(password_hash)
+    .bind(&input.display_name)
+    .bind(input.locale.as_str())
     .execute(&mut **tx)
     .await
     .map_err(ApiError::database)?;
-    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)")
-        .bind(organization_id)
-        .bind(&input.organization_slug)
-        .bind(&input.organization_name)
+    sqlx::query("INSERT INTO platform_role_assignments(user_id,role) VALUES($1,'super_admin')")
+        .bind(user_id)
         .execute(&mut **tx)
         .await
         .map_err(ApiError::database)?;
-    sqlx::query(
-        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+    write_access_audit(
+        tx,
+        AccessAuditEvent {
+            actor: AccessAuditActor::User(user_id),
+            action: "setup.completed",
+            organization_id: None,
+            project_id: None,
+            target_user_id: Some(user_id),
+            invitation_id: None,
+            previous_role: None,
+            new_role: Some("super_admin"),
+            request_id: Some(&request_id.0),
+        },
     )
-    .bind(organization_id)
-    .bind(user_id)
-    .execute(&mut **tx)
     .await
     .map_err(ApiError::database)?;
-    sqlx::query("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,$3,$4)")
-        .bind(project_id)
-        .bind(organization_id)
-        .bind(&input.project_slug)
-        .bind(&input.project_name)
-        .execute(&mut **tx)
-        .await
-        .map_err(ApiError::database)?;
     Ok(())
 }
 
@@ -880,8 +873,8 @@ impl ApiError {
             message: "internal server error",
         }
     }
-    fn database(error: impl std::fmt::Display) -> Self {
-        tracing::error!(%error,"onboarding database error");
+    fn database(_error: impl std::fmt::Display) -> Self {
+        tracing::error!("onboarding database error");
         Self::internal()
     }
 }

@@ -402,6 +402,8 @@ async fn organization_response_and_query_plan_remain_bounded(pool: sqlx::PgPool)
     assert_eq!(body["priority_items"].as_array().unwrap().len(), 5);
     assert_eq!(body["recommendations"].as_array().unwrap().len(), 4);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    assert_eq!(server::attention::ORGANIZATION_ATTENTION_QUERY_BUDGET, 9);
-    assert_eq!(server::attention::APPLICATION_ATTENTION_QUERY_BUDGET, 9);
+    // Project membership is resolved before every paginated Organization aggregation.
+    assert_eq!(server::attention::ORGANIZATION_ATTENTION_QUERY_BUDGET, 10);
+    // Project-addressed summaries resolve their effective access before reading data.
+    assert_eq!(server::attention::APPLICATION_ATTENTION_QUERY_BUDGET, 10);
 }

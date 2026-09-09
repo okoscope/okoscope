@@ -1,7 +1,7 @@
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -24,12 +24,11 @@ use crate::{
 #[derive(Clone, Debug)]
 struct ProvisioningState {
     pool: PgPool,
-    admin: Option<AdminAuthenticator>,
     tenant: UserSessionAuthenticator,
     mail: MailConfig,
 }
 
-pub fn router(pool: PgPool, admin: Option<AdminAuthenticator>, mail: MailConfig) -> Router {
+pub fn router(pool: PgPool, _admin: Option<AdminAuthenticator>, mail: MailConfig) -> Router {
     Router::new()
         .route("/api/v1/organizations", post(create_organization))
         .route("/api/v1/admin/organizations", get(list_organizations))
@@ -61,17 +60,24 @@ pub fn router(pool: PgPool, admin: Option<AdminAuthenticator>, mail: MailConfig)
             "/api/v1/projects/{project_id}/applications/{application_id}/credentials/{credential_id}",
             axum::routing::delete(revoke_application_credential),
         )
+        .route(
+            "/api/v1/platform/projects/{project_id}/applications/{application_id}/credentials",
+            axum::routing::get(list_application_credentials).post(issue_application_credential),
+        )
+        .route(
+            "/api/v1/platform/projects/{project_id}/applications/{application_id}/credentials/{credential_id}",
+            axum::routing::delete(revoke_application_credential),
+        )
         .with_state(ProvisioningState {
             tenant: UserSessionAuthenticator::new(pool.clone()),
             pool,
-            admin,
             mail,
         })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProvisioningPrincipal {
-    SystemAdmin,
+    PlatformSuperAdmin,
     Tenant(UserPrincipal),
 }
 
@@ -85,16 +91,6 @@ struct ProvisioningError {
 }
 
 impl ProvisioningError {
-    fn unauthorized(request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: "invalid_admin_credential",
-            message: "invalid or missing admin bearer credential".into(),
-            request_id: request_id.clone(),
-            fields: None,
-        }
-    }
-
     fn invalid_credential(request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -261,53 +257,44 @@ struct ApplicationPage {
     items: Vec<ApplicationResponse>,
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-}
-
-fn authorize_system_admin(
-    state: &ProvisioningState,
-    headers: &HeaderMap,
-    request_id: &RequestId,
-) -> Result<(), ProvisioningError> {
-    let presented = bearer(headers);
-    if state
-        .admin
-        .as_ref()
-        .zip(presented)
-        .is_some_and(|(admin, credential)| admin.authenticate(credential))
-    {
-        Ok(())
-    } else {
-        Err(ProvisioningError::unauthorized(request_id))
-    }
-}
-
 async fn resolve_principal(
     state: &ProvisioningState,
     headers: &HeaderMap,
     request_id: &RequestId,
 ) -> Result<ProvisioningPrincipal, ProvisioningError> {
-    if let Some(presented) = bearer(headers)
-        && state
-            .admin
-            .as_ref()
-            .is_some_and(|admin| admin.authenticate(presented))
-    {
-        return Ok(ProvisioningPrincipal::SystemAdmin);
-    }
     let presented =
         session_token(headers).ok_or_else(|| ProvisioningError::invalid_credential(request_id))?;
-    state
+    let principal = state
         .tenant
-        .authenticate(presented)
+        .authenticate_identity(presented)
         .await
         .map_err(|error| ProvisioningError::database(&error, "credential_conflict", request_id))?
-        .map(ProvisioningPrincipal::Tenant)
-        .ok_or_else(|| ProvisioningError::invalid_credential(request_id))
+        .ok_or_else(|| ProvisioningError::invalid_credential(request_id))?;
+    if principal.is_super_admin {
+        Ok(ProvisioningPrincipal::PlatformSuperAdmin)
+    } else {
+        principal
+            .tenant()
+            .map(ProvisioningPrincipal::Tenant)
+            .ok_or_else(|| ProvisioningError::invalid_credential(request_id))
+    }
+}
+
+async fn authorize_platform_admin(
+    state: &ProvisioningState,
+    headers: &HeaderMap,
+    request_id: &RequestId,
+) -> Result<(), ProvisioningError> {
+    match resolve_principal(state, headers, request_id).await? {
+        ProvisioningPrincipal::PlatformSuperAdmin => Ok(()),
+        ProvisioningPrincipal::Tenant(_) => Err(ProvisioningError {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden",
+            message: "super administrator role is required".into(),
+            request_id: request_id.clone(),
+            fields: None,
+        }),
+    }
 }
 
 fn authorize_organization(
@@ -317,7 +304,7 @@ fn authorize_organization(
     request_id: &RequestId,
 ) -> Result<(), ProvisioningError> {
     match principal {
-        ProvisioningPrincipal::SystemAdmin => Ok(()),
+        ProvisioningPrincipal::PlatformSuperAdmin => Ok(()),
         ProvisioningPrincipal::Tenant(tenant)
             if tenant.organization_id == organization_id && tenant.role.is_owner() =>
         {
@@ -476,7 +463,7 @@ async fn list_organizations(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<OrganizationPage>, ProvisioningError> {
-    authorize_system_admin(&state, &headers, &request_id)?;
+    authorize_platform_admin(&state, &headers, &request_id).await?;
     let items = sqlx::query_as(
         "SELECT id,slug,name,created_at FROM organizations ORDER BY created_at,id LIMIT 200",
     )
@@ -494,7 +481,7 @@ async fn list_projects(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ProjectPage>, ProvisioningError> {
-    authorize_system_admin(&state, &headers, &request_id)?;
+    authorize_platform_admin(&state, &headers, &request_id).await?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)")
         .bind(organization_id)
         .fetch_one(&state.pool)
@@ -524,7 +511,7 @@ async fn list_applications(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationPage>, ProvisioningError> {
-    authorize_system_admin(&state, &headers, &request_id)?;
+    authorize_platform_admin(&state, &headers, &request_id).await?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1)")
         .bind(project_id)
         .fetch_one(&state.pool)
@@ -556,7 +543,7 @@ async fn get_application(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationResponse>, ProvisioningError> {
-    authorize_system_admin(&state, &headers, &request_id)?;
+    authorize_platform_admin(&state, &headers, &request_id).await?;
     let application = sqlx::query_as(
         "SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 AND id=$2",
     )
@@ -577,7 +564,7 @@ async fn create_organization(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<CreateNamedResource>,
 ) -> Result<(StatusCode, Json<OrganizationResponse>), ProvisioningError> {
-    authorize_system_admin(&state, &headers, &request_id)?;
+    authorize_platform_admin(&state, &headers, &request_id).await?;
     validate_slug(&input.slug, &request_id)?;
     validate_name(&input.name, &request_id)?;
     let mut tx = state.pool.begin().await.map_err(|error| {

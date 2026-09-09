@@ -183,6 +183,109 @@ async fn user_authorisation_schema_replaces_legacy_credentials(pool: sqlx::PgPoo
 
 #[sqlx::test(migrator = "MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn access_control_schema_preserves_visibility_and_rejects_cross_tenant_grants(
+    pool: sqlx::PgPool,
+) {
+    let first = bootstrap(&pool, &config("access-first")).await.unwrap();
+    let second = bootstrap(&pool, &config("access-second")).await.unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,'member@example.com',$2,now(),'Member')")
+        .bind(user_id).bind("x".repeat(32)).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'member')",
+    )
+    .bind(first.organization_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) SELECT p.organization_id,p.id,$1,'member' FROM projects p JOIN organization_memberships m ON m.organization_id=p.organization_id AND m.user_id=$1 ON CONFLICT(project_id,user_id) DO NOTHING")
+        .bind(user_id).execute(&pool).await.unwrap();
+    let visible: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM project_memberships WHERE project_id=$1 AND user_id=$2)",
+    )
+    .bind(first.project_id)
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        visible,
+        "upgrade backfill must preserve existing Project visibility"
+    );
+    let cross_tenant = sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
+        .bind(second.organization_id).bind(second.project_id).bind(user_id).execute(&pool).await;
+    assert!(
+        cross_tenant.is_err(),
+        "Project memberships must require same-tenant Organization membership"
+    );
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn access_control_schema_protects_last_super_admin_and_owner(pool: sqlx::PgPool) {
+    let ids = bootstrap(&pool, &config("last-authority")).await.unwrap();
+    let first = insert_verified_user(&pool, "first-admin@example.com").await;
+    sqlx::query("INSERT INTO platform_role_assignments(user_id,role) VALUES($1,'super_admin')")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revoke =
+        sqlx::query("UPDATE platform_role_assignments SET revoked_at=now() WHERE user_id=$1")
+            .bind(first)
+            .execute(&pool)
+            .await;
+    assert!(
+        revoke.is_err(),
+        "last active super administrator must be protected"
+    );
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+    )
+    .bind(ids.organization_id)
+    .bind(first)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let demote = sqlx::query(
+        "UPDATE organization_memberships SET role='member' WHERE organization_id=$1 AND user_id=$2",
+    )
+    .bind(ids.organization_id)
+    .bind(first)
+    .execute(&pool)
+    .await;
+    assert!(
+        demote.is_err(),
+        "last active Organization owner must be protected"
+    );
+    let disable = sqlx::query("UPDATE users SET disabled_at=now() WHERE id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await;
+    assert!(
+        disable.is_err(),
+        "last active platform and Organization authority must not be disabled"
+    );
+    let delete = sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await;
+    assert!(
+        delete.is_err(),
+        "last active platform and Organization authority must not be deleted"
+    );
+}
+
+async fn insert_verified_user(pool: &sqlx::PgPool, email: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,$2,$3,now(),'Administrator')")
+        .bind(id).bind(email).bind("x".repeat(32)).execute(pool).await.unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn inventory_schema_enforces_identity_tenant_scope_and_indexes(pool: sqlx::PgPool) {
     let first = bootstrap(&pool, &config("inventory-first")).await.unwrap();
     let second = bootstrap(&pool, &config("inventory-second")).await.unwrap();

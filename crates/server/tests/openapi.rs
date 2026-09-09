@@ -294,11 +294,150 @@ const LIVE_OPERATIONS: &[(&str, &str)] = &[
         "get",
     ),
     ("/api/v1/projects/{project_id}/notification-health", "get"),
+    ("/api/v1/auth/policy", "get"),
+    ("/api/v1/auth/organization-selections", "post"),
+    ("/api/v1/auth/privilege-confirmations", "post"),
+    ("/api/v1/invitations/inspections", "post"),
+    ("/api/v1/invitations/acceptances/new-user", "post"),
+    ("/api/v1/invitations/acceptances/existing-user", "post"),
+    ("/api/v1/platform/users", "get"),
+    ("/api/v1/platform/users/{user_id}/status", "patch"),
+    ("/api/v1/platform/users/{user_id}/roles/super-admin", "put"),
+    (
+        "/api/v1/platform/users/{user_id}/roles/super-admin",
+        "delete",
+    ),
+    ("/api/v1/platform/organizations", "get"),
+    ("/api/v1/platform/organizations", "post"),
+    ("/api/v1/platform/organizations/{organization_id}", "get"),
+    ("/api/v1/platform/organizations/{organization_id}", "delete"),
+    (
+        "/api/v1/platform/organizations/{organization_id}/projects",
+        "get",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/projects",
+        "post",
+    ),
+    ("/api/v1/platform/projects/{project_id}/applications", "get"),
+    (
+        "/api/v1/platform/projects/{project_id}/applications",
+        "post",
+    ),
+    ("/api/v1/platform/invitations", "get"),
+    ("/api/v1/platform/audit", "get"),
+    ("/api/v1/organizations/{organization_id}/members", "get"),
+    (
+        "/api/v1/organizations/{organization_id}/members/{user_id}",
+        "patch",
+    ),
+    (
+        "/api/v1/organizations/{organization_id}/members/{user_id}",
+        "delete",
+    ),
+    ("/api/v1/organizations/{organization_id}/invitations", "get"),
+    (
+        "/api/v1/organizations/{organization_id}/invitations",
+        "post",
+    ),
+    (
+        "/api/v1/organizations/{organization_id}/invitations/{invitation_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/organizations/{organization_id}/invitations/{invitation_id}/resend",
+        "post",
+    ),
+    ("/api/v1/organizations/{organization_id}/audit", "get"),
+    ("/api/v1/projects/{project_id}/members", "get"),
+    ("/api/v1/projects/{project_id}/members", "post"),
+    ("/api/v1/projects/{project_id}/members/{user_id}", "patch"),
+    ("/api/v1/projects/{project_id}/members/{user_id}", "delete"),
+    ("/api/v1/projects/{project_id}/invitations", "get"),
+    ("/api/v1/projects/{project_id}/invitations", "post"),
+    (
+        "/api/v1/projects/{project_id}/invitations/{invitation_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/projects/{project_id}/invitations/{invitation_id}/resend",
+        "post",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/members",
+        "get",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/members/{user_id}",
+        "patch",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/members/{user_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/invitations",
+        "get",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/invitations",
+        "post",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/invitations/{invitation_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/platform/organizations/{organization_id}/invitations/{invitation_id}/resend",
+        "post",
+    ),
+    ("/api/v1/platform/projects/{project_id}/members", "get"),
+    ("/api/v1/platform/projects/{project_id}/members", "post"),
+    (
+        "/api/v1/platform/projects/{project_id}/members/{user_id}",
+        "patch",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/members/{user_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/eligible-organization-members",
+        "get",
+    ),
+    (
+        "/api/v1/projects/{project_id}/eligible-organization-members",
+        "get",
+    ),
+    ("/api/v1/platform/projects/{project_id}/invitations", "get"),
+    ("/api/v1/platform/projects/{project_id}/invitations", "post"),
+    (
+        "/api/v1/platform/projects/{project_id}/invitations/{invitation_id}",
+        "delete",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/invitations/{invitation_id}/resend",
+        "post",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/applications/{application_id}/credentials",
+        "get",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/applications/{application_id}/credentials",
+        "post",
+    ),
+    (
+        "/api/v1/platform/projects/{project_id}/applications/{application_id}/credentials/{credential_id}",
+        "delete",
+    ),
 ];
 
 #[test]
 fn openapi_is_valid_unique_secure_and_matches_router_inventory() {
     let source = include_str!("../../../openapi/okoscope-v1.yaml");
+    assert_unique_component_keys(source, "parameters", "headers");
+    assert_unique_component_keys(source, "schemas", "requestBodies");
     let document: serde_json::Value = serde_yaml::from_str(source).expect("valid OpenAPI YAML");
     assert_eq!(document["openapi"], "3.1.0");
     assert_all_local_refs_resolve(&document, &document);
@@ -331,6 +470,9 @@ fn openapi_is_valid_unique_secure_and_matches_router_inventory() {
                 | "/api/v1/auth/password-resets"
                 | "/api/v1/setup/status"
                 | "/api/v1/setup/complete"
+                | "/api/v1/auth/policy"
+                | "/api/v1/invitations/inspections"
+                | "/api/v1/invitations/acceptances/new-user"
         ) {
             assert_eq!(operation["security"], serde_json::json!([]));
         } else if path == "/api/v1/organizations/{organization_id}/projects"
@@ -338,15 +480,12 @@ fn openapi_is_valid_unique_secure_and_matches_router_inventory() {
             || path.starts_with(
                 "/api/v1/projects/{project_id}/applications/{application_id}/credentials",
             )
+            || matches!(path, "/api/v1/organizations")
+            || path.starts_with("/api/v1/admin/")
         {
             assert_eq!(
                 operation["security"],
-                serde_json::json!([{ "sessionAuth": [] }, { "adminAuth": [] }])
-            );
-        } else if matches!(path, "/api/v1/organizations") || path.starts_with("/api/v1/admin/") {
-            assert_eq!(
-                operation["security"],
-                serde_json::json!([{ "adminAuth": [] }])
+                serde_json::json!([{ "sessionAuth": [] }])
             );
         } else {
             assert!(
@@ -394,6 +533,30 @@ fn openapi_is_valid_unique_secure_and_matches_router_inventory() {
     assert_auth_mail_contract(&document);
 }
 
+fn assert_unique_component_keys(source: &str, start: &str, end: &str) {
+    let start_marker = format!("  {start}:");
+    let end_marker = format!("  {end}:");
+    let mut active = false;
+    let mut keys = HashSet::new();
+    for line in source.lines() {
+        if line == start_marker {
+            active = true;
+            continue;
+        }
+        if active && line == end_marker {
+            break;
+        }
+        if active && line.starts_with("    ") && !line.starts_with("      ") {
+            let key = line
+                .trim()
+                .split_once(':')
+                .map_or(line.trim(), |pair| pair.0);
+            assert!(keys.insert(key), "duplicate components.{start} key {key}");
+        }
+    }
+    assert!(active, "components.{start} section must exist");
+}
+
 fn assert_auth_mail_contract(document: &serde_json::Value) {
     let schemas = &document["components"]["schemas"];
     for (schema, field) in [
@@ -403,6 +566,9 @@ fn assert_auth_mail_contract(document: &serde_json::Value) {
         ("PasswordChangeRequest", "current_password"),
         ("PasswordChangeRequest", "new_password"),
         ("RegisterRequest", "password"),
+        ("InvitationTokenRequest", "token"),
+        ("NewUserInvitationAcceptanceRequest", "token"),
+        ("NewUserInvitationAcceptanceRequest", "password"),
     ] {
         assert_eq!(schemas[schema]["properties"][field]["writeOnly"], true);
     }
@@ -427,6 +593,27 @@ fn assert_auth_mail_contract(document: &serde_json::Value) {
     let created = &schemas["CreatedApplicationResponse"];
     for forbidden in ["recipients", "mail", "delivery", "smtp"] {
         assert!(created["properties"].get(forbidden).is_none());
+    }
+    for schema in [
+        "InvitationInspection",
+        "InvitationAcceptance",
+        "AccessAuditRecord",
+    ] {
+        for forbidden in [
+            "password",
+            "password_hash",
+            "session_token",
+            "action_token",
+            "token",
+            "token_digest",
+            "recipient_email",
+            "mail_payload",
+        ] {
+            assert!(
+                schemas[schema]["properties"].get(forbidden).is_none(),
+                "safe schema {schema} exposes {forbidden}"
+            );
+        }
     }
 }
 

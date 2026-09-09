@@ -12,7 +12,10 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::auth::{UserPrincipal, UserSessionAuthenticator};
+use crate::{
+    access_control::resolve_project_access,
+    auth::{IdentityPrincipal, UserSessionAuthenticator},
+};
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -268,12 +271,29 @@ struct RuntimeDiffSummary {
 async fn principal(
     headers: &HeaderMap,
     state: &ReleaseState,
-) -> Result<UserPrincipal, ReleaseError> {
+) -> Result<IdentityPrincipal, ReleaseError> {
     state
         .authenticator
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(ReleaseError::Unauthorized)
+}
+
+async fn project_organization(
+    state: &ReleaseState,
+    principal: IdentityPrincipal,
+    project_id: Uuid,
+) -> Result<Uuid, ReleaseError> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(ReleaseError::NotFound)?;
+    resolve_project_access(&state.pool, principal, organization_id, project_id)
+        .await?
+        .ok_or(ReleaseError::NotFound)?;
+    Ok(organization_id)
 }
 
 fn limit(value: Option<i64>) -> Result<i64, ReleaseError> {
@@ -316,14 +336,8 @@ async fn create_release(
 ) -> Result<(StatusCode, Json<Release>), ReleaseError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
-    if !application_owned(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await?
-    {
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    if !application_owned(&state.pool, organization_id, project_id, application_id).await? {
         return Err(ReleaseError::NotFound);
     }
     let version = input.version.trim();
@@ -342,7 +356,7 @@ async fn create_release(
         ));
     }
     let result = sqlx::query_as::<_, Release>("WITH inserted AS (INSERT INTO releases (id,organization_id,project_id,application_id,version,description,deployed_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *) SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,0::bigint revision_count,0::bigint active_episode_count FROM inserted r JOIN applications a ON a.id=r.application_id")
-        .bind(Uuid::new_v4()).bind(principal.organization_id).bind(project_id).bind(application_id)
+        .bind(Uuid::new_v4()).bind(organization_id).bind(project_id).bind(application_id)
         .bind(version).bind(input.description).bind(input.deployed_at).fetch_one(&state.pool).await;
     match result {
         Ok(release) => Ok((StatusCode::CREATED, Json(release))),
@@ -365,27 +379,21 @@ async fn list_releases(
 ) -> Result<Json<ReleaseList>, ReleaseError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let limit = limit(query.limit)?;
-    if !application_owned(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await?
-    {
+    if !application_owned(&state.pool, organization_id, project_id, application_id).await? {
         return Err(ReleaseError::NotFound);
     }
     let cursor = if let Some(id) = query.cursor {
         Some(sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT deployed_at,id FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-            .bind(principal.organization_id).bind(project_id).bind(application_id).bind(id)
+            .bind(organization_id).bind(project_id).bind(application_id).bind(id)
             .fetch_optional(&state.pool).await?.ok_or_else(|| ReleaseError::Invalid("cursor does not exist in this scope".into()))?)
     } else {
         None
     };
     let (cursor_time, cursor_id) = cursor.unzip();
     let mut items = sqlx::query_as::<_, Release>("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($4::timestamptz IS NULL OR (r.deployed_at,r.id)<($4,$5)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $6")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(cursor_time).bind(cursor_id).bind(limit+1)
+        .bind(organization_id).bind(project_id).bind(application_id).bind(cursor_time).bind(cursor_id).bind(limit+1)
         .fetch_all(&state.pool).await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
@@ -402,10 +410,11 @@ async fn get_release(
     Path((project_id, application_id, release_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<Json<Release>, ReleaseError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     Ok(Json(
         fetch_release(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             project_id,
             application_id,
             release_id,
@@ -422,9 +431,10 @@ async fn list_episodes(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<EpisodeList>, ReleaseError> {
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     fetch_release(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         application_id,
         release_id,
@@ -433,7 +443,7 @@ async fn list_episodes(
     .ok_or(ReleaseError::NotFound)?;
     let limit = limit(query.limit)?;
     let mut items = sqlx::query_as::<_, DeploymentEpisode>("SELECT e.id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.revision_id,e.cluster_id,e.occurrence_number,e.state,e.transition_kind,e.first_observed_at,e.first_ready_at,e.last_observed_at,e.ended_at,e.pod_count,e.ready_pod_count,e.workload_ready_pod_count,CASE WHEN e.workload_ready_pod_count>0 THEN e.ready_pod_count::double precision/e.workload_ready_pod_count::double precision END ready_pod_share,e.snapshot_observed_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('episode_id',p.predecessor_episode_id,'observed_at',p.observed_at,'concurrent',p.concurrent) ORDER BY p.observed_at DESC,p.predecessor_episode_id DESC) FROM deployment_episode_predecessors p WHERE p.episode_id=e.id),'[]'::jsonb) predecessors FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 AND ($5::uuid IS NULL OR e.id<$5) ORDER BY e.first_observed_at DESC,e.id DESC LIMIT $6")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(release_id)
+        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id)
         .bind(query.cursor).bind(limit+1).fetch_all(&state.pool).await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
@@ -510,10 +520,11 @@ async fn runtime_diff(
 ) -> Result<Json<RuntimeDiff>, ReleaseError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let limit = limit(query.limit)?;
     let (target, baseline, baseline_selection_source) = resolve_diff_releases(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         application_id,
         target_id,
@@ -523,7 +534,7 @@ async fn runtime_diff(
     let baseline_id = baseline.as_ref().map(|release| release.id);
     let mut items = sqlx::query_as::<_, DiffEntry>(
         "WITH b AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,b.occurrence_count baseline_occurrence_count,b.first_seen_at baseline_first_seen_at,b.last_seen_at baseline_last_seen_at,t.occurrence_count target_occurrence_count,t.first_seen_at target_first_seen_at,t.last_seen_at target_last_seen_at FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' AND ($6::uuid IS NULL OR g.id>$6) ORDER BY g.id LIMIT $7",
-    ).bind(baseline_id).bind(target.id).bind(principal.organization_id).bind(project_id).bind(application_id).bind(query.cursor).bind(limit+1).fetch_all(&state.pool).await?;
+    ).bind(baseline_id).bind(target.id).bind(organization_id).bind(project_id).bind(application_id).bind(query.cursor).bind(limit+1).fetch_all(&state.pool).await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
         items.last().map(|item| item.group_id)
@@ -534,7 +545,7 @@ async fn runtime_diff(
     Ok(Json(RuntimeDiff {
         coverage: crate::runtime_retention::history::coverage(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             project_id,
         )
         .await?,
@@ -555,10 +566,11 @@ async fn runtime_diff_summary(
     let started = std::time::Instant::now();
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
     let limit = summary_limit(query.limit)?;
     let (target, baseline, baseline_selection_source) = resolve_diff_releases(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         application_id,
         target_id,
@@ -572,7 +584,7 @@ async fn runtime_diff_summary(
         return Ok(Json(RuntimeDiffSummary {
             coverage: crate::runtime_retention::history::coverage(
                 &state.pool,
-                principal.organization_id,
+                organization_id,
                 project_id,
             )
             .await?,
@@ -593,7 +605,7 @@ async fn runtime_diff_summary(
     )
     .bind(baseline_id)
     .bind(target.id)
-    .bind(principal.organization_id)
+    .bind(organization_id)
     .bind(project_id)
     .bind(application_id)
     .fetch_all(&mut *transaction)
@@ -603,7 +615,7 @@ async fn runtime_diff_summary(
     )
     .bind(baseline_id)
     .bind(target.id)
-    .bind(principal.organization_id)
+    .bind(organization_id)
     .bind(project_id)
     .bind(application_id)
     .bind(limit)
@@ -617,7 +629,7 @@ async fn runtime_diff_summary(
     Ok(Json(RuntimeDiffSummary {
         coverage: crate::runtime_retention::history::coverage(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             project_id,
         )
         .await?,

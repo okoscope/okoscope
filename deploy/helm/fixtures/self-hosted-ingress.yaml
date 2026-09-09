@@ -1,6 +1,6 @@
 database: {existingSecret: production-database, urlKey: connection-url}
 internalSecret: {existingSecret: okoscope-internal-production}
-server: {replicas: 2, registrationEnabled: false}
+server: {replicas: 2, publicSignupEnabled: false, organizationMode: single}
 web: {replicas: 2}
 notifications: {enabled: true}
 ingress:

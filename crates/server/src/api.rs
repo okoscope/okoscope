@@ -11,7 +11,10 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::auth::{UserPrincipal, UserSessionAuthenticator};
+use crate::{
+    access_control::resolve_project_access,
+    auth::{IdentityPrincipal, UserSessionAuthenticator},
+};
 
 #[derive(Clone, Debug)]
 struct ApiState {
@@ -216,12 +219,61 @@ struct GroupDetail {
     notification: NotificationSummary,
 }
 
-async fn principal(headers: &HeaderMap, state: &ApiState) -> Result<UserPrincipal, ApiError> {
+async fn principal(headers: &HeaderMap, state: &ApiState) -> Result<IdentityPrincipal, ApiError> {
     state
         .authenticator
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(ApiError::Unauthorized)
+}
+
+async fn project_organization(
+    state: &ApiState,
+    principal: IdentityPrincipal,
+    project_id: Uuid,
+) -> Result<Uuid, ApiError> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    resolve_project_access(&state.pool, principal, organization_id, project_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(organization_id)
+}
+
+async fn group_scope(
+    state: &ApiState,
+    principal: IdentityPrincipal,
+    group_id: Uuid,
+) -> Result<(Uuid, Uuid), ApiError> {
+    let scope: (Uuid, Uuid) =
+        sqlx::query_as("SELECT organization_id,project_id FROM runtime_event_groups WHERE id=$1")
+            .bind(group_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    resolve_project_access(&state.pool, principal, scope.0, scope.1)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(scope)
+}
+
+async fn ensure_application(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    application_id: Uuid,
+) -> Result<(), ApiError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3)")
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_one(&state.pool)
+        .await?;
+    exists.then_some(()).ok_or(ApiError::NotFound)
 }
 
 #[derive(FromRow)]
@@ -270,6 +322,14 @@ async fn list_groups(
 ) -> Result<Json<GroupList>, ApiError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let organization_id = project_organization(&state, principal, query.project_id).await?;
+    ensure_application(
+        &state,
+        organization_id,
+        query.project_id,
+        query.application_id,
+    )
+    .await?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return Err(ApiError::Invalid("limit must be between 1 and 200".into()));
@@ -294,7 +354,7 @@ async fn list_groups(
             "SELECT last_seen_at,id FROM runtime_event_groups WHERE id=$1 AND organization_id=$2 AND project_id=$3 AND application_id=$4",
         )
         .bind(cursor)
-        .bind(principal.organization_id)
+        .bind(organization_id)
         .bind(query.project_id)
         .bind(query.application_id)
         .fetch_optional(&state.pool)
@@ -308,12 +368,12 @@ async fn list_groups(
     let mut items = sqlx::query_as::<_, GroupSummary>(
         "SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by FROM runtime_event_groups g WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND ($4::text IS NULL OR event_kind=$4) AND ($5::text IS NULL OR status=$5) AND ($6::text IS NULL OR namespace=$6) AND ($7::text IS NULL OR workload_kind=$7) AND ($8::text IS NULL OR workload_name=$8) AND ($9::timestamptz IS NULL OR last_seen_at >= $9) AND ($10::timestamptz IS NULL OR first_seen_at >= $10) AND ($11::timestamptz IS NULL OR first_seen_at <= $11) AND ($12::timestamptz IS NULL OR last_seen_at <= $12) AND ($13::uuid IS NULL OR EXISTS (SELECT 1 FROM runtime_event_group_releases gr WHERE gr.group_id=g.id AND gr.release_id=$13)) AND ($14::timestamptz IS NULL OR (last_seen_at,id) < ($14,$15)) ORDER BY last_seen_at DESC,id DESC LIMIT $16",
     )
-    .bind(principal.organization_id).bind(query.project_id).bind(query.application_id)
+    .bind(organization_id).bind(query.project_id).bind(query.application_id)
     .bind(query.event_kind).bind(query.status).bind(query.namespace).bind(query.workload_kind).bind(query.workload_name)
     .bind(query.since).bind(query.first_seen_from).bind(query.first_seen_to).bind(query.last_seen_to)
     .bind(query.release_id).bind(cursor_time).bind(cursor_id).bind(limit + 1)
     .fetch_all(&state.pool).await?;
-    attach_group_policy(&state.pool, principal.organization_id, &mut items).await?;
+    attach_group_policy(&state.pool, organization_id, &mut items).await?;
     items.retain(|group| {
         query.verdict.as_ref().is_none_or(|verdict| {
             group.policy_evaluation["verdict"].as_str() == Some(verdict.as_str())
@@ -330,12 +390,9 @@ async fn list_groups(
     } else {
         None
     };
-    let coverage = crate::runtime_retention::history::coverage(
-        &state.pool,
-        principal.organization_id,
-        query.project_id,
-    )
-    .await?;
+    let coverage =
+        crate::runtime_retention::history::coverage(&state.pool, organization_id, query.project_id)
+            .await?;
     for item in &mut items {
         item.coverage = coverage.clone();
     }
@@ -349,24 +406,22 @@ async fn get_group(
 ) -> Result<Json<GroupDetail>, ApiError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let (organization_id, _) = group_scope(&state, principal, group_id).await?;
     let mut group = sqlx::query_as::<_, GroupSummary>(
         "SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by FROM runtime_event_groups WHERE organization_id=$1 AND id=$2",
     )
-    .bind(principal.organization_id).bind(group_id).fetch_optional(&state.pool).await?.ok_or(ApiError::NotFound)?;
+    .bind(organization_id).bind(group_id).fetch_optional(&state.pool).await?.ok_or(ApiError::NotFound)?;
     attach_group_policy(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         std::slice::from_mut(&mut group),
     )
     .await?;
-    group.coverage = crate::runtime_retention::history::coverage(
-        &state.pool,
-        principal.organization_id,
-        group.project_id,
-    )
-    .await?;
+    group.coverage =
+        crate::runtime_retention::history::coverage(&state.pool, organization_id, group.project_id)
+            .await?;
     let mut representative_event = match group.representative_event_id {
-        Some(id) => event_by_id(&state.pool, principal.organization_id, id).await?,
+        Some(id) => event_by_id(&state.pool, organization_id, id).await?,
         None => None,
     };
     if let Some(event) = &mut representative_event {
@@ -377,15 +432,14 @@ async fn get_group(
         }
         event.related_evidence = load_related_evidence(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             group_id,
             event.id,
             &event.event_kind,
         )
         .await?;
     }
-    let notification =
-        notification_summary(&state.pool, principal.organization_id, group_id).await?;
+    let notification = notification_summary(&state.pool, organization_id, group_id).await?;
     Ok(Json(GroupDetail {
         group,
         representative_event,
@@ -407,26 +461,17 @@ async fn list_occurrences(
 ) -> Result<Json<OccurrencePage>, ApiError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let (organization_id, _) = group_scope(&state, principal, group_id).await?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) {
         return Err(ApiError::Invalid("limit must be between 1 and 200".into()));
-    }
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM runtime_event_groups WHERE organization_id=$1 AND id=$2)",
-    )
-    .bind(principal.organization_id)
-    .bind(group_id)
-    .fetch_one(&state.pool)
-    .await?;
-    if !exists {
-        return Err(ApiError::NotFound);
     }
     let cursor = if let Some(cursor) = query.cursor {
         Some(
             sqlx::query_as::<_, (DateTime<Utc>, DateTime<Utc>, Uuid)>(
                 "SELECT e.received_at,e.observed_at,e.id FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.group_id=$2 AND e.id=$3",
             )
-            .bind(principal.organization_id)
+            .bind(organization_id)
             .bind(group_id)
             .bind(cursor)
             .fetch_optional(&state.pool)
@@ -443,7 +488,7 @@ async fn list_occurrences(
     let mut items = sqlx::query_as::<_, EventOccurrence>(
         "SELECT e.id,e.event_id,e.observed_at,e.received_at,e.node_name,e.namespace,e.pod_name,e.container_name,e.process_command,CASE WHEN g.event_kind='container.restart_loop' THEN g.event_kind ELSE e.event_kind END event_kind,CASE WHEN g.event_kind='container.restart_loop' THEN jsonb_build_object('type','ContainerRestartLoop','data',g.semantic_summary) ELSE e.payload END payload,COALESCE((SELECT jsonb_build_object('retention_incomplete',o.retention_incomplete,'status',o.status,'candidate_count',o.candidate_count,'tolerance_seconds',o.tolerance_seconds,'related_event_ids',COALESCE((SELECT jsonb_agg(c.kernel_event_id) FROM runtime_event_correlations c WHERE c.lifecycle_event_id=e.id),'[]'::jsonb)) FROM runtime_event_correlation_outcomes o WHERE o.event_id=e.id),jsonb_build_object('status','absent','candidate_count',0,'related_event_ids','[]'::jsonb)) correlation,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_event_group_memberships m JOIN runtime_event_groups g ON g.id=m.group_id AND g.organization_id=m.organization_id JOIN runtime_events e ON e.id=m.event_id AND e.organization_id=m.organization_id LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE m.organization_id=$1 AND m.group_id=$2 AND ($3::timestamptz IS NULL OR (e.received_at,e.observed_at,e.id)<($3,$4,$5)) ORDER BY e.received_at DESC,e.observed_at DESC,e.id DESC LIMIT $6",
     )
-    .bind(principal.organization_id)
+    .bind(organization_id)
     .bind(group_id)
     .bind(cursor_received_at)
     .bind(cursor_observed_at)
@@ -454,7 +499,7 @@ async fn list_occurrences(
     for occurrence in &mut items {
         occurrence.related_evidence = load_related_evidence(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             group_id,
             occurrence.id,
             &occurrence.event_kind,
@@ -507,10 +552,11 @@ async fn transition_group(
 ) -> Result<Json<GroupSummary>, ApiError> {
     crate::metrics::record_api_request();
     let principal = principal(&headers, &state).await?;
+    let (organization_id, _) = group_scope(&state, principal, group_id).await?;
     let group = sqlx::query_as::<_, GroupSummary>(
         "UPDATE runtime_event_groups SET status=$3,status_changed_at=CASE WHEN status=$3 THEN status_changed_at ELSE now() END,status_changed_by_user_id=CASE WHEN status=$3 THEN status_changed_by_user_id ELSE $4 END,status_changed_by_kind=CASE WHEN status=$3 THEN status_changed_by_kind ELSE 'user' END,updated_at=CASE WHEN status=$3 THEN updated_at ELSE now() END WHERE organization_id=$1 AND id=$2 AND (status=$3 OR status=ANY($5)) RETURNING id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by",
     )
-    .bind(principal.organization_id)
+    .bind(organization_id)
     .bind(group_id)
     .bind(target)
     .bind(principal.user_id)
@@ -520,7 +566,7 @@ async fn transition_group(
     if let Some(mut group) = group {
         attach_group_policy(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             std::slice::from_mut(&mut group),
         )
         .await?;
@@ -529,7 +575,7 @@ async fn transition_group(
     let current: Option<String> = sqlx::query_scalar(
         "SELECT status FROM runtime_event_groups WHERE organization_id=$1 AND id=$2",
     )
-    .bind(principal.organization_id)
+    .bind(organization_id)
     .bind(group_id)
     .fetch_optional(&state.pool)
     .await?;
@@ -608,14 +654,7 @@ async fn list_snapshots(
     Query(query): Query<crate::runtime_retention::history::Query>,
 ) -> Result<Json<crate::runtime_retention::history::Page>, ApiError> {
     let principal = principal(&headers, &state).await?;
-    let project: Uuid = sqlx::query_scalar(
-        "SELECT project_id FROM runtime_event_groups WHERE organization_id=$1 AND id=$2",
-    )
-    .bind(principal.organization_id)
-    .bind(group_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(ApiError::NotFound)?;
+    let (organization_id, project) = group_scope(&state, principal, group_id).await?;
     if query
         .day_from
         .zip(query.day_to)
@@ -626,7 +665,7 @@ async fn list_snapshots(
     Ok(Json(
         crate::runtime_retention::history::page(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             project,
             group_id,
             query,

@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use protocol::v1::agent_service_server::AgentServiceServer;
 use server::{
     admin_auth::AdminAuthenticator,
@@ -18,7 +18,7 @@ use server::{
     session::AgentSessionService,
     transactional_mail::{MailArgs, MailService},
     transport::TransportSecurity,
-    web_api::WebApiConfig,
+    web_api::{InvitationConfig, OrganizationMode, WebApiConfig},
 };
 use sqlx::postgres::PgPoolOptions;
 use tonic::transport::Server;
@@ -186,8 +186,30 @@ struct Args {
     mail: MailArgs,
     #[arg(long, env = "OKOSCOPE_CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
-    #[arg(long, env = "OKOSCOPE_REGISTRATION_ENABLED", default_value_t = false)]
-    registration_enabled: bool,
+    #[arg(long, env = "OKOSCOPE_PUBLIC_SIGNUP_ENABLED")]
+    public_signup_enabled: Option<bool>,
+    #[arg(long, env = "OKOSCOPE_REGISTRATION_ENABLED", hide = true)]
+    registration_enabled: Option<bool>,
+    #[arg(long, env = "OKOSCOPE_ORGANIZATION_MODE", default_value = "single")]
+    organization_mode: OrganizationModeArg,
+    #[arg(
+        long,
+        env = "OKOSCOPE_INVITATION_LIFETIME_SECONDS",
+        default_value_t = 604_800
+    )]
+    invitation_lifetime_seconds: u64,
+    #[arg(
+        long,
+        env = "OKOSCOPE_INVITATION_CREATE_LIMIT_PER_HOUR",
+        default_value_t = 20
+    )]
+    invitation_create_limit_per_hour: u32,
+    #[arg(
+        long,
+        env = "OKOSCOPE_INVITATION_RESEND_LIMIT_PER_HOUR",
+        default_value_t = 5
+    )]
+    invitation_resend_limit_per_hour: u32,
     #[arg(long, env = "OKOSCOPE_SETUP_TOKEN", hide_env_values = true)]
     setup_token: Option<String>,
     #[arg(long, env = "OKOSCOPE_SETUP_TOKEN_EXPIRES_AT")]
@@ -216,6 +238,21 @@ struct Args {
     session_lifetime_seconds: u64,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum OrganizationModeArg {
+    Single,
+    Multiple,
+}
+
+impl From<OrganizationModeArg> for OrganizationMode {
+    fn from(value: OrganizationModeArg) -> Self {
+        match value {
+            OrganizationModeArg::Single => Self::Single,
+            OrganizationModeArg::Multiple => Self::Multiple,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -273,18 +310,10 @@ enum Command {
         #[arg(long)]
         application_id: Option<Uuid>,
     },
-    /// Establish the first owner of an existing Organization and exit.
-    BootstrapOwner {
+    /// Restore platform authority to an eligible existing user and exit.
+    RecoverSuperAdmin {
         #[arg(long)]
-        organization_id: Uuid,
-        #[arg(long, env = "OKOSCOPE_BOOTSTRAP_OWNER_EMAIL")]
         email: String,
-        #[arg(
-            long,
-            env = "OKOSCOPE_BOOTSTRAP_OWNER_PASSWORD",
-            hide_env_values = true
-        )]
-        password: String,
     },
 }
 
@@ -333,15 +362,40 @@ fn build_web_api_config(
         "session lifetime must be between 300 and 2592000 seconds"
     );
     let metadata = build_installation_metadata(args)?;
+    let public_signup_enabled = public_signup_enabled(args)?;
+    anyhow::ensure!(
+        !public_signup_enabled || matches!(args.organization_mode, OrganizationModeArg::Multiple),
+        "public signup requires multiple Organization mode"
+    );
+    anyhow::ensure!(
+        (300..=2_592_000).contains(&args.invitation_lifetime_seconds),
+        "invitation lifetime must be between 300 and 2592000 seconds"
+    );
+    anyhow::ensure!(
+        (1..=1_000).contains(&args.invitation_create_limit_per_hour),
+        "invitation create limit must be between 1 and 1000 per hour"
+    );
+    anyhow::ensure!(
+        (1..=100).contains(&args.invitation_resend_limit_per_hour),
+        "invitation resend limit must be between 1 and 100 per hour"
+    );
     WebApiConfig::new(args.cors_origins.clone())
         .map_err(anyhow::Error::msg)
         .context("web API configuration")
         .map(|config| {
             config
                 .with_user_auth(
-                    args.registration_enabled,
+                    public_signup_enabled,
                     !args.development_plaintext,
                     std::time::Duration::from_secs(args.session_lifetime_seconds),
+                )
+                .with_access_policy(
+                    args.organization_mode.into(),
+                    InvitationConfig {
+                        lifetime: std::time::Duration::from_secs(args.invitation_lifetime_seconds),
+                        create_limit_per_hour: args.invitation_create_limit_per_hour,
+                        resend_limit_per_hour: args.invitation_resend_limit_per_hour,
+                    },
                 )
                 .with_mail(mail)
                 .with_setup_token(args.setup_token.as_deref())
@@ -350,9 +404,25 @@ fn build_web_api_config(
         })
 }
 
+fn public_signup_enabled(args: &Args) -> Result<bool> {
+    match (args.public_signup_enabled, args.registration_enabled) {
+        (Some(current), Some(legacy)) if current != legacy => {
+            anyhow::bail!("public signup and deprecated registration settings conflict")
+        }
+        (Some(current), _) => Ok(current),
+        (None, Some(legacy)) => {
+            tracing::warn!(
+                "OKOSCOPE_REGISTRATION_ENABLED is deprecated; use OKOSCOPE_PUBLIC_SIGNUP_ENABLED"
+            );
+            Ok(legacy)
+        }
+        (None, None) => Ok(false),
+    }
+}
+
 fn build_mail_config(args: &Args) -> Result<server::transactional_mail::MailConfig> {
     args.mail
-        .build(args.development_plaintext, args.registration_enabled)
+        .build(args.development_plaintext, public_signup_enabled(args)?)
         .map_err(anyhow::Error::msg)
         .context("transactional mail configuration")
 }
@@ -401,6 +471,7 @@ async fn run_command(
     command: Option<Command>,
     pool: &sqlx::PgPool,
     notification_config: &server::notification_config::NotificationConfig,
+    admin_credential: Option<&str>,
 ) -> Result<bool> {
     match command {
         Some(Command::Backfill {
@@ -498,15 +569,11 @@ async fn run_command(
             tracing::info!(?stats, "managed policy evaluation backfill enqueued");
             Ok(true)
         }
-        Some(Command::BootstrapOwner {
-            organization_id,
-            email,
-            password,
-        }) => {
-            server::user_auth::bootstrap_owner(pool, organization_id, &email, &password)
+        Some(Command::RecoverSuperAdmin { email }) => {
+            server::user_auth::recover_super_admin(pool, &email, admin_credential)
                 .await
-                .context("bootstrap Organization owner")?;
-            tracing::info!("organization owner bootstrap complete");
+                .context("recover super administrator")?;
+            tracing::info!("super administrator recovery complete");
             Ok(true)
         }
         Some(Command::Migrate | Command::NotificationCheck) | None => Ok(false),
@@ -580,16 +647,19 @@ async fn main() -> Result<()> {
     )
     .await
     .context("initialize notification retention policies")?;
-    if run_command(args.command, &pool, &notification_config).await? {
+    if run_command(
+        args.command,
+        &pool,
+        &notification_config,
+        args.admin_credential.as_deref(),
+    )
+    .await?
+    {
         return Ok(());
     }
-    server::user_auth::verify_user_access(
-        &pool,
-        args.registration_enabled,
-        args.setup_token.is_some(),
-    )
-    .await
-    .context("user access readiness")?;
+    server::user_auth::verify_user_access(&pool, args.setup_token.is_some())
+        .await
+        .context("user access readiness")?;
     let notifications = NotificationService::new(pool.clone(), notification_config);
     let mail = build_mail_service(&pool, mail_config)?;
     web_api_config = web_api_config.with_admin_authenticator(

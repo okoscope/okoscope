@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-docs=("$root/README.md" "$root/docs/installation.md" "$root/docs/self-hosted-deployment.md")
+docs=("$root/README.md" "$root/docs/installation.md" "$root/docs/self-hosted-deployment.md" "$root/docs/access-control.md")
 
 for expected in \
   'oci://ghcr.io/okoscope/charts/okoscope-agent' \
@@ -10,12 +10,20 @@ for expected in \
   'database-url' \
   'credentialSecret' \
   'database.existingSecret' \
+  'publicSignupEnabled' \
+  'recover-super-admin' \
   'OKOSCOPE_API_UPSTREAM'; do
   grep -q "$expected" "${docs[@]}"
 done
 
 if grep -Ei 'new bundled installation|okoscope chart.*(installs|bundles).*postgres|postgresql.enabled' "${docs[@]}"; then
   echo 'public installation docs contain prohibited bundled-PostgreSQL guidance' >&2
+  exit 1
+fi
+
+if grep -Ei 'use `/setup` for (its|the) first owner|server\.registrationEnabled: (true|false)' \
+  "$root/docs/installation.md" "$root/docs/self-hosted-deployment.md"; then
+  echo 'installation docs contain retired first-owner or legacy registration guidance' >&2
   exit 1
 fi
 

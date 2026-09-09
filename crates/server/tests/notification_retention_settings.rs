@@ -95,6 +95,19 @@ async fn inheritance_override_reset_and_authorization(pool: PgPool) {
     let (other, other_project) = tenant(&pool).await;
     let owner = session(&pool, org, "owner").await;
     let member = session(&pool, org, "member").await;
+    let member_id: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM user_sessions WHERE token_hash=$1")
+            .bind(server::auth::session_digest(&member).unwrap().to_vec())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
+        .bind(org)
+        .bind(project)
+        .bind(member_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let app = app(pool.clone());
     let org_path = format!("/api/v1/organizations/{org}/notification-retention");
     let path = format!("/api/v1/projects/{project}/notification-retention");

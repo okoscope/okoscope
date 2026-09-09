@@ -19,7 +19,8 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::{
-    auth::{UserPrincipal, UserSessionAuthenticator},
+    access_control::resolve_project_access,
+    auth::{IdentityPrincipal, UserSessionAuthenticator},
     inventory::CURRENT_INVENTORY_IDENTITY_VERSION,
 };
 
@@ -617,12 +618,35 @@ struct OccurrencePage {
 async fn principal(
     headers: &HeaderMap,
     state: &InventoryApiState,
-) -> Result<UserPrincipal, InventoryApiError> {
+) -> Result<IdentityPrincipal, InventoryApiError> {
     state
         .auth
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(InventoryApiError::Unauthorized)
+}
+
+#[derive(Clone, Copy)]
+struct ProjectPrincipal {
+    organization_id: Uuid,
+}
+
+async fn project_principal(
+    headers: &HeaderMap,
+    state: &InventoryApiState,
+    project_id: Uuid,
+) -> Result<ProjectPrincipal, InventoryApiError> {
+    let identity = principal(headers, state).await?;
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(InventoryApiError::NotFound)?;
+    resolve_project_access(&state.pool, identity, organization_id, project_id)
+        .await?
+        .ok_or(InventoryApiError::NotFound)?;
+    Ok(ProjectPrincipal { organization_id })
 }
 
 fn limit(value: Option<i64>) -> Result<i64, InventoryApiError> {
@@ -747,7 +771,7 @@ impl InventoryScope {
 
 async fn validate_release_scope(
     pool: &PgPool,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     project_id: Uuid,
     application_id: Uuid,
     release_id: Option<Uuid>,
@@ -769,7 +793,7 @@ async fn validate_release_scope(
 
 async fn ensure_application(
     pool: &PgPool,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     project_id: Uuid,
     application_id: Uuid,
 ) -> Result<(), InventoryApiError> {
@@ -784,7 +808,7 @@ async fn ensure_application(
 
 async fn ensure_item(
     pool: &PgPool,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     project_id: Uuid,
     application_id: Uuid,
     item_id: Uuid,
@@ -807,7 +831,7 @@ async fn summary(
     Query(query): Query<SummaryQuery>,
 ) -> Result<Json<InventorySummary>, InventoryApiError> {
     let started = Instant::now();
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_application(&state.pool, principal, project_id, application_id).await?;
     let scope = record_validation(query.scope.normalize(), "summary", "scope", false)?;
     record_validation(
@@ -894,7 +918,7 @@ async fn distribution(
     Query(query): Query<DistributionQuery>,
 ) -> Result<Json<InventoryDistribution>, InventoryApiError> {
     let started = Instant::now();
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_application(&state.pool, principal, project_id, application_id).await?;
     validate_kind(Some(&query.kind))?;
     let scope = query.scope.normalize()?;
@@ -988,7 +1012,7 @@ async fn facets(
     Query(query): Query<FacetQuery>,
 ) -> Result<Json<FacetPage>, InventoryApiError> {
     let started = Instant::now();
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_application(&state.pool, principal, project_id, application_id).await?;
     let facet = record_validation(
         InventoryFacet::parse(&facet_name),
@@ -1163,7 +1187,7 @@ async fn list_items(
     Query(query): Query<InventoryQuery>,
 ) -> Result<Json<InventoryItemPage>, InventoryApiError> {
     let started = Instant::now();
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_application(&state.pool, principal, project_id, application_id).await?;
     validate_kind(query.kind.as_deref())?;
     if query.verdict.as_deref().is_some_and(|value| {
@@ -1244,7 +1268,7 @@ async fn list_items(
 
 async fn fetch_item(
     state: &InventoryApiState,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     project_id: Uuid,
     application_id: Uuid,
     item_id: Uuid,
@@ -1260,7 +1284,7 @@ async fn item_detail(
     Path((project_id, application_id, item_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<Json<InventoryItemDetail>, InventoryApiError> {
     let started = Instant::now();
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     let item = fetch_item(&state, principal, project_id, application_id, item_id).await?;
     let policy_placement_summary: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object('placement_count',count(*),'evaluation_pending',count(*) FILTER (WHERE e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$5),'verdicts',jsonb_build_object('expected',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='expected'),'requires_review',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='requires_review'),'policy_conflict',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='policy_conflict'),'unclassified',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='unclassified'))) FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4",
@@ -1294,7 +1318,7 @@ async fn item_releases(
     Path((project_id, application_id, item_id)): Path<(Uuid, Uuid, Uuid)>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<ReleasePresencePage>, InventoryApiError> {
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor = if let Some(cursor) = query.cursor {
@@ -1345,7 +1369,7 @@ async fn item_sightings(
     Path((project_id, application_id, item_id)): Path<(Uuid, Uuid, Uuid)>,
     Query(query): Query<StringCursorPageQuery>,
 ) -> Result<Json<SightingPage>, InventoryApiError> {
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor: Option<SightingCursor> = query.cursor.as_deref().map(decode_cursor).transpose()?;
@@ -1393,7 +1417,7 @@ async fn item_groups(
     Path((project_id, application_id, item_id)): Path<(Uuid, Uuid, Uuid)>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<GroupPage>, InventoryApiError> {
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let mut items = sqlx::query_as::<_, InventoryGroup>("SELECT g.id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name,g.event_kind,g.status,g.first_seen_at,g.last_seen_at,g.occurrence_count FROM runtime_inventory_group_links l JOIN runtime_event_groups g ON g.id=l.group_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND l.item_id=$4 AND ($5::uuid IS NULL OR g.id<$5) ORDER BY g.id DESC LIMIT $6")
@@ -1423,7 +1447,7 @@ async fn item_occurrences(
     Path((project_id, application_id, item_id)): Path<(Uuid, Uuid, Uuid)>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<OccurrencePage>, InventoryApiError> {
-    let principal = principal(&headers, &state).await?;
+    let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor = if let Some(cursor) = query.cursor {

@@ -50,7 +50,7 @@ fn public_registration_app(pool: sqlx::PgPool) -> axum::Router {
 
 fn setup_body(token: &str, suffix: &str) -> String {
     format!(
-        r#"{{"setup_token":"{token}","email":"owner{suffix}@example.com","password":"correct horse battery staple","organization_slug":"org{suffix}","organization_name":"Org {suffix}","project_slug":"default","project_name":"Default"}}"#
+        r#"{{"setup_token":"{token}","email":"owner{suffix}@example.com","password":"correct horse battery staple","display_name":"Owner {suffix}","locale":"en"}}"#
     )
 }
 
@@ -124,11 +124,12 @@ async fn setup_is_atomic_single_use_and_secret_safe(pool: sqlx::PgPool) {
     );
 
     let (cookie, body) = claim(&app, "one").await;
-    assert_eq!(body["role"], "owner");
+    assert_eq!(body["platform_role"], "super_admin");
+    assert!(body["active_organization_id"].is_null());
     assert!(!cookie.contains(SETUP_TOKEN));
-    let counts: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM organizations),(SELECT count(*) FROM organization_memberships WHERE role='owner'),(SELECT count(*) FROM projects)")
+    let counts: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM organizations),(SELECT count(*) FROM platform_role_assignments WHERE role='super_admin' AND revoked_at IS NULL),(SELECT count(*) FROM access_audit_records WHERE action='setup.completed')")
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(counts, (1, 1, 1, 1));
+    assert_eq!(counts, (1, 0, 1, 1));
 
     let replay = call(
         &app,
@@ -154,7 +155,7 @@ async fn setup_is_atomic_single_use_and_secret_safe(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
-async fn public_registration_skips_private_first_owner_gate(pool: sqlx::PgPool) {
+async fn public_registration_does_not_close_platform_setup(pool: sqlx::PgPool) {
     let app = public_registration_app(pool);
     let status = call(
         &app,
@@ -166,12 +167,12 @@ async fn public_registration_skips_private_first_owner_gate(pool: sqlx::PgPool) 
     .await;
 
     assert_eq!(status.status(), StatusCode::OK);
-    assert_eq!(json(status).await["state"], "ready");
+    assert_eq!(json(status).await["state"], "platform_admin_required");
 }
 
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
-async fn concurrent_setup_creates_exactly_one_owner(pool: sqlx::PgPool) {
+async fn concurrent_setup_creates_exactly_one_super_admin(pool: sqlx::PgPool) {
     let app = app(pool.clone());
     let first = call(
         &app,
@@ -193,8 +194,9 @@ async fn concurrent_setup_creates_exactly_one_owner(pool: sqlx::PgPool) {
     let statuses = [first.status(), second.status()];
     assert!(statuses.contains(&StatusCode::CREATED));
     assert!(statuses.contains(&StatusCode::CONFLICT));
-    let owners: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM organization_memberships WHERE role='owner'")
+    let owners: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM platform_role_assignments WHERE role='super_admin' AND revoked_at IS NULL",
+    )
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -253,11 +255,56 @@ fn installation_uri(body: &serde_json::Value) -> String {
 async fn installation_resume_update_replace_and_readiness_are_safe(pool: sqlx::PgPool) {
     let app = app(pool.clone());
     let (cookie, setup) = claim(&app, "install").await;
+    let user_id = setup["user_id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
+    let organization_id = uuid::Uuid::new_v4();
+    let project_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,'install','Install')")
+        .bind(organization_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,'default','Default')",
+    )
+    .bind(project_id)
+    .bind(organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let selected = call(
+        &app,
+        post_json(
+            "/api/v1/auth/organization-selections",
+            serde_json::json!({"organization_id":organization_id}).to_string(),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(selected.status(), StatusCode::OK);
+    let cookie = selected.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     let application_id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'app','App')")
-        .bind(application_id).bind(setup["organization_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap()).bind(setup["project_id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap()).execute(&pool).await.unwrap();
+        .bind(application_id).bind(organization_id).bind(project_id).execute(&pool).await.unwrap();
     let uri = installation_uri(
-        &serde_json::json!({"project_id":setup["project_id"],"application_id":application_id}),
+        &serde_json::json!({"project_id":project_id,"application_id":application_id}),
     );
     let create = call(
         &app,
@@ -340,8 +387,7 @@ async fn installation_resume_update_replace_and_readiness_are_safe(pool: sqlx::P
         &app,
         Request::builder()
             .uri(format!(
-                "/api/v1/projects/{}/applications/{application_id}/connection-readiness",
-                setup["project_id"].as_str().unwrap()
+                "/api/v1/projects/{project_id}/applications/{application_id}/connection-readiness"
             ))
             .header(header::COOKIE, &cookie)
             .body(Body::empty())

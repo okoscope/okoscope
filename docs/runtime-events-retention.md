@@ -2,7 +2,7 @@
 
 Runtime retention has two observation-age horizons. Details remain for `raw_days`; numerical history remains until total age `history_days`. A null historical horizon means “keep forever”. It does not retain raw event payloads forever.
 
-Organization owners manage the default policy. A Project either inherits the complete Organization policy or overrides it completely. An explicit disabled override pauses that Project's cleanup. Members can read effective settings but cannot change them. Initial settings are disabled with 30 days of details and 365 days of numerical history. Notification retention is independent.
+Organization owners manage the default policy. A Project either inherits the complete Organization policy or overrides it completely. An explicit disabled override pauses that Project's cleanup. Other roles can read effective settings only for Projects in their inherited or explicit effective access; policy writes remain owner-only. Initial settings are disabled with 30 days of details and 365 days of numerical history. Notification retention is independent.
 
 ## Policy API
 

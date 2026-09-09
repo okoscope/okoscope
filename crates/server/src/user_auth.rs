@@ -15,6 +15,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{
+    access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     auth::{
         AuthenticatedUser, OrganizationRole, SESSION_COOKIE, SessionToken,
         UserSessionAuthenticator, hash_password, normalize_email, session_digest, session_token,
@@ -32,7 +33,7 @@ const ACTION_COOLDOWN_SECONDS: i32 = 60;
 struct AuthState {
     pool: PgPool,
     authenticator: UserSessionAuthenticator,
-    registration_enabled: bool,
+    public_signup_enabled: bool,
     secure_cookie: bool,
     session_lifetime: std::time::Duration,
     mail: MailConfig,
@@ -65,55 +66,65 @@ pub fn router(pool: PgPool, config: &WebApiConfig) -> Router {
         .with_state(AuthState {
             authenticator: UserSessionAuthenticator::new(pool.clone()),
             pool,
-            registration_enabled: config.registration_enabled,
+            public_signup_enabled: config.public_signup_enabled,
             secure_cookie: config.secure_session_cookie,
             session_lifetime: config.session_lifetime,
             mail: config.mail.clone(),
         })
 }
 
-pub async fn bootstrap_owner(
+pub async fn recover_super_admin(
     pool: &PgPool,
-    organization_id: Uuid,
     email: &str,
-    password: &str,
+    admin_credential: Option<&str>,
 ) -> anyhow::Result<()> {
+    let credential = admin_credential.ok_or_else(|| {
+        anyhow::anyhow!("OKOSCOPE_ADMIN_CREDENTIAL is required for platform recovery")
+    })?;
+    crate::admin_auth::AdminAuthenticator::new(credential).map_err(anyhow::Error::msg)?;
     let email = normalize_email(email).map_err(anyhow::Error::msg)?;
-    validate_password(password).map_err(anyhow::Error::msg)?;
-    let password_hash =
-        hash_password(password).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let mut tx = pool.begin().await?;
-    let existing_owner: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=$1 AND role='owner')")
-        .bind(organization_id).fetch_one(&mut *tx).await?;
-    if existing_owner {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)")
-        .bind(organization_id)
-        .fetch_one(&mut *tx)
+    sqlx::query("SELECT pg_advisory_xact_lock(1869373292)")
+        .execute(&mut *tx)
         .await?;
-    anyhow::ensure!(exists, "organization does not exist");
-    let user_id: Uuid = sqlx::query_scalar("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,$2,$3,now()) ON CONFLICT(email) DO UPDATE SET email_verified_at=coalesce(users.email_verified_at,now()) RETURNING id")
-        .bind(Uuid::new_v4()).bind(email).bind(password_hash).fetch_one(&mut *tx).await?;
-    sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner') ON CONFLICT(organization_id,user_id) DO UPDATE SET role='owner'")
-        .bind(organization_id).bind(user_id).execute(&mut *tx).await?;
+    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email=$1 AND disabled_at IS NULL AND email_verified_at IS NOT NULL FOR UPDATE")
+        .bind(email)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::RowNotFound => anyhow::anyhow!("eligible verified user does not exist"),
+            other => anyhow::Error::new(other),
+        })?;
+    sqlx::query("INSERT INTO platform_role_assignments(user_id,role,revoked_at) VALUES($1,'super_admin',NULL) ON CONFLICT(user_id) DO UPDATE SET role='super_admin',revoked_at=NULL,granted_at=now(),granted_by_user_id=NULL")
+        .bind(user_id).execute(&mut *tx).await?;
+    write_access_audit(
+        &mut tx,
+        AccessAuditEvent {
+            actor: AccessAuditActor::SystemRecovery,
+            action: "platform_recovery.completed",
+            organization_id: None,
+            project_id: None,
+            target_user_id: Some(user_id),
+            invitation_id: None,
+            previous_role: None,
+            new_role: Some("super_admin"),
+            request_id: None,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(())
 }
 
-pub async fn verify_user_access(
-    pool: &PgPool,
-    registration_enabled: bool,
-    setup_enabled: bool,
-) -> anyhow::Result<()> {
-    let owner_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM organization_memberships WHERE role='owner'")
+pub async fn verify_user_access(pool: &PgPool, setup_enabled: bool) -> anyhow::Result<()> {
+    let administrator_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL",
+    )
             .fetch_one(pool)
             .await?;
     anyhow::ensure!(
-        registration_enabled || setup_enabled || owner_count > 0,
-        "no Organization owner exists; configure setup authorization, run bootstrap-owner, or explicitly enable registration"
+        setup_enabled || administrator_count > 0,
+        "no active super administrator exists; configure setup authorization or run platform recovery"
     );
     Ok(())
 }
@@ -148,8 +159,8 @@ impl AuthError {
             request_id,
         )
     }
-    fn internal(error: &impl std::fmt::Display, request_id: &RequestId) -> Self {
-        tracing::error!(%error, request_id=%request_id.0, "user authentication operation failed");
+    fn internal(_error: &impl std::fmt::Display, request_id: &RequestId) -> Self {
+        tracing::error!(request_id=%request_id.0, "user authentication operation failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -184,6 +195,7 @@ impl IntoResponse for AuthError {
 struct RegisterRequest {
     email: String,
     password: String,
+    display_name: String,
     organization_slug: String,
     organization_name: String,
     locale: Locale,
@@ -226,6 +238,7 @@ struct ChangePasswordRequest {
 #[serde(deny_unknown_fields)]
 struct PreferencesRequest {
     locale: Locale,
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,14 +249,57 @@ struct Accepted {
 #[derive(Debug, Serialize)]
 struct AuthResponse {
     user: UserResponse,
-    organization: OrganizationResponse,
-    role: OrganizationRole,
+    platform_role: Option<&'static str>,
+    organizations: Vec<OrganizationResponse>,
+    active_organization: Option<OrganizationResponse>,
+    active_role: Option<OrganizationRole>,
+    requires_organization_selection: bool,
+    privileged_until: Option<chrono::DateTime<Utc>>,
+    capabilities: serde_json::Value,
+}
+
+fn access_capabilities(is_super_admin: bool, role: Option<OrganizationRole>) -> serde_json::Value {
+    let manages_organization = is_super_admin
+        || matches!(
+            role,
+            Some(OrganizationRole::Owner | OrganizationRole::Admin)
+        );
+    let organization_roles = match (is_super_admin, role) {
+        (true, _) | (_, Some(OrganizationRole::Owner)) => vec![
+            OrganizationRole::Owner,
+            OrganizationRole::Admin,
+            OrganizationRole::Member,
+        ],
+        (_, Some(OrganizationRole::Admin)) => {
+            vec![OrganizationRole::Admin, OrganizationRole::Member]
+        }
+        _ => Vec::new(),
+    };
+    let project_roles = if manages_organization {
+        vec![
+            crate::access_control::ProjectRole::Admin,
+            crate::access_control::ProjectRole::Member,
+        ]
+    } else {
+        Vec::new()
+    };
+    serde_json::json!({
+        "manage_platform": is_super_admin,
+        "manage_organization": manages_organization,
+        "create_project": manages_organization,
+        "manage_project_members": manages_organization,
+        "create_application": manages_organization,
+        "manage_credentials": manages_organization,
+        "organization_roles_grantable": organization_roles,
+        "project_roles_grantable": project_roles,
+    })
 }
 
 #[derive(Debug, Serialize)]
 struct UserResponse {
     id: Uuid,
     email: String,
+    display_name: String,
     email_verified: bool,
     preferred_locale: Locale,
 }
@@ -253,6 +309,7 @@ struct OrganizationResponse {
     id: Uuid,
     slug: String,
     name: String,
+    role: OrganizationRole,
 }
 
 pub(crate) fn valid_slug(value: &str) -> bool {
@@ -290,19 +347,29 @@ fn expired_cookie(secure: bool) -> HeaderValue {
     .expect("generated expired cookie is valid")
 }
 
-pub(crate) async fn insert_session(
+pub(crate) async fn insert_identity_session(
     tx: &mut Transaction<'_, Postgres>,
     user_id: Uuid,
-    organization_id: Uuid,
+    privileged_until: Option<chrono::DateTime<Utc>>,
+    lifetime: std::time::Duration,
+) -> Result<(Uuid, SessionToken), sqlx::Error> {
+    insert_session_with_context(tx, user_id, None, privileged_until, lifetime).await
+}
+
+pub(crate) async fn insert_session_with_context(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    organization_id: Option<Uuid>,
+    privileged_until: Option<chrono::DateTime<Utc>>,
     lifetime: std::time::Duration,
 ) -> Result<(Uuid, SessionToken), sqlx::Error> {
     let session_id = Uuid::new_v4();
     let token = SessionToken::generate();
     let expires_at =
         Utc::now() + Duration::from_std(lifetime).unwrap_or_else(|_| Duration::hours(12));
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,$5)")
+    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(session_id).bind(user_id).bind(organization_id).bind(token.digest().to_vec())
-        .bind(expires_at).execute(&mut **tx).await?;
+        .bind(expires_at).bind(privileged_until).execute(&mut **tx).await?;
     Ok((session_id, token))
 }
 
@@ -382,9 +449,9 @@ async fn issue_action(
 async fn register(
     State(state): State<AuthState>,
     Extension(request_id): Extension<RequestId>,
-    Json(input): Json<RegisterRequest>,
+    Json(mut input): Json<RegisterRequest>,
 ) -> Result<Response, AuthError> {
-    if !state.registration_enabled || !state.mail.enabled {
+    if !state.public_signup_enabled || !state.mail.enabled {
         return Err(AuthError::new(
             StatusCode::NOT_FOUND,
             "registration_disabled",
@@ -394,9 +461,16 @@ async fn register(
     }
     let email = normalize_email(&input.email)
         .map_err(|message| AuthError::validation(message, &request_id))?;
+    let display_name = input.display_name.trim().to_owned();
+    let organization_name = input.organization_name.trim().to_owned();
+    input.display_name = display_name;
+    input.organization_name = organization_name;
     validate_password(&input.password)
         .map_err(|message| AuthError::validation(message, &request_id))?;
-    if !valid_slug(&input.organization_slug) || !valid_name(&input.organization_name) {
+    if !valid_slug(&input.organization_slug)
+        || !valid_name(&input.organization_name)
+        || !valid_name(&input.display_name)
+    {
         return Err(AuthError::validation(
             "organization slug or name is invalid",
             &request_id,
@@ -452,8 +526,8 @@ async fn create_registration(
     user_id: Uuid,
     organization_id: Uuid,
 ) -> Result<(), crate::transactional_mail::MailError> {
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale) VALUES($1,$2,$3,NULL,$4)")
-        .bind(user_id).bind(email).bind(password_hash).bind(input.locale.as_str()).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale,display_name) VALUES($1,$2,$3,NULL,$4,$5)")
+        .bind(user_id).bind(email).bind(password_hash).bind(input.locale.as_str()).bind(&input.display_name).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)")
         .bind(organization_id)
         .bind(&input.organization_slug)
@@ -489,7 +563,7 @@ async fn create_registration(
 }
 
 async fn lookup_user(pool: &PgPool, email: &str) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u JOIN organization_memberships m ON m.user_id=u.id JOIN organizations o ON o.id=m.organization_id WHERE u.email=$1 ORDER BY m.created_at,m.organization_id LIMIT 1")
+    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND (SELECT count(*) FROM organization_memberships mx JOIN organizations ox ON ox.id=mx.organization_id WHERE mx.user_id=u.id AND ox.status='active')=1 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.email=$1 LIMIT 1")
         .bind(email).fetch_optional(pool).await
 }
 
@@ -537,14 +611,19 @@ async fn establish_session(
     request_id: &RequestId,
     user: AuthenticatedUser,
 ) -> Result<Response, AuthError> {
-    let role = user.role.parse().map_err(|()| {
-        AuthError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_credentials",
-            "invalid email or password",
-            request_id,
-        )
-    })?;
+    let role = user
+        .role
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|()| {
+            AuthError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "invalid email or password",
+                request_id,
+            )
+        })?;
     let mut tx = state
         .pool
         .begin()
@@ -559,10 +638,11 @@ async fn establish_session(
         .await
         .map_err(|error| AuthError::internal(&error, request_id))?;
     }
-    let (_, token) = insert_session(
+    let (_, token) = insert_session_with_context(
         &mut tx,
         user.user_id,
         user.organization_id,
+        None,
         state.session_lifetime,
     )
     .await
@@ -572,7 +652,10 @@ async fn establish_session(
         .map_err(|error| AuthError::internal(&error, request_id))?;
     crate::metrics::record_authentication(true);
     let locale = user.preferred_locale.parse().unwrap_or(Locale::En);
-    let mut response = Json(response_from_user(&user, role, locale)).into_response();
+    let response_body = response_from_user(&state.pool, &user, role, locale, None)
+        .await
+        .map_err(|error| AuthError::internal(&error, request_id))?;
+    let mut response = Json(response_body).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         session_cookie(token.expose(), state.secure_cookie, state.session_lifetime),
@@ -580,25 +663,57 @@ async fn establish_session(
     Ok(response)
 }
 
-fn response_from_user(
+async fn response_from_user(
+    pool: &PgPool,
     user: &AuthenticatedUser,
-    role: OrganizationRole,
+    role: Option<OrganizationRole>,
     locale: Locale,
-) -> AuthResponse {
-    AuthResponse {
+    privileged_until: Option<chrono::DateTime<Utc>>,
+) -> Result<AuthResponse, sqlx::Error> {
+    let organizations: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT o.id,o.slug,o.name,m.role FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=$1 AND o.status='active' ORDER BY m.created_at,o.id LIMIT 200",
+    )
+    .bind(user.user_id)
+    .fetch_all(pool)
+    .await?;
+    let organizations = organizations
+        .into_iter()
+        .filter_map(|(id, slug, name, value)| {
+            Some(OrganizationResponse {
+                id,
+                slug,
+                name,
+                role: value.parse().ok()?,
+            })
+        })
+        .collect::<Vec<_>>();
+    let active_organization = user
+        .organization_id
+        .zip(user.organization_slug.clone())
+        .zip(user.organization_name.clone())
+        .zip(role)
+        .map(|(((id, slug), name), role)| OrganizationResponse {
+            id,
+            slug,
+            name,
+            role,
+        });
+    Ok(AuthResponse {
         user: UserResponse {
             id: user.user_id,
             email: user.email.clone(),
+            display_name: user.display_name.clone(),
             email_verified: user.email_verified_at.is_some(),
             preferred_locale: locale,
         },
-        organization: OrganizationResponse {
-            id: user.organization_id,
-            slug: user.organization_slug.clone(),
-            name: user.organization_name.clone(),
-        },
-        role,
-    }
+        platform_role: user.is_super_admin.then_some("super_admin"),
+        requires_organization_selection: organizations.len() > 1 && active_organization.is_none(),
+        organizations,
+        active_organization,
+        active_role: role,
+        privileged_until,
+        capabilities: access_capabilities(user.is_super_admin, role),
+    })
 }
 
 async fn resend_verification(
@@ -669,7 +784,9 @@ async fn enqueue_requested_action(
         Utc::now().timestamp() / i64::from(ACTION_COOLDOWN_SECONDS)
     );
     if purpose == "verify_email" {
-        let organization = user.organization_name;
+        let organization = user
+            .organization_name
+            .unwrap_or_else(|| "Okoscope".to_owned());
         issue_action(
             &mut tx,
             &state.mail,
@@ -797,10 +914,10 @@ async fn authenticate(
     state: &AuthState,
     headers: &HeaderMap,
     request_id: &RequestId,
-) -> Result<crate::auth::UserPrincipal, AuthError> {
+) -> Result<crate::auth::IdentityPrincipal, AuthError> {
     state
         .authenticator
-        .authenticate(session_token(headers).unwrap_or_default())
+        .authenticate_identity(session_token(headers).unwrap_or_default())
         .await
         .map_err(|error| AuthError::internal(&error, request_id))?
         .ok_or_else(|| {
@@ -822,10 +939,14 @@ async fn change_password(
     validate_password(&input.new_password)
         .map_err(|message| AuthError::validation(message, &request_id))?;
     let principal = authenticate(&state, &headers, &request_id).await?;
-    let user = lookup_user_by_id(&state.pool, principal.user_id, principal.organization_id)
-        .await
-        .map_err(|error| AuthError::internal(&error, &request_id))?
-        .ok_or_else(|| unusable_session(&request_id))?;
+    let user = lookup_user_by_id(
+        &state.pool,
+        principal.user_id,
+        principal.active_organization_id,
+    )
+    .await
+    .map_err(|error| AuthError::internal(&error, &request_id))?
+    .ok_or_else(|| unusable_session(&request_id))?;
     if !verify_password(&input.current_password, &user.password_hash) {
         return Err(AuthError::new(
             StatusCode::BAD_REQUEST,
@@ -855,10 +976,11 @@ async fn change_password(
         .execute(&mut *tx)
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
-    let (_, token) = insert_session(
+    let (_, token) = insert_session_with_context(
         &mut tx,
         user.user_id,
         user.organization_id,
+        None,
         state.session_lifetime,
     )
     .await
@@ -872,9 +994,14 @@ async fn change_password(
     let locale = user.preferred_locale.parse().unwrap_or(Locale::En);
     let role = user
         .role
-        .parse()
+        .as_deref()
+        .map(str::parse)
+        .transpose()
         .map_err(|()| unusable_session(&request_id))?;
-    let mut response = Json(response_from_user(&user, role, locale)).into_response();
+    let body = response_from_user(&state.pool, &user, role, locale, None)
+        .await
+        .map_err(|error| AuthError::internal(&error, &request_id))?;
+    let mut response = Json(body).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         session_cookie(token.expose(), state.secure_cookie, state.session_lifetime),
@@ -923,32 +1050,53 @@ async fn update_preferences(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
-    Json(input): Json<PreferencesRequest>,
+    Json(mut input): Json<PreferencesRequest>,
 ) -> Result<Json<AuthResponse>, AuthError> {
     let principal = authenticate(&state, &headers, &request_id).await?;
-    sqlx::query("UPDATE users SET preferred_locale=$2,updated_at=now() WHERE id=$1")
+    input.display_name = input.display_name.map(|name| name.trim().to_owned());
+    if input
+        .display_name
+        .as_deref()
+        .is_some_and(|name| !valid_name(name))
+    {
+        return Err(AuthError::validation(
+            "display name must contain 1-120 characters",
+            &request_id,
+        ));
+    }
+    sqlx::query("UPDATE users SET preferred_locale=$2,display_name=coalesce($3,display_name),updated_at=now() WHERE id=$1")
         .bind(principal.user_id)
         .bind(input.locale.as_str())
+        .bind(input.display_name)
         .execute(&state.pool)
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
-    let user = lookup_user_by_id(&state.pool, principal.user_id, principal.organization_id)
-        .await
-        .map_err(|error| AuthError::internal(&error, &request_id))?
-        .ok_or_else(|| unusable_session(&request_id))?;
-    Ok(Json(response_from_user(
+    let user = lookup_user_by_id(
+        &state.pool,
+        principal.user_id,
+        principal.active_organization_id,
+    )
+    .await
+    .map_err(|error| AuthError::internal(&error, &request_id))?
+    .ok_or_else(|| unusable_session(&request_id))?;
+    response_from_user(
+        &state.pool,
         &user,
-        principal.role,
+        principal.organization_role,
         input.locale,
-    )))
+        principal.privileged_until,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| AuthError::internal(&error, &request_id))
 }
 
 async fn lookup_user_by_id(
     pool: &PgPool,
     user_id: Uuid,
-    organization_id: Uuid,
+    organization_id: Option<Uuid>,
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u JOIN organization_memberships m ON m.user_id=u.id AND m.organization_id=$2 JOIN organizations o ON o.id=m.organization_id WHERE u.id=$1")
+    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND m.organization_id=$2 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.id=$1")
         .bind(user_id).bind(organization_id).fetch_optional(pool).await
 }
 
@@ -967,12 +1115,25 @@ async fn me(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<AuthResponse>, AuthError> {
     let principal = authenticate(&state, &headers, &request_id).await?;
-    let user = lookup_user_by_id(&state.pool, principal.user_id, principal.organization_id)
-        .await
-        .map_err(|error| AuthError::internal(&error, &request_id))?
-        .ok_or_else(|| unusable_session(&request_id))?;
+    let user = lookup_user_by_id(
+        &state.pool,
+        principal.user_id,
+        principal.active_organization_id,
+    )
+    .await
+    .map_err(|error| AuthError::internal(&error, &request_id))?
+    .ok_or_else(|| unusable_session(&request_id))?;
     let locale = user.preferred_locale.parse().unwrap_or(Locale::En);
-    Ok(Json(response_from_user(&user, principal.role, locale)))
+    response_from_user(
+        &state.pool,
+        &user,
+        principal.organization_role,
+        locale,
+        principal.privileged_until,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| AuthError::internal(&error, &request_id))
 }
 
 async fn logout(

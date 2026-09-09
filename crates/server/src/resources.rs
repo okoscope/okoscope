@@ -17,8 +17,9 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
+    access_control::resolve_project_access,
     application_credentials::ApplicationCredentialScope,
-    auth::{SessionScope, UserPrincipal, UserSessionAuthenticator},
+    auth::{IdentityPrincipal, SessionScope, UserSessionAuthenticator},
 };
 
 pub const RESOURCE_DETAIL_RETENTION_DAYS: i64 = 7;
@@ -663,16 +664,11 @@ async fn resource_history(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, ResourceError> {
     let principal = principal(&headers, &state).await?;
-    ensure_application(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    ensure_application(&state.pool, organization_id, project_id, application_id).await?;
     let step = validate_history_query(&query)?;
     let rows = sqlx::query_as::<_, HistoryRow>("SELECT p.bucket_start,p.unit,p.value_sum/p.value_weight value,p.limit_value,p.covered_usec,p.expected_usec,p.sample_count,p.contributor_count,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int observed_replicas,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int ready_replicas,p.unavailable_sources,p.release_id,CASE WHEN r.id IS NULL THEN NULL ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name,p.container_name FROM resource_rollup_points p JOIN applications a ON a.id=p.application_id LEFT JOIN releases r ON r.id=p.release_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.metric=$4 AND p.step_seconds=$5 AND p.bucket_start >= $6 AND p.bucket_start < $7 AND ($8::uuid IS NULL OR p.release_id=$8) AND ($9::text IS NULL OR p.container_name=$9) ORDER BY p.bucket_start,p.container_name,p.release_key LIMIT 45360")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(&query.metric)
+        .bind(organization_id).bind(project_id).bind(application_id).bind(&query.metric)
         .bind(step).bind(query.from).bind(query.to).bind(query.release_id).bind(&query.container)
         .fetch_all(&state.pool).await?;
     Ok(Json(history_response(query, step, rows)))
@@ -895,12 +891,29 @@ fn validate_history_query(query: &HistoryQuery) -> Result<i32, ResourceError> {
 async fn principal(
     headers: &HeaderMap,
     state: &ResourceState,
-) -> Result<UserPrincipal, ResourceError> {
+) -> Result<IdentityPrincipal, ResourceError> {
     state
         .authenticator
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(ResourceError::Unauthorized)
+}
+
+async fn project_organization(
+    state: &ResourceState,
+    principal: IdentityPrincipal,
+    project_id: Uuid,
+) -> Result<Uuid, ResourceError> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(ResourceError::NotFound)?;
+    resolve_project_access(&state.pool, principal, organization_id, project_id)
+        .await?
+        .ok_or(ResourceError::NotFound)?;
+    Ok(organization_id)
 }
 
 async fn ensure_application(
@@ -1075,16 +1088,11 @@ async fn resource_comparison(
     Query(query): Query<ComparisonQuery>,
 ) -> Result<Json<ComparisonResponse>, ResourceError> {
     let principal = principal(&headers, &state).await?;
-    ensure_application(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await?;
+    let organization_id = project_organization(&state, principal, project_id).await?;
+    ensure_application(&state.pool, organization_id, project_id, application_id).await?;
     let target = fetch_episode(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         application_id,
         target_id,
@@ -1093,7 +1101,7 @@ async fn resource_comparison(
     .ok_or(ResourceError::NotFound)?;
     let (baseline, source) = fetch_baseline_episode(
         &state.pool,
-        principal.organization_id,
+        organization_id,
         project_id,
         application_id,
         &target,
@@ -1103,7 +1111,7 @@ async fn resource_comparison(
     Ok(Json(
         build_comparison(
             &state.pool,
-            principal.organization_id,
+            organization_id,
             project_id,
             application_id,
             target,

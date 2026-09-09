@@ -58,6 +58,11 @@ static WEB_API_DURATION_MICROSECONDS: AtomicU64 = AtomicU64::new(0);
 static AUTH_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static AUTH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static AUTH_FAILURES: AtomicU64 = AtomicU64::new(0);
+static ACCESS_DENIALS: AtomicU64 = AtomicU64::new(0);
+static PRIVILEGE_CONFIRMATIONS: AtomicU64 = AtomicU64::new(0);
+static PLATFORM_MUTATIONS: AtomicU64 = AtomicU64::new(0);
+static INVITATION_LIFECYCLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static INVITATION_LIFECYCLE_FAILURES: AtomicU64 = AtomicU64::new(0);
 static MAIL_ENABLED: AtomicU64 = AtomicU64::new(0);
 static MAIL_CLAIMS: AtomicU64 = AtomicU64::new(0);
 static MAIL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
@@ -140,6 +145,26 @@ pub fn record_authentication(success: bool) {
         AUTH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
     } else {
         AUTH_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn record_access_denial() {
+    ACCESS_DENIALS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_privilege_confirmation() {
+    PRIVILEGE_CONFIRMATIONS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_platform_mutation() {
+    PLATFORM_MUTATIONS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_invitation_lifecycle(success: bool) {
+    if success {
+        INVITATION_LIFECYCLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        INVITATION_LIFECYCLE_FAILURES.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -395,6 +420,17 @@ async fn render(State(state): State<MetricsState>) -> impl IntoResponse {
     .fetch_one(pool)
     .await;
     let Ok((mail_queue_depth, mail_oldest_due_seconds)) = mail_snapshot else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database metrics unavailable\n".to_owned(),
+        );
+    };
+    let pending_owner_organizations = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM organizations WHERE status='pending_owner'",
+    )
+    .fetch_one(pool)
+    .await;
+    let Ok(pending_owner_organizations) = pending_owner_organizations else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database metrics unavailable\n".to_owned(),
@@ -745,6 +781,30 @@ async fn render(State(state): State<MetricsState>) -> impl IntoResponse {
         (
             "okoscope_authentication_failures_total",
             AUTH_FAILURES.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_access_denials_total",
+            ACCESS_DENIALS.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_privilege_confirmations_total",
+            PRIVILEGE_CONFIRMATIONS.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_platform_mutations_total",
+            PLATFORM_MUTATIONS.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_invitation_lifecycle_successes_total",
+            INVITATION_LIFECYCLE_SUCCESSES.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_invitation_lifecycle_failures_total",
+            INVITATION_LIFECYCLE_FAILURES.load(Ordering::Relaxed),
+        ),
+        (
+            "okoscope_pending_owner_organizations",
+            u64::try_from(pending_owner_organizations).unwrap_or_default(),
         ),
         (
             "okoscope_mail_enabled",

@@ -7,6 +7,30 @@ Wait for readiness:
 Retrieve the one-time setup authorization (the token is never printed by Helm):
   kubectl get secret -n {{ .Release.Namespace }} {{ default (printf "%s-setup" (include "okoscope.fullname" .)) .Values.setupAuthorization.existingSecret }} -o jsonpath='{.data.{{ .Values.setupAuthorization.tokenKey }}}' | base64 --decode
 
+Use it at /setup to create the first personal super-administrator. Setup creates
+no Organization or Project. The super-administrator then creates an Organization
+with a pending owner invitation, or explicitly becomes its owner.
+
+On upgrade from server.registrationEnabled, move the value to
+server.publicSignupEnabled and remove the legacy key. During the compatibility
+window a non-null legacy value takes precedence. Public signup is off by default
+and is valid only with server.organizationMode=multiple and usable mail.
+
+Before restricting the shared operator credential, promote and verify at least
+one existing verified user as super_admin. Test invitation delivery using safe
+mail metrics and the pending invitation status; SMTP acceptance alone does not
+prove inbox delivery. Invitations fail closed with mail_unavailable when mail or
+outbox encryption is unusable.
+
+If every personal super-administrator becomes inaccessible, use the documented
+operator recovery command. It creates an audited system-actor recovery event;
+never enable public signup or edit the database as a recovery shortcut.
+
+Rollback: disable invitation issuance in operational policy and set
+server.publicSignupEnabled=false, then roll back only to a binary compatible with
+the applied migration. Preserve users, memberships, role assignments,
+invitations, audit records, outbox rows, PostgreSQL data, and retained Secrets.
+
 {{- if not .Values.ingress.web.enabled }}
 Open the Web UI locally:
   kubectl port-forward -n {{ .Release.Namespace }} service/{{ include "okoscope.fullname" . }}-web 8080:80

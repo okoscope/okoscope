@@ -1,6 +1,6 @@
 # Notification history retention
 
-An Organization owner manages one policy: `enabled` and `history_days` (integer, 1–3650). A Project inherits the complete Organization policy unless it has a complete override. An explicit disabled override is different from inheritance. Members can read policies; only owners can change them.
+An Organization owner manages one policy: `enabled` and `history_days` (integer, 1–3650). A Project inherits the complete Organization policy unless it has a complete override. An explicit disabled override is different from inheritance. Other roles can read policies only for Projects in their inherited or explicit effective access; only Organization owners can change them.
 
 Fresh Organizations default to disabled cleanup and 90 days. Projects inherit by default.
 
@@ -13,7 +13,7 @@ All endpoints use user-session authentication and existing trusted-Origin requir
 | `/api/v1/organizations/{organization_id}/notification-retention` | GET, PUT | `{ enabled, history_days }` |
 | `/api/v1/projects/{project_id}/notification-retention` | GET, PUT, DELETE | `{ override: policy or null, effective: policy, inherited: organization policy, source: "organization" or "project" }` |
 
-PUT replaces the entire policy. DELETE on the Project endpoint restores inheritance and returns the new effective policy. Reads are tenant scoped; member writes return 403 and cross-tenant resources return 404. The generated contract is in `openapi/okoscope-v1.yaml`.
+PUT replaces the entire policy. DELETE on the Project endpoint restores inheritance and returns the new effective policy. Reads are filtered by effective Project access; non-owner writes return 403 for a known accessible resource, while cross-tenant and unassigned resources return tenant-safe 404. The generated contract is in `openapi/okoscope-v1.yaml`.
 
 In the Web UI, Organization controls appear in Profile and Project controls appear in Notifications. Both English and Russian labels are supported. The UI explains that enabling cleanup, shortening retention or returning to an enabled inherited policy can delete existing expired history.
 

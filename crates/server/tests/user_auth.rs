@@ -21,7 +21,9 @@ fn app(pool: sqlx::PgPool) -> Router {
         .unwrap()
         .with_user_auth(true, true, std::time::Duration::from_secs(3600))
         .with_mail(mail);
-    server::web_api::router(user_auth::router(pool, &config), &config)
+    let routes =
+        user_auth::router(pool.clone(), &config).merge(server::access_api::router(pool, &config));
+    server::web_api::router(routes, &config)
 }
 
 async fn json(response: axum::response::Response) -> serde_json::Value {
@@ -41,7 +43,7 @@ async fn registration_login_me_logout_and_revocation(pool: sqlx::PgPool) {
     let registration = app.clone().oneshot(
         Request::builder().method("POST").uri("/api/v1/auth/register")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"email":" Owner@Example.COM ","password":"correct horse battery staple","organization_slug":"acme","organization_name":"Acme","locale":"ru"}"#)).unwrap()
+            .body(Body::from(r#"{"email":" Owner@Example.COM ","password":"correct horse battery staple","display_name":"Acme Owner","organization_slug":"acme","organization_name":"Acme","locale":"ru"}"#)).unwrap()
     ).await.unwrap();
     assert_eq!(registration.status(), StatusCode::ACCEPTED);
     assert!(registration.headers().get(header::SET_COOKIE).is_none());
@@ -106,7 +108,9 @@ async fn registration_login_me_logout_and_revocation(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert_eq!(me.status(), StatusCode::OK);
-    assert_eq!(json(me).await["organization"]["slug"], "acme");
+    let me_body = json(me).await;
+    assert_eq!(me_body["active_organization"]["slug"], "acme");
+    assert_eq!(me_body["active_role"], "owner");
 
     sqlx::query(
         "UPDATE user_sessions \
@@ -199,6 +203,11 @@ async fn registration_login_me_logout_and_revocation(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
 
+    let replacement = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'replacement@example.com',$2,now())")
+        .bind(replacement).bind("x".repeat(32)).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) SELECT organization_id,$1,'owner' FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='owner@example.com'")
+        .bind(replacement).execute(&pool).await.unwrap();
     sqlx::query("UPDATE users SET disabled_at=now() WHERE email='owner@example.com'")
         .execute(&pool)
         .await
@@ -225,7 +234,7 @@ async fn verification_reset_password_change_and_locale_are_authoritative(pool: s
     let app = app(pool.clone());
     let registration = app.clone().oneshot(Request::builder().method("POST").uri("/api/v1/auth/register")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"email":"owner@example.com","password":"correct horse battery staple","organization_slug":"secure","organization_name":"Secure","locale":"en"}"#)).unwrap()).await.unwrap();
+        .body(Body::from(r#"{"email":"owner@example.com","password":"correct horse battery staple","display_name":"Secure Owner","organization_slug":"secure","organization_name":"Secure","locale":"en"}"#)).unwrap()).await.unwrap();
     assert_eq!(registration.status(), StatusCode::ACCEPTED);
     let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email='owner@example.com'")
         .fetch_one(&pool)
@@ -410,6 +419,88 @@ async fn login_failure_is_uniform_and_registration_is_atomic(pool: sqlx::PgPool)
     let body = json(unavailable).await;
     assert_eq!(body["error"], "internal_error");
     assert!(!body.to_string().contains("wrong password value"));
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn zero_and_multiple_organization_login_requires_explicit_selection(pool: sqlx::PgPool) {
+    let app = app(pool.clone());
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,'multi@example.com',$2,now(),'Multi User')")
+        .bind(user_id).bind(hash_password("correct horse battery staple").unwrap())
+        .execute(&pool).await.unwrap();
+    let zero = login(&app, "multi@example.com").await;
+    assert_eq!(zero.status(), StatusCode::OK);
+    let zero_body = json(zero).await;
+    assert!(zero_body["active_organization"].is_null());
+    assert_eq!(zero_body["requires_organization_selection"], false);
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,'multi-one','One'),($2,'multi-two','Two')")
+        .bind(first).bind(second).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$3,'member'),($2,$3,'member')")
+        .bind(first).bind(second).bind(user_id).execute(&pool).await.unwrap();
+    let multiple = login(&app, "multi@example.com").await;
+    let cookie = multiple.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let multiple_body = json(multiple).await;
+    assert!(multiple_body["active_organization"].is_null());
+    assert_eq!(multiple_body["requires_organization_selection"], true);
+    let selected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/organization-selections")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .header(header::ORIGIN, "https://ui.example.com")
+                .body(Body::from(format!(r#"{{"organization_id":"{first}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.status(), StatusCode::OK);
+    let rotated = selected.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_ne!(cookie, rotated);
+    let old = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/auth/me")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(old.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn login(app: &Router, email: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"email":"{email}","password":"correct horse battery staple"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 async fn fixture_session(

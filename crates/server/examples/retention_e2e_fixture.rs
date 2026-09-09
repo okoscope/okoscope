@@ -75,6 +75,33 @@ async fn agent(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     id
 }
 
+async fn create_owner(
+    pool: &sqlx::PgPool,
+    organization_id: Uuid,
+    email: &str,
+    password: &str,
+) -> Result<()> {
+    let user_id = Uuid::new_v4();
+    let password_hash = server::auth::hash_password(password)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,$2,$3,now())",
+    )
+    .bind(user_id)
+    .bind(email)
+    .bind(password_hash)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let url = std::env::var("DATABASE_URL")?;
@@ -98,9 +125,8 @@ async fn main() -> Result<()> {
     let owner_email = format!("owner-{name}@example.test");
     let member_email = format!("member-{name}@example.test");
     let other_email = format!("other-{name}@example.test");
-    server::user_auth::bootstrap_owner(&pool, ids.organization_id, &owner_email, password).await?;
-    server::user_auth::bootstrap_owner(&pool, other.organization_id, &other_email, password)
-        .await?;
+    create_owner(&pool, ids.organization_id, &owner_email, password).await?;
+    create_owner(&pool, other.organization_id, &other_email, password).await?;
     let member = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
         .bind(member)

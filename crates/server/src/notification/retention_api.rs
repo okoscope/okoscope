@@ -9,7 +9,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::retention_settings::{self as settings, ProjectRetention, RetentionPolicy};
-use crate::auth::{UserPrincipal, UserSessionAuthenticator};
+use crate::{
+    access_control::{EffectiveProjectAccess, resolve_project_access},
+    auth::{IdentityPrincipal, OrganizationRole, UserSessionAuthenticator},
+};
 
 #[derive(Debug)]
 enum ApiError {
@@ -75,15 +78,18 @@ pub fn router(pool: PgPool) -> Router {
         .with_state(pool)
 }
 
-async fn principal(pool: &PgPool, headers: &HeaderMap) -> Result<UserPrincipal, ApiError> {
+async fn principal(pool: &PgPool, headers: &HeaderMap) -> Result<IdentityPrincipal, ApiError> {
     UserSessionAuthenticator::new(pool.clone())
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await?
         .ok_or(ApiError::Unauthorized)
 }
 
-fn owner(principal: UserPrincipal) -> Result<(), ApiError> {
-    if principal.role.is_owner() {
+fn owner(principal: IdentityPrincipal, organization_id: Uuid) -> Result<(), ApiError> {
+    if principal.is_super_admin
+        || principal.active_organization_id == Some(organization_id)
+            && principal.organization_role == Some(OrganizationRole::Owner)
+    {
         Ok(())
     } else {
         Err(ApiError::Forbidden)
@@ -100,10 +106,15 @@ fn validate(policy: RetentionPolicy) -> Result<(), ApiError> {
 
 async fn owned_organization(
     pool: &PgPool,
-    user: UserPrincipal,
+    user: IdentityPrincipal,
     id: Uuid,
 ) -> Result<RetentionPolicy, ApiError> {
-    if id != user.organization_id {
+    let can_read = user.is_super_admin
+        || user.active_organization_id == Some(id)
+            && user
+                .organization_role
+                .is_some_and(OrganizationRole::inherits_project_access);
+    if !can_read {
         return Err(ApiError::NotFound);
     }
     settings::organization(pool, id)
@@ -113,12 +124,22 @@ async fn owned_organization(
 
 async fn owned_project(
     pool: &PgPool,
-    user: UserPrincipal,
+    user: IdentityPrincipal,
     id: Uuid,
-) -> Result<ProjectRetention, ApiError> {
-    settings::project(pool, user.organization_id, id)
+) -> Result<(Uuid, EffectiveProjectAccess, ProjectRetention), ApiError> {
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    let access = resolve_project_access(pool, user, organization_id, id)
         .await?
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    let retention = settings::project(pool, organization_id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok((organization_id, access, retention))
 }
 
 async fn get_organization(
@@ -137,8 +158,11 @@ async fn put_organization(
     Json(policy): Json<RetentionPolicy>,
 ) -> Result<Json<RetentionPolicy>, ApiError> {
     let user = principal(&pool, &headers).await?;
+    if !user.is_super_admin && user.active_organization_id != Some(id) {
+        return Err(ApiError::NotFound);
+    }
+    owner(user, id)?;
     owned_organization(&pool, user, id).await?;
-    owner(user)?;
     validate(policy)?;
     settings::set_organization(&pool, id, user.user_id, policy).await?;
     Ok(Json(policy))
@@ -150,7 +174,8 @@ async fn get_project(
     headers: HeaderMap,
 ) -> Result<Json<ProjectRetention>, ApiError> {
     let user = principal(&pool, &headers).await?;
-    Ok(Json(owned_project(&pool, user, id).await?))
+    let (_, _, retention) = owned_project(&pool, user, id).await?;
+    Ok(Json(retention))
 }
 
 async fn change_project(
@@ -160,13 +185,16 @@ async fn change_project(
     policy: Option<RetentionPolicy>,
 ) -> Result<Json<ProjectRetention>, ApiError> {
     let user = principal(pool, headers).await?;
-    owned_project(pool, user, id).await?;
-    owner(user)?;
+    let (organization_id, access, _) = owned_project(pool, user, id).await?;
+    if !access.can_manage_members() {
+        return Err(ApiError::Forbidden);
+    }
     if let Some(policy) = policy {
         validate(policy)?;
     }
-    settings::set_project(pool, user.organization_id, id, user.user_id, policy).await?;
-    Ok(Json(owned_project(pool, user, id).await?))
+    settings::set_project(pool, organization_id, id, user.user_id, policy).await?;
+    let (_, _, retention) = owned_project(pool, user, id).await?;
+    Ok(Json(retention))
 }
 
 async fn put_project(

@@ -4,7 +4,11 @@ server:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: "1", memory: 512Mi}
-  registrationEnabled: false
+  publicSignupEnabled: false
+  # Deprecated compatibility option. When set, it takes precedence during the
+  # compatibility window; remove it after migrating to publicSignupEnabled.
+  # registrationEnabled: false
+  organizationMode: single
   sessionLifetimeSeconds: 43200
   corsOrigins: []
 web:
@@ -46,6 +50,10 @@ notifications:
   concurrency: 8
   leaseSeconds: 30
   drainSeconds: 15
+invitations:
+  lifetimeSeconds: 604800
+  createLimitPerHour: 20
+  resendLimitPerHour: 5
 mail:
   enabled: false
   # Browser origin used in verification and password-reset links. Production mail requires HTTPS.

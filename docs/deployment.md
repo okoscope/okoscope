@@ -69,15 +69,28 @@ For a non-development installation, remove `developmentPlaintext`, issue a serve
 
 The versioned browser contract is [`openapi/okoscope-v1.yaml`](../openapi/okoscope-v1.yaml). Generate a client in the separate UI repository with an OpenAPI 3.1-compatible generator; use `GET /api/v1/build-info` without authentication to compare `api_version`, `git_commit`, and `required_database_migration` before loading the UI.
 
-Organization creation and global `/api/v1/admin/...` discovery use only `adminAuth`. Project and Application creation plus Application-credential listing, issuance, and revocation accept either `bearerAuth` for the owning Organization or `adminAuth`; cross-tenant targets return a non-enumerating `404`. Browser provisioning POST requests should send a newly generated canonical UUID in `Idempotency-Key`. Organization and Project retries return the original resource. Application and credential retries return `operation_already_completed` and never expose their one-time plaintext token again. Provisioning validation errors use stable machine-readable codes and may include a `fields` map for form-level feedback.
+Normal platform and cross-tenant `/api/v1/admin/...` operations require an active
+personal `super_admin` user session; sensitive mutations additionally require
+recent password confirmation. The configured operator credential is limited to
+setup compatibility and the audited recovery command and must never be stored in
+browser storage. Tenant routes derive the active Organization and effective
+Project access from the current session. Cross-tenant and unassigned Project
+targets return a non-enumerating `404`. See the [authentication and access-control
+operations guide](access-control.md) for the complete role matrix, invitation
+lifecycle, active-Organization switching, audit, and recovery.
 
-All protected routes currently accept the operator bearer credential. Storing this credential in browser storage gives the browser broad tenant access, so this is an MVP deployment model, not user authentication. Prefer a same-origin reverse proxy that keeps the API and UI behind TLS and injects or brokers credentials server-side. User sessions and scoped RBAC remain future work.
+Browser provisioning POST requests should send a newly generated canonical UUID
+in `Idempotency-Key`. Organization and Project retries return the original
+resource. Application and credential retries return `operation_already_completed`
+and never expose their one-time plaintext token again. Provisioning validation
+errors use stable machine-readable codes and may include a `fields` map for
+form-level feedback.
 
 Cross-origin browser access is disabled by default. Set `OKOSCOPE_CORS_ORIGINS` to a comma-separated list of exact `http` or `https` origins (for example `https://okoscope.example.com`); wildcards and URL paths are rejected at startup. Roll out first with an empty value, verify same-origin access, then add only the UI origin and check an authenticated preflight. CORS grants browser permission only—it never replaces bearer authentication.
 
-Transactional email uses standard authenticated SMTP and a PostgreSQL outbox. Prefer the Helm interface documented in [production self-hosting](self-hosted-deployment.md#transactional-email): it maps non-secret `mail` values to `OKOSCOPE_MAIL_*` / `OKOSCOPE_SMTP_*` settings and reads the SMTP username, password, and dedicated 64-hex-character mail encryption key only from Kubernetes Secrets. The worker is off by default. Production requires HTTPS action links plus STARTTLS or implicit TLS with certificate validation; plaintext SMTP is limited to an explicitly selected local development configuration.
+Transactional email uses standard authenticated SMTP and a PostgreSQL outbox. Prefer the Helm interface documented in [production self-hosting](self-hosted-deployment.md#transactional-email): it maps non-secret `mail` values to `OKOSCOPE_MAIL_*` / `OKOSCOPE_SMTP_*` settings and reads the SMTP username, password, and dedicated 64-hex-character mail encryption key only from Kubernetes Secrets. The worker is off by default. Production requires HTTPS action links plus STARTTLS or implicit TLS with certificate validation; plaintext SMTP is limited to an explicitly selected local development configuration. Invitation tokens use fragment links and digest-only business persistence; an explicit POST accepts the grant.
 
-The server image receives `OKOSCOPE_GIT_COMMIT` as a Docker build argument in GitHub Actions; local builds deterministically report `unknown`. This milestone has no database migration. Rollback consists of deploying the previous server image and removing `OKOSCOPE_CORS_ORIGINS`; stored runtime data is unaffected.
+The server image receives `OKOSCOPE_GIT_COMMIT` as a Docker build argument in GitHub Actions; local builds deterministically report `unknown`. Access-control migration 27 is additive and required by readiness. Rollback must preserve its identities, memberships, platform assignments, Project grants, invitation metadata, sessions, audit records, outbox work, and Secrets; deploy only an older binary known to tolerate the applied schema.
 
 For navigation performance, run [`ops/queries/navigation.sql`](../ops/queries/navigation.sql) with tenant IDs from the installation and confirm PostgreSQL uses tenant/ownership indexes rather than unbounded scans.
 

@@ -12,6 +12,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::{
+    access_control::ProjectRole,
     auth::{UserPrincipal, UserSessionAuthenticator},
     web_api::{RequestId, error_response},
 };
@@ -86,8 +87,8 @@ impl NavigationError {
             request_id: request_id.clone(),
         }
     }
-    fn database(error: &sqlx::Error, request_id: &RequestId) -> Self {
-        tracing::error!(error=%error, request_id=%request_id.0, "navigation API database error");
+    fn database(_error: &sqlx::Error, request_id: &RequestId) -> Self {
+        tracing::error!(request_id=%request_id.0, "navigation API database error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
@@ -138,6 +139,12 @@ struct ProjectSummary {
     archived_at: Option<DateTime<Utc>>,
     application_count: i64,
     runtime_group_count: i64,
+    #[sqlx(skip)]
+    effective_project_role: Option<ProjectRole>,
+    #[sqlx(skip)]
+    effective_access_source: Option<&'static str>,
+    #[sqlx(skip)]
+    capabilities: serde_json::Value,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -150,6 +157,67 @@ struct ApplicationSummary {
     release_count: i64,
     runtime_group_count: i64,
     latest_observed_at: Option<DateTime<Utc>>,
+    #[sqlx(skip)]
+    effective_project_role: Option<ProjectRole>,
+    #[sqlx(skip)]
+    effective_access_source: Option<&'static str>,
+    #[sqlx(skip)]
+    capabilities: serde_json::Value,
+}
+
+fn scoped_capabilities(role: ProjectRole, organization_admin: bool) -> serde_json::Value {
+    let project_admin = role == ProjectRole::Admin;
+    serde_json::json!({
+        "manage_platform": false,
+        "manage_organization": organization_admin,
+        "create_project": organization_admin,
+        "manage_project_members": project_admin,
+        "create_application": project_admin,
+        "manage_credentials": project_admin,
+        "organization_roles_grantable": if organization_admin { vec!["owner", "admin", "member"] } else { Vec::<&str>::new() },
+        "project_roles_grantable": if organization_admin { vec!["admin", "member"] } else if project_admin { vec!["member"] } else { Vec::<&str>::new() },
+    })
+}
+
+async fn effective_project_access(
+    pool: &PgPool,
+    principal: UserPrincipal,
+    project_id: Uuid,
+) -> Result<Option<(ProjectRole, &'static str)>, sqlx::Error> {
+    if principal.role.inherits_project_access() {
+        return Ok(Some((ProjectRole::Admin, "organization")));
+    }
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM project_memberships WHERE organization_id=$1 AND project_id=$2 AND user_id=$3",
+    )
+    .bind(principal.organization_id)
+    .bind(project_id)
+    .bind(principal.user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(role.and_then(|value| Some((value.parse().ok()?, "project"))))
+}
+
+fn apply_project_access(
+    item: &mut ProjectSummary,
+    role: ProjectRole,
+    source: &'static str,
+    organization_admin: bool,
+) {
+    item.effective_project_role = Some(role);
+    item.effective_access_source = Some(source);
+    item.capabilities = scoped_capabilities(role, organization_admin);
+}
+
+fn apply_application_access(
+    item: &mut ApplicationSummary,
+    role: ProjectRole,
+    source: &'static str,
+    organization_admin: bool,
+) {
+    item.effective_project_role = Some(role);
+    item.effective_access_source = Some(source);
+    item.capabilities = scoped_capabilities(role, organization_admin);
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +313,18 @@ async fn projects(
     let (cursor_time, cursor_id) = cursor.unzip();
     let mut items = sqlx::query_as::<_, ProjectSummary>("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=p.organization_id AND g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4")
         .bind(principal.organization_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
+    let organization_admin = principal.role.inherits_project_access();
+    let mut visible = Vec::with_capacity(items.len());
+    for mut item in items.drain(..) {
+        if let Some((role, source)) = effective_project_access(&state.pool, principal, item.id)
+            .await
+            .map_err(|error| NavigationError::database(&error, &request_id))?
+        {
+            apply_project_access(&mut item, role, source, organization_admin);
+            visible.push(item);
+        }
+    }
+    items = visible;
     Ok(Json(page(&mut items, limit, |item| item.id)))
 }
 
@@ -255,8 +335,18 @@ async fn project(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ProjectSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let item = sqlx::query_as::<_, ProjectSummary>("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=p.organization_id AND g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2")
+    let mut item = sqlx::query_as::<_, ProjectSummary>("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=p.organization_id AND g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2")
         .bind(principal.organization_id).bind(project_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
+    let (role, source) = effective_project_access(&state.pool, principal, project_id)
+        .await
+        .map_err(|error| NavigationError::database(&error, &request_id))?
+        .ok_or_else(|| NavigationError::not_found(&request_id))?;
+    apply_project_access(
+        &mut item,
+        role,
+        source,
+        principal.role.inherits_project_access(),
+    );
     Ok(Json(item))
 }
 
@@ -268,6 +358,10 @@ async fn applications(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<ApplicationSummary>>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
+    let (access_role, access_source) = effective_project_access(&state.pool, principal, project_id)
+        .await
+        .map_err(|error| NavigationError::database(&error, &request_id))?
+        .ok_or_else(|| NavigationError::not_found(&request_id))?;
     ensure_project(&state.pool, principal.organization_id, project_id)
         .await
         .map_err(|error| NavigationError::database(&error, &request_id))?
@@ -292,6 +386,14 @@ async fn applications(
     let (cursor_time, cursor_id) = cursor.unzip();
     let mut items = sqlx::query_as::<_, ApplicationSummary>("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=a.organization_id AND g.project_id=a.project_id AND g.application_id=a.id AND g.occurrence_count>0) runtime_group_count,(SELECT max(e.last_seen_at) FROM runtime_event_groups e WHERE e.organization_id=a.organization_id AND e.project_id=a.project_id AND e.application_id=a.id AND e.occurrence_count>0) latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4)) ORDER BY a.created_at,a.id LIMIT $5")
         .bind(principal.organization_id).bind(project_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
+    for item in &mut items {
+        apply_application_access(
+            item,
+            access_role,
+            access_source,
+            principal.role.inherits_project_access(),
+        );
+    }
     Ok(Json(page(&mut items, limit, |item| item.id)))
 }
 
@@ -302,8 +404,18 @@ async fn application(
     Path((project_id, application_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ApplicationSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let item = sqlx::query_as::<_, ApplicationSummary>("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=a.organization_id AND g.project_id=a.project_id AND g.application_id=a.id AND g.occurrence_count>0) runtime_group_count,(SELECT max(e.last_seen_at) FROM runtime_event_groups e WHERE e.organization_id=a.organization_id AND e.project_id=a.project_id AND e.application_id=a.id AND e.occurrence_count>0) latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3")
+    let (access_role, access_source) = effective_project_access(&state.pool, principal, project_id)
+        .await
+        .map_err(|error| NavigationError::database(&error, &request_id))?
+        .ok_or_else(|| NavigationError::not_found(&request_id))?;
+    let mut item = sqlx::query_as::<_, ApplicationSummary>("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=a.organization_id AND g.project_id=a.project_id AND g.application_id=a.id AND g.occurrence_count>0) runtime_group_count,(SELECT max(e.last_seen_at) FROM runtime_event_groups e WHERE e.organization_id=a.organization_id AND e.project_id=a.project_id AND e.application_id=a.id AND e.occurrence_count>0) latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3")
         .bind(principal.organization_id).bind(project_id).bind(application_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
+    apply_application_access(
+        &mut item,
+        access_role,
+        access_source,
+        principal.role.inherits_project_access(),
+    );
     Ok(Json(item))
 }
 

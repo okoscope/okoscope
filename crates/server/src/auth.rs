@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, header};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -27,16 +27,21 @@ pub struct SessionScope {
     pub cluster_id: Uuid,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrganizationRole {
     Owner,
+    Admin,
     Member,
 }
 
 impl OrganizationRole {
     pub fn is_owner(self) -> bool {
         self == Self::Owner
+    }
+
+    pub fn inherits_project_access(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
     }
 }
 
@@ -46,6 +51,7 @@ impl FromStr for OrganizationRole {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "owner" => Ok(Self::Owner),
+            "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
             _ => Err(()),
         }
@@ -60,6 +66,42 @@ pub struct UserPrincipal {
     pub role: OrganizationRole,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityPrincipal {
+    pub user_id: Uuid,
+    pub session_id: Uuid,
+    pub active_organization_id: Option<Uuid>,
+    pub organization_role: Option<OrganizationRole>,
+    pub is_super_admin: bool,
+    pub privileged_until: Option<DateTime<Utc>>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionIdentityRow {
+    session_id: Uuid,
+    user_id: Uuid,
+    organization_id: Option<Uuid>,
+    role: Option<String>,
+    is_super_admin: bool,
+    privileged_until: Option<DateTime<Utc>>,
+}
+
+impl IdentityPrincipal {
+    pub fn has_recent_privilege(self) -> bool {
+        self.privileged_until
+            .is_some_and(|until| until > Utc::now())
+    }
+
+    pub fn tenant(self) -> Option<UserPrincipal> {
+        Some(UserPrincipal {
+            user_id: self.user_id,
+            session_id: self.session_id,
+            organization_id: self.active_organization_id?,
+            role: self.organization_role?,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UserSessionAuthenticator {
     pool: PgPool,
@@ -72,25 +114,35 @@ impl UserSessionAuthenticator {
     }
 
     pub async fn authenticate(&self, token: &str) -> Result<Option<UserPrincipal>, sqlx::Error> {
+        Ok(self
+            .authenticate_identity(token)
+            .await?
+            .and_then(IdentityPrincipal::tenant))
+    }
+
+    pub async fn authenticate_identity(
+        &self,
+        token: &str,
+    ) -> Result<Option<IdentityPrincipal>, sqlx::Error> {
         let Some(digest) = session_digest(token) else {
             return Ok(None);
         };
-        let identity: Option<(Uuid, Uuid, Uuid, String)> = sqlx::query_as(
-            "UPDATE user_sessions s SET last_used_at=now() FROM users u,organization_memberships m WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND m.user_id=s.user_id AND m.organization_id=s.organization_id RETURNING s.id,s.user_id,s.organization_id,m.role",
+        let identity: Option<SessionIdentityRow> = sqlx::query_as(
+            "UPDATE user_sessions s SET last_used_at=now() FROM users u WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id AND o.status='active')) RETURNING s.id session_id,s.user_id,s.organization_id,(SELECT m.role FROM organization_memberships m WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id) role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=s.user_id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,s.privileged_until",
         )
         .bind(digest.to_vec())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(
-            identity.and_then(|(session_id, user_id, organization_id, role)| {
-                Some(UserPrincipal {
-                    user_id,
-                    session_id,
-                    organization_id,
-                    role: role.parse().ok()?,
-                })
-            }),
-        )
+        Ok(identity.and_then(|row| {
+            Some(IdentityPrincipal {
+                user_id: row.user_id,
+                session_id: row.session_id,
+                active_organization_id: row.organization_id,
+                organization_role: row.role.map(|value| value.parse()).transpose().ok()?,
+                is_super_admin: row.is_super_admin,
+                privileged_until: row.privileged_until,
+            })
+        }))
     }
 
     pub async fn authenticate_headers(
@@ -101,6 +153,16 @@ impl UserSessionAuthenticator {
             return Ok(None);
         };
         self.authenticate(token).await
+    }
+
+    pub async fn authenticate_identity_headers(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<IdentityPrincipal>, sqlx::Error> {
+        let Some(token) = session_token(headers) else {
+            return Ok(None);
+        };
+        self.authenticate_identity(token).await
     }
 }
 
@@ -196,10 +258,12 @@ pub struct AuthenticatedUser {
     pub user_id: Uuid,
     pub email: String,
     pub password_hash: String,
-    pub organization_id: Uuid,
-    pub organization_slug: String,
-    pub organization_name: String,
-    pub role: String,
+    pub display_name: String,
+    pub organization_id: Option<Uuid>,
+    pub organization_slug: Option<String>,
+    pub organization_name: Option<String>,
+    pub role: Option<String>,
+    pub is_super_admin: bool,
     pub disabled_at: Option<DateTime<Utc>>,
     pub email_verified_at: Option<DateTime<Utc>>,
     pub preferred_locale: String,

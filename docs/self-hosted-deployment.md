@@ -6,7 +6,13 @@ Start with the [installation quick starts](installation.md). Helm is the support
 
 See the [complete Helm values reference](helm-values.md) for both charts, defaults, required fields, and validation limits.
 
-Registration defaults to disabled. Keep `server.registrationEnabled: false` for a private installation and use `/setup` for its first owner. To offer public signup, set `server.registrationEnabled: true`; this is supported with Web ingress enabled. Each signup creates a new Organization and its owner. It does not grant global administration or join an existing Organization.
+Public signup defaults to disabled. Keep `server.publicSignupEnabled: false` for an
+invite-only installation and use `/setup` for its first personal super-administrator.
+Setup creates no tenant resources. The super-administrator provisions an Organization
+with a pending first-owner invitation or explicitly becomes its owner. To offer public
+signup, use `server.organizationMode: multiple`, configure usable transactional mail,
+and set `server.publicSignupEnabled: true`. Each verified signup creates a new
+Organization and owner membership; it never grants platform authority.
 
 Use separate TLS hostnames for HTTP and gRPC. The first release gates examples for ingress-nginx and Traefik; other controllers require operator verification.
 
@@ -18,7 +24,12 @@ internalSecret:
   existingSecret: okoscope-internal-production
 server:
   replicas: 2
-  registrationEnabled: false
+  publicSignupEnabled: false
+  organizationMode: single
+invitations:
+  lifetimeSeconds: 604800
+  createLimitPerHour: 20
+  resendLimitPerHour: 5
 web:
   replicas: 2
 notifications:
@@ -48,7 +59,17 @@ address sends browser requests to the Server, add only those exact origins under
 port, but no path or wildcard. The chart safely serializes the derived and explicit
 origins into `OKOSCOPE_CORS_ORIGINS`.
 
-For externally managed internal keys, the referenced Secret must contain `admin-credential`, `webhook-encryption-key`, `identity-token-key`, and `mail-encryption-key`, or the alternative key names configured below `internalSecret`. The mail key is 32 random bytes encoded as 64 hexadecimal characters and protects queued verification/reset render data; back it up and never rotate it while encrypted outbox rows remain. Leaving `internalSecret.existingSecret` empty lets Helm generate keys once with `lookup`; the retained Secret and existing values are reused on upgrades. An upgrade from a chart that predates mail generates only the missing mail key. Offline GitOps rendering must use an externally managed Secret because `lookup` cannot recover live state.
+For externally managed internal keys, the referenced Secret must contain
+`admin-credential`, `webhook-encryption-key`, `identity-token-key`, and
+`mail-encryption-key`, or the alternative key names configured below
+`internalSecret`. The configured admin credential is setup compatibility and
+break-glass authority only; it is not a normal browser or tenant credential. The
+mail key is 32 random bytes encoded as 64 hexadecimal characters and protects
+queued verification, reset, and invitation render data. Back it up and never
+rotate it while encrypted outbox rows remain. Leaving `internalSecret.existingSecret`
+empty lets Helm generate keys once with `lookup`; the retained Secret and existing
+values are reused on upgrades. Offline GitOps rendering must use an externally
+managed Secret because `lookup` cannot recover live state.
 
 Set `imagePullSecrets` for a private registry. Resource requests and limits live under `server.resources`, `web.resources`, and, when enabled, `okoscope-agent.resources`. Notifications are disabled by default and are enabled with `notifications.enabled=true`; the webhook encryption key must remain stable and separately recoverable.
 
@@ -56,7 +77,16 @@ The optional local agent uses the same values contract as the standalone chart b
 
 ## Transactional email
 
-Transactional email is provider-neutral authenticated SMTP and is disabled by default. Private setup and `bootstrap-owner` remain mail-free. Public registration cannot be enabled until mail is usable; production validation requires an HTTPS browser origin, certificate-verified STARTTLS or implicit TLS, a sender address, an SMTP credential Secret, and the mail encryption key. Organization creation itself sends no email. Creating an Application queues a localized message for every currently verified owner of its Organization.
+Transactional email is provider-neutral authenticated SMTP and is disabled by
+default. Initial setup and operator recovery remain mail-free. Invitation issuance
+and public signup require usable mail; when it is unavailable an invitation request
+returns `mail_unavailable` (HTTP 503) and commits no invitation, token, audit
+mutation, or outbox intent. Production validation requires an HTTPS browser origin,
+certificate-verified STARTTLS or implicit TLS, a sender address, an SMTP credential
+Secret, and the mail encryption key. Organization and Project invitation templates
+are localized in English and Russian. Their bearer token is placed in the URL
+fragment and acceptance requires an explicit action, so merely loading the route
+does not consume the invitation.
 
 Create SMTP credentials without placing them in a values file or shell history:
 
@@ -76,7 +106,12 @@ Then add non-secret values:
 
 ```yaml
 server:
-  registrationEnabled: false # enable only after test delivery succeeds
+  publicSignupEnabled: false # enable only in multiple mode after test delivery
+  organizationMode: single
+invitations:
+  lifetimeSeconds: 604800
+  createLimitPerHour: 20
+  resendLimitPerHour: 5
 mail:
   enabled: true
   publicWebUrl: https://okoscope.example.com
@@ -110,7 +145,11 @@ dynamic value, and do not add scripts, forms, remote images, fonts, or styleshee
 SMTP and sender settings above affect transport headers only; they do not alter
 the template branding.
 
-Roll out with registration still disabled, render manifests locally, upgrade, and request a password-reset email for a dedicated existing test account. The public response is intentionally generic, so confirm enqueueing and SMTP acceptance with metrics rather than response text:
+Roll out with public signup disabled, render manifests locally, upgrade, and request
+a password-reset email for a dedicated existing test account. Then send a test
+invitation to a controlled mailbox and confirm its safe pending/delivered state.
+The password-reset response is intentionally generic, so confirm enqueueing and
+SMTP acceptance with metrics rather than response text:
 
 ```bash
 helm template okoscope deploy/helm/okoscope -f production-values.yaml >/tmp/okoscope-rendered.yaml
@@ -133,12 +172,28 @@ If the domain uses external name servers, copy the exact MX, SPF, and DKIM value
 
 - `okoscope_mail_enabled 0` means the worker is intentionally disabled. Recheck rendered non-secret values; never print Secret data.
 - A Pod stuck before startup usually indicates invalid URL/TLS/bounds or a missing Secret/key. Use `kubectl describe pod` and redacted event reasons. Test TCP/TLS reachability from an approved diagnostic Pod without supplying credentials on its command line.
-- Rising retries with an aging queue indicate connectivity, TLS, authentication, throttling, or transient SMTP rejection. Terminal failures or expired actions require a fresh verification/reset request; do not extract ciphertext or token rows.
+- Rising retries with an aging queue indicate connectivity, TLS, authentication, throttling, or transient SMTP rejection. Terminal failures or expired actions require a fresh verification/reset request or invitation resend; resend rotates the token and invalidates the previous link. Do not extract ciphertext or token rows.
 - After SMTP acceptance, check SPF, DKIM, DMARC, sender alignment, provider quotas, recipient spam filtering, and the provider's redacted delivery diagnostics.
-- To pause delivery, first disable public registration, then set `mail.enabled: false`; durable rows remain in PostgreSQL. Re-enable with the same mail encryption key to drain them.
-- Before rolling back to a version that does not enforce verification, disable public registration and keep it disabled. Roll back application workloads without reversing the additive database migration. Restore verification-aware Server and Web versions before enabling registration again.
+- To pause delivery, first disable public signup and stop issuing invitations, then set `mail.enabled: false`; durable rows remain in PostgreSQL. Re-enable with the same mail encryption key to drain them.
+- Before rollback, disable public signup and invitation issuance. Roll back application workloads only to a binary compatible with the applied additive database migration. Preserve identities, memberships, platform assignments, Project grants, invitation metadata, audit history, outbox rows, PostgreSQL data, and retained Secrets.
 
 ## Upgrades and migrations
+
+Before upgrading an existing installation, apply migration 27 and keep the shared
+operator path temporarily available. Existing Organizations become active and
+existing Organization members are backfilled into their current Projects so
+visibility is preserved. Promote at least one enabled verified existing user to
+`super_admin`, sign in with that personal account, confirm its privileged session,
+and verify bounded global discovery before restricting the shared credential to
+break-glass use. The migration deliberately does not infer a person from the shared
+credential.
+
+Rename `server.registrationEnabled` to `server.publicSignupEnabled`. The legacy
+key is accepted for one compatibility window and, when present, takes precedence;
+remove it after verifying the rendered `OKOSCOPE_PUBLIC_SIGNUP_ENABLED` value.
+Choose `server.organizationMode` explicitly. `single` permits only one Organization;
+`multiple` uses the same RBAC but permits further super-admin provisioning and is
+required for public signup.
 
 Pin the same semantic version for both charts:
 
@@ -164,7 +219,26 @@ The old Makefile Kustomize targets (`deploy-render`, `deploy-diff`, and `migrate
 
 The idempotent migration hook runs before install and upgrade with bounded retry and deadline. A failure stops rollout. Inspect it with `kubectl get jobs,pods -n okoscope-system -l app.kubernetes.io/component=migration` and its Pod logs, correct database connectivity/permissions, then repeat the same `helm upgrade`. Never edit migration rows or attempt to reverse a schema migration.
 
-Use `helm rollback okoscope <REVISION> -n okoscope-system` only when the prior server version is forward-compatible with the applied database migration. Database backups and point-in-time recovery must be managed and tested outside Okoscope.
+Use `helm rollback okoscope <REVISION> -n okoscope-system` only when the prior server version is forward-compatible with the applied database migration. Do not reverse migration 27 or delete its additive authority/audit data. Database backups and point-in-time recovery must be managed and tested outside Okoscope.
+
+## Break-glass platform recovery
+
+Application safeguards reject removal of the final usable super-administrator. If
+every personal platform administrator is nevertheless inaccessible, first restore
+normal database and Secret availability and identify an existing enabled, verified
+user. Then run the narrow recovery command in the Server Pod:
+
+```bash
+kubectl -n okoscope-system exec deployment/okoscope-server -- \
+  server recover-super-admin --email operator@example.com
+```
+
+Authority comes only from the Pod's Secret-backed `OKOSCOPE_ADMIN_CREDENTIAL`;
+never pass it, a password, or a token on the command line. The command does not
+reset passwords. It idempotently restores the `super_admin` assignment and writes
+`platform_recovery.completed` with actor kind `system_recovery`. Verify personal
+sign-in, privileged confirmation, and that audit event before closing the incident.
+Do not enable public signup or directly edit role tables as recovery mechanisms.
 
 ## Uninstall ownership
 

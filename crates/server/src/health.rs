@@ -42,6 +42,11 @@ pub fn router(
         .as_ref()
         .is_some_and(|service| service.config.enabled);
     let api_router = api::router((*pool).clone())
+        .merge(crate::access_api::router((*pool).clone(), web_api_config))
+        .merge(crate::invitation_api::router(
+            (*pool).clone(),
+            web_api_config,
+        ))
         .merge(crate::user_auth::router((*pool).clone(), web_api_config))
         .merge(crate::onboarding::router((*pool).clone(), web_api_config))
         .merge(crate::attention::router((*pool).clone(), delivery_enabled))

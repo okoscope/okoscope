@@ -7,7 +7,15 @@ metadata:
 data:
   OKOSCOPE_MIGRATE: "false"
   OKOSCOPE_DEVELOPMENT_PLAINTEXT: "true"
-  OKOSCOPE_REGISTRATION_ENABLED: {{ .Values.server.registrationEnabled | quote }}
+  {{- $publicSignupEnabled := .Values.server.publicSignupEnabled -}}
+  {{- if ne .Values.server.registrationEnabled nil -}}
+  {{- $publicSignupEnabled = .Values.server.registrationEnabled -}}
+  {{- end }}
+  OKOSCOPE_PUBLIC_SIGNUP_ENABLED: {{ $publicSignupEnabled | quote }}
+  OKOSCOPE_ORGANIZATION_MODE: {{ .Values.server.organizationMode | quote }}
+  OKOSCOPE_INVITATION_LIFETIME_SECONDS: {{ .Values.invitations.lifetimeSeconds | quote }}
+  OKOSCOPE_INVITATION_CREATE_LIMIT_PER_HOUR: {{ .Values.invitations.createLimitPerHour | quote }}
+  OKOSCOPE_INVITATION_RESEND_LIMIT_PER_HOUR: {{ .Values.invitations.resendLimitPerHour | quote }}
   OKOSCOPE_SESSION_LIFETIME_SECONDS: {{ .Values.server.sessionLifetimeSeconds | quote }}
   {{- $corsOrigins := include "okoscope.corsOrigins" . }}
   {{- if $corsOrigins }}

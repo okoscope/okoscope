@@ -1,3 +1,6 @@
+pub mod access_api;
+pub mod access_audit;
+pub mod access_control;
 pub mod admin_auth;
 pub mod api;
 pub mod application_credentials;
@@ -12,6 +15,7 @@ pub mod ingestion;
 pub mod inventory;
 pub mod inventory_api;
 pub mod inventory_operations;
+pub mod invitation_api;
 pub mod metrics;
 pub mod navigation;
 pub mod notification;

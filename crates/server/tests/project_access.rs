@@ -1,0 +1,203 @@
+use chrono::Utc;
+use server::{
+    access_control::{EffectiveAccessSource, ProjectRole, resolve_project_access},
+    auth::{IdentityPrincipal, OrganizationRole},
+};
+use uuid::Uuid;
+
+const ROUTE_SOURCES: &[(&str, &str)] = &[
+    (include_str!("../src/api.rs"), "/api/v1/runtime-groups"),
+    (
+        include_str!("../src/attention.rs"),
+        "/api/v1/attention-summary",
+    ),
+    (
+        include_str!("../src/inventory_api.rs"),
+        "/runtime-inventory",
+    ),
+    (include_str!("../src/policy_api.rs"), "/policies"),
+    (include_str!("../src/releases.rs"), "/releases"),
+    (include_str!("../src/resources.rs"), "/resources"),
+    (
+        include_str!("../src/notification/api.rs"),
+        "/webhook-destinations",
+    ),
+    (
+        include_str!("../src/notification/retention_api.rs"),
+        "/notification-retention",
+    ),
+    (
+        include_str!("../src/runtime_retention/api.rs"),
+        "/runtime-retention",
+    ),
+];
+
+#[test]
+fn every_descendant_route_family_has_a_project_access_seam() {
+    for (source, route_family) in ROUTE_SOURCES {
+        assert!(
+            source.contains(route_family),
+            "missing route family {route_family}"
+        );
+        assert!(
+            source.contains("resolve_project_access"),
+            "{route_family} bypasses the common project resolver"
+        );
+    }
+    let attention = include_str!("../src/attention.rs");
+    assert!(attention.contains("project_id=ANY($2)"));
+    assert!(attention.contains("project_ids"));
+}
+
+fn principal(
+    user_id: Uuid,
+    organization_id: Option<Uuid>,
+    role: Option<OrganizationRole>,
+    is_super_admin: bool,
+) -> IdentityPrincipal {
+    IdentityPrincipal {
+        user_id,
+        session_id: Uuid::new_v4(),
+        active_organization_id: organization_id,
+        organization_role: role,
+        is_super_admin,
+        privileged_until: Some(Utc::now()),
+    }
+}
+
+async fn insert_user(pool: &sqlx::PgPool) -> Uuid {
+    let id = Uuid::new_v4();
+    let password_hash = server::auth::hash_password("project-access-test-password").unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,$2,$3,now())",
+    )
+    .bind(id)
+    .bind(format!("{id}@example.test"))
+    .bind(password_hash)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn effective_access_matrix_is_tenant_safe(pool: sqlx::PgPool) {
+    let organization_id = Uuid::new_v4();
+    let foreign_organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,'Access')")
+        .bind(organization_id)
+        .bind(organization_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,'Foreign')")
+        .bind(foreign_organization_id)
+        .bind(foreign_organization_id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,'project','Project')",
+    )
+    .bind(project_id)
+    .bind(organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let owner = insert_user(&pool).await;
+    let member = insert_user(&pool).await;
+    for (user_id, role) in [(owner, "owner"), (member, "member")] {
+        sqlx::query(
+            "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let inherited = resolve_project_access(
+        &pool,
+        principal(
+            owner,
+            Some(organization_id),
+            Some(OrganizationRole::Owner),
+            false,
+        ),
+        organization_id,
+        project_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(inherited.source, EffectiveAccessSource::Organization);
+    assert_eq!(inherited.role, ProjectRole::Admin);
+    assert!(
+        resolve_project_access(
+            &pool,
+            principal(
+                member,
+                Some(organization_id),
+                Some(OrganizationRole::Member),
+                false
+            ),
+            organization_id,
+            project_id,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let assigned = resolve_project_access(
+        &pool,
+        principal(
+            member,
+            Some(organization_id),
+            Some(OrganizationRole::Member),
+            false,
+        ),
+        organization_id,
+        project_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(assigned.source, EffectiveAccessSource::Project);
+    assert_eq!(assigned.role, ProjectRole::Member);
+    assert!(
+        resolve_project_access(
+            &pool,
+            principal(
+                member,
+                Some(foreign_organization_id),
+                Some(OrganizationRole::Member),
+                false
+            ),
+            organization_id,
+            project_id,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let platform = resolve_project_access(
+        &pool,
+        principal(Uuid::new_v4(), None, None, true),
+        organization_id,
+        project_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(platform.source, EffectiveAccessSource::Platform);
+}

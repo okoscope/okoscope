@@ -435,7 +435,7 @@ paths:
   /api/v1/organizations:
     post:
       operationId: createOrganization
-      security: [{ adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/ProvisioningIdempotencyKey' }]
       requestBody:
         required: true
@@ -461,7 +461,7 @@ paths:
   /api/v1/admin/organizations:
     get:
       operationId: listAdminOrganizations
-      security: [{ adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '200':
           {
@@ -478,7 +478,7 @@ paths:
     parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
     get:
       operationId: listAdminProjects
-      security: [{ adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '200':
           {
@@ -493,7 +493,7 @@ paths:
     parameters: [{ $ref: '#/components/parameters/ProjectId' }]
     get:
       operationId: listAdminApplications
-      security: [{ adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '200':
           {
@@ -514,7 +514,7 @@ paths:
       ]
     get:
       operationId: getAdminApplication
-      security: [{ adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '200':
           {
@@ -532,7 +532,7 @@ paths:
     parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
     post:
       operationId: createProject
-      security: [{ sessionAuth: [] }, { adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/ProvisioningIdempotencyKey' }]
       requestBody:
         required: true
@@ -654,7 +654,7 @@ paths:
         }
     post:
       operationId: createApplication
-      security: [{ sessionAuth: [] }, { adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/ProvisioningIdempotencyKey' }]
       requestBody:
         required: true
@@ -713,7 +713,7 @@ paths:
       ]
     get:
       operationId: listApplicationCredentials
-      security: [{ sessionAuth: [] }, { adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '200':
           {
@@ -728,7 +728,7 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
     post:
       operationId: issueApplicationCredential
-      security: [{ sessionAuth: [] }, { adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/ProvisioningIdempotencyKey' }]
       requestBody:
         required: true
@@ -758,7 +758,7 @@ paths:
       ]
     delete:
       operationId: revokeApplicationCredential
-      security: [{ sessionAuth: [] }, { adminAuth: [] }]
+      security: [{ sessionAuth: [] }]
       responses:
         '204': { description: Credential revoked; repeated revocation is successful }
         '401': { $ref: '#/components/responses/Error' }
@@ -1738,6 +1738,528 @@ paths:
     get:
       operationId: getNotificationRecoveryOperation
       responses: { '200': { $ref: '#/components/responses/RecoveryOperationDetail' } }
+  /api/v1/auth/policy:
+    get:
+      operationId: getAuthenticationPolicy
+      security: []
+      responses:
+        '200': { description: Public authentication policy, content: { application/json: { schema: { $ref: '#/components/schemas/AuthenticationPolicy' } } } }
+  /api/v1/auth/organization-selections:
+    post:
+      operationId: selectActiveOrganization
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationSelectionRequest' } } } }
+      responses:
+        '200': { description: Rotated active Organization session, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationSelection' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/privilege-confirmations:
+    post:
+      operationId: confirmPlatformPrivilege
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PrivilegeConfirmationRequest' } } } }
+      responses:
+        '200': { description: Rotated privileged session, content: { application/json: { schema: { $ref: '#/components/schemas/PrivilegeConfirmation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/invitations/inspections:
+    post:
+      operationId: inspectInvitation
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationTokenRequest' } } } }
+      responses:
+        '200': { description: Scanner-safe bounded invitation display, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationInspection' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/v1/invitations/acceptances/new-user:
+    post:
+      operationId: acceptInvitationAsNewUser
+      security: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NewUserInvitationAcceptanceRequest' } } } }
+      responses:
+        '201': { description: Verified identity, scoped grant, and session created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationAcceptance' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/v1/invitations/acceptances/existing-user:
+    post:
+      operationId: acceptInvitationAsExistingUser
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationTokenRequest' } } } }
+      responses:
+        '200': { description: Scoped grant accepted for current identity, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationAcceptance' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/users:
+    get:
+      operationId: listPlatformUsers
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded global user page, content: { application/json: { schema: { $ref: '#/components/schemas/PlatformUserPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/users/{user_id}/status:
+    patch:
+      operationId: setPlatformUserStatus
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/UserStatusChangeRequest' } } } }
+      responses:
+        '200': { description: Updated safe user, content: { application/json: { schema: { $ref: '#/components/schemas/PlatformUser' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/users/{user_id}/roles/super-admin:
+    parameters: [{ $ref: '#/components/parameters/UserId' }]
+    put:
+      operationId: grantSuperAdmin
+      responses:
+        '204': { description: Role granted }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: revokeSuperAdmin
+      responses:
+        '204': { description: Role revoked }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations:
+    get:
+      operationId: listPlatformOrganizations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded global Organization page, content: { application/json: { schema: { $ref: '#/components/schemas/PlatformOrganizationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createPlatformOrganization
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreatePlatformOrganizationRequest' } } } }
+      responses:
+        '201': { description: Organization provisioned, content: { application/json: { schema: { $ref: '#/components/schemas/ProvisionedOrganization' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: getPlatformOrganization
+      responses:
+        '200': { description: Safe Organization detail, content: { application/json: { schema: { $ref: '#/components/schemas/PlatformOrganization' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: deletePlatformOrganization
+      responses:
+        '204': { description: Pending owner Organization deleted }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/projects:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: listPlatformOrganizationProjects
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Project page, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createPlatformProject
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateNamedResource' } } } }
+      responses:
+        '201': { description: Project created without membership, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/members:
+    get:
+      operationId: listPlatformOrganizationMembers
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Organization member page, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/members/{user_id}:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/UserId' }]
+    patch:
+      operationId: updatePlatformOrganizationMemberRole
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRoleChangeRequest' } } } }
+      responses:
+        '200': { description: Updated member, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMember' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: removePlatformOrganizationMember
+      responses:
+        '204': { description: Organization membership removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/invitations:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: listPlatformOrganizationInvitations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded invitation page, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createPlatformOrganizationInvitation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateOrganizationInvitationRequest' } } } }
+      responses:
+        '201': { description: Invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/invitations/{invitation_id}:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/InvitationId' }]
+    delete:
+      operationId: revokePlatformOrganizationInvitation
+      responses:
+        '204': { description: Invitation revoked, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/organizations/{organization_id}/invitations/{invitation_id}/resend:
+    post:
+      operationId: resendPlatformOrganizationInvitation
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '201': { description: Replacement invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/applications:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+    get:
+      operationId: listPlatformProjectApplications
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Application page, content: { application/json: { schema: { $ref: '#/components/schemas/ApplicationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createPlatformApplication
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateNamedResource' } } } }
+      responses:
+        '201': { description: Application and one-time credential created, content: { application/json: { schema: { $ref: '#/components/schemas/CreatedApplication' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/members:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+    get:
+      operationId: listPlatformProjectMembers
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Project member page, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: addPlatformProjectMember
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AddProjectMemberRequest' } } } }
+      responses:
+        '201': { description: Explicit Project membership created, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMember' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/members/{user_id}:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/UserId' }]
+    patch:
+      operationId: updatePlatformProjectMemberRole
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectRoleChangeRequest' } } } }
+      responses:
+        '200': { description: Updated member, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMember' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: removePlatformProjectMember
+      responses:
+        '204': { description: Explicit Project membership removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/eligible-organization-members:
+    get:
+      operationId: listEligiblePlatformProjectMembers
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Enabled Organization members without explicit Project membership, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/invitations:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+    get:
+      operationId: listPlatformProjectInvitations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Project invitation page, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createPlatformProjectInvitation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProjectInvitationRequest' } } } }
+      responses:
+        '201': { description: Invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/invitations/{invitation_id}:
+    delete:
+      operationId: revokePlatformProjectInvitation
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '204': { description: Invitation revoked, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/invitations/{invitation_id}/resend:
+    post:
+      operationId: resendPlatformProjectInvitation
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '201': { description: Replacement invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/applications/{application_id}/credentials:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/ApplicationId' }]
+    get:
+      operationId: listPlatformApplicationCredentials
+      responses:
+        '200': { description: Secret-safe credential metadata, content: { application/json: { schema: { $ref: '#/components/schemas/ApplicationCredentialPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: issuePlatformApplicationCredential
+      parameters: [{ $ref: '#/components/parameters/ProvisioningIdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/IssueCredentialRequest' } } } }
+      responses:
+        '201': { description: One-time Application credential, content: { application/json: { schema: { $ref: '#/components/schemas/IssuedApplicationCredential' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/projects/{project_id}/applications/{application_id}/credentials/{credential_id}:
+    delete:
+      operationId: revokePlatformApplicationCredential
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/ApplicationId' }, { $ref: '#/components/parameters/CredentialId' }]
+      responses:
+        '204': { description: Credential revoked }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/invitations:
+    get:
+      operationId: listPlatformInvitations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded global invitation page, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/platform/audit:
+    get:
+      operationId: listPlatformAccessAudit
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded global access audit page, content: { application/json: { schema: { $ref: '#/components/schemas/AccessAuditPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/members:
+    get:
+      operationId: listOrganizationMembers
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Organization member page, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/members/{user_id}:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/UserId' }]
+    patch:
+      operationId: updateOrganizationMemberRole
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationRoleChangeRequest' } } } }
+      responses:
+        '200': { description: Updated member, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMember' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: removeOrganizationMember
+      responses:
+        '204': { description: Organization and descendant Project access removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/invitations:
+    parameters: [{ $ref: '#/components/parameters/OrganizationId' }]
+    get:
+      operationId: listOrganizationInvitations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded invitation page, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createOrganizationInvitation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateOrganizationInvitationRequest' } } } }
+      responses:
+        '201': { description: Invitation and mail intent created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/invitations/{invitation_id}:
+    delete:
+      operationId: revokeOrganizationInvitation
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '204': { description: Invitation revoked, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/invitations/{invitation_id}/resend:
+    post:
+      operationId: resendOrganizationInvitation
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '201': { description: Replacement invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/organizations/{organization_id}/audit:
+    get:
+      operationId: listOrganizationAccessAudit
+      parameters: [{ $ref: '#/components/parameters/OrganizationId' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Organization audit page, content: { application/json: { schema: { $ref: '#/components/schemas/AccessAuditPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/members:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+    get:
+      operationId: listProjectMembers
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Project member page, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: addProjectMember
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AddProjectMemberRequest' } } } }
+      responses:
+        '201': { description: Explicit Project membership created, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMember' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/members/{user_id}:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/UserId' }]
+    patch:
+      operationId: updateProjectMemberRole
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectRoleChangeRequest' } } } }
+      responses:
+        '200': { description: Updated explicit Project member, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectMember' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: removeProjectMember
+      responses:
+        '204': { description: Explicit Project membership removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/eligible-organization-members:
+    get:
+      operationId: listEligibleProjectMembers
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Enabled Organization members without explicit Project membership, content: { application/json: { schema: { $ref: '#/components/schemas/OrganizationMemberPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/invitations:
+    parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+    get:
+      operationId: listProjectInvitations
+      parameters: [{ $ref: '#/components/parameters/Cursor' }, { $ref: '#/components/parameters/Limit' }]
+      responses:
+        '200': { description: Bounded Project invitation page, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/InvitationPage' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createProjectInvitation
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateProjectInvitationRequest' } } } }
+      responses:
+        '201': { description: Invitation and mail intent created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/invitations/{invitation_id}:
+    delete:
+      operationId: revokeProjectInvitation
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '204': { description: Invitation revoked, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/invitations/{invitation_id}/resend:
+    post:
+      operationId: resendProjectInvitation
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }, { $ref: '#/components/parameters/InvitationId' }]
+      responses:
+        '201': { description: Replacement invitation created, headers: { Cache-Control: { $ref: '#/components/headers/NoStore' } }, content: { application/json: { schema: { $ref: '#/components/schemas/Invitation' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     sessionAuth:
@@ -1745,8 +2267,9 @@ components:
       in: cookie
       name: okoscope_session
       description: Opaque HttpOnly browser session; clients send requests with credentials enabled.
-    adminAuth: { type: http, scheme: bearer, description: System administrator credential }
   parameters:
+    UserId: { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+    InvitationId: { name: invitation_id, in: path, required: true, schema: { type: string, format: uuid } }
     Cursor:
       {
         name: cursor,
@@ -1762,7 +2285,7 @@ components:
         description: Opaque cursor scoped to the authenticated collection; clients must not parse it.,
       }
     Limit:
-      { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
     ProjectId:
       { name: project_id, in: path, required: true, schema: { type: string, format: uuid } }
     OrganizationId:
@@ -1801,33 +2324,63 @@ components:
       }
   headers:
     RequestId: { schema: { type: string }, description: Correlation identifier for the request. }
+    NoStore: { schema: { type: string, const: no-store }, description: Sensitive responses are never cached. }
   schemas:
     SetupStatus:
       type: object
       additionalProperties: false
       required: [state]
-      properties: { state: { enum: [owner_required, ready, setup_unavailable] } }
+      properties: { state: { enum: [platform_admin_required, ready, setup_unavailable] } }
     CompleteSetupRequest:
       type: object
       additionalProperties: false
-      required: [setup_token, email, password, organization_slug, organization_name, project_slug, project_name]
+      required: [setup_token, email, password, display_name, locale]
       properties:
         setup_token: { type: string, minLength: 32, writeOnly: true }
         email: { type: string, format: email, maxLength: 254 }
         password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }
-        organization_slug: { type: string, minLength: 1, maxLength: 63 }
-        organization_name: { type: string, minLength: 1, maxLength: 120 }
-        project_slug: { type: string, minLength: 1, maxLength: 63 }
-        project_name: { type: string, minLength: 1, maxLength: 120 }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        locale: { $ref: '#/components/schemas/SupportedLocale' }
     CompleteSetupResponse:
       type: object
       additionalProperties: false
-      required: [user_id, organization_id, project_id, role]
+      required: [user_id, platform_role, active_organization_id, privileged_until]
       properties:
         user_id: { type: string, format: uuid }
-        organization_id: { type: string, format: uuid }
-        project_id: { type: string, format: uuid }
-        role: { const: owner }
+        platform_role: { const: super_admin }
+        active_organization_id: { type: 'null' }
+        privileged_until: { $ref: '#/components/schemas/Timestamp' }
+    AuthenticationPolicy:
+      type: object
+      additionalProperties: false
+      required: [public_signup_enabled, invitation_registration_enabled, organization_mode]
+      properties:
+        public_signup_enabled: { type: boolean, default: false }
+        invitation_registration_enabled: { type: boolean, const: true }
+        organization_mode: { type: string, enum: [single, multiple], default: single }
+    OrganizationSelectionRequest:
+      type: object
+      additionalProperties: false
+      required: [organization_id]
+      properties: { organization_id: { $ref: '#/components/schemas/Uuid' } }
+    OrganizationSelection:
+      type: object
+      additionalProperties: false
+      required: [active_organization_id, role]
+      properties:
+        active_organization_id: { $ref: '#/components/schemas/Uuid' }
+        role: { $ref: '#/components/schemas/OrganizationRole' }
+    PrivilegeConfirmationRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password]
+      properties:
+        current_password: { type: string, format: password, minLength: 1, maxLength: 256, writeOnly: true }
+    PrivilegeConfirmation:
+      type: object
+      additionalProperties: false
+      required: [privileged_until]
+      properties: { privileged_until: { $ref: '#/components/schemas/Timestamp' } }
     AgentInstallationMetadata:
       type: object
       additionalProperties: false
@@ -2543,14 +3096,38 @@ components:
             next_cursor: { $ref: '#/components/schemas/NullableUuid' },
           },
       }
-    OrganizationRole: { type: string, enum: [owner, member] }
+    PlatformRole: { type: string, enum: [super_admin] }
+    OrganizationRole: { type: string, enum: [owner, admin, member] }
+    ProjectRole: { type: string, enum: [admin, member] }
+    EffectiveAccessSource: { type: string, enum: [platform, organization, project] }
+    AccessCapabilities:
+      type: object
+      additionalProperties: false
+      required: [manage_platform, manage_organization, create_project, manage_project_members, create_application, manage_credentials, organization_roles_grantable, project_roles_grantable]
+      properties:
+        manage_platform: { type: boolean }
+        manage_organization: { type: boolean }
+        create_project: { type: boolean }
+        manage_project_members: { type: boolean }
+        create_application: { type: boolean }
+        manage_credentials: { type: boolean }
+        organization_roles_grantable: { type: array, uniqueItems: true, maxItems: 3, items: { $ref: '#/components/schemas/OrganizationRole' } }
+        project_roles_grantable: { type: array, uniqueItems: true, maxItems: 2, items: { $ref: '#/components/schemas/ProjectRole' } }
+    InvitationScope: { type: string, enum: [organization, project] }
+    InvitationStatus: { type: string, enum: [pending, accepted, expired, revoked, replaced] }
+    AuditActorKind: { type: string, enum: [user, system_recovery] }
+    AuditOutcome: { type: string, enum: [succeeded, rejected] }
+    AuditAction:
+      type: string
+      enum: [setup.completed, platform_role.granted, platform_role.revoked, user.disabled, user.enabled, organization.created, organization.deleted, organization_member.role_changed, organization_member.removed, project.created, project_member.added, project_member.role_changed, project_member.removed, invitation.created, invitation.resent, invitation.revoked, invitation.accepted, privilege.confirmed, platform_recovery.completed, credential.issued, credential.revoked]
     RegisterRequest:
       type: object
       additionalProperties: false
-      required: [email, password, organization_slug, organization_name, locale]
+      required: [email, password, display_name, organization_slug, organization_name, locale]
       properties:
         email: { type: string, format: email, minLength: 3, maxLength: 254 }
         password: { type: string, format: password, minLength: 12, maxLength: 256, writeOnly: true }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
         organization_slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 63 }
         organization_name: { type: string, minLength: 1, maxLength: 120 }
         locale: { $ref: '#/components/schemas/SupportedLocale' }
@@ -2587,6 +3164,7 @@ components:
       required: [locale]
       properties:
         locale: { $ref: '#/components/schemas/SupportedLocale' }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
     AcceptedSecurityAction:
       type: object
       additionalProperties: false
@@ -2603,28 +3181,269 @@ components:
     AuthenticatedUser:
       type: object
       additionalProperties: false
-      required: [id, email, email_verified, preferred_locale]
+      required: [id, email, display_name, email_verified, preferred_locale]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         email: { type: string, format: email }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
         email_verified: { type: boolean }
         preferred_locale: { $ref: '#/components/schemas/SupportedLocale' }
     AuthenticatedOrganization:
       type: object
       additionalProperties: false
-      required: [id, slug, name]
+      required: [id, slug, name, role]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         slug: { type: string }
         name: { type: string }
+        role: { $ref: '#/components/schemas/OrganizationRole' }
     AuthContext:
       type: object
       additionalProperties: false
-      required: [user, organization, role]
+      required: [user, platform_role, organizations, active_organization, active_role, requires_organization_selection, privileged_until, capabilities]
       properties:
         user: { $ref: '#/components/schemas/AuthenticatedUser' }
-        organization: { $ref: '#/components/schemas/AuthenticatedOrganization' }
+        platform_role: { anyOf: [{ $ref: '#/components/schemas/PlatformRole' }, { type: 'null' }] }
+        organizations: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/AuthenticatedOrganization' } }
+        active_organization: { anyOf: [{ $ref: '#/components/schemas/AuthenticatedOrganization' }, { type: 'null' }] }
+        active_role: { anyOf: [{ $ref: '#/components/schemas/OrganizationRole' }, { type: 'null' }] }
+        requires_organization_selection: { type: boolean }
+        privileged_until: { $ref: '#/components/schemas/NullableTimestamp' }
+        capabilities: { $ref: '#/components/schemas/AccessCapabilities' }
+    PlatformUser:
+      type: object
+      additionalProperties: false
+      required: [id, email, display_name, email_verified, enabled, is_super_admin, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        email_verified: { type: boolean }
+        enabled: { type: boolean }
+        is_super_admin: { type: boolean }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+    PlatformUserPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/PlatformUser' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    UserStatusChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties: { status: { type: string, enum: [enabled, disabled] } }
+    PlatformOrganization:
+      type: object
+      additionalProperties: false
+      required: [id, slug, name, status, created_at, updated_at, current_owner_invitation]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        slug: { type: string, minLength: 1, maxLength: 63 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [pending_owner, active] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        current_owner_invitation: { anyOf: [{ $ref: '#/components/schemas/Invitation' }, { type: 'null' }] }
+    PlatformOrganizationPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/PlatformOrganization' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    CreatePlatformOrganizationRequest:
+      type: object
+      additionalProperties: false
+      required: [slug, name, ownership]
+      properties:
+        slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 63 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        ownership:
+          oneOf:
+            - $ref: '#/components/schemas/InvitedOwnership'
+            - $ref: '#/components/schemas/SelfOwnership'
+    InvitedOwnership:
+      type: object
+      additionalProperties: false
+      required: [kind, email, locale]
+      properties:
+        kind: { const: invited_owner }
+        email: { type: string, format: email, maxLength: 254 }
+        locale: { $ref: '#/components/schemas/SupportedLocale' }
+    SelfOwnership:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties: { kind: { const: self_owner } }
+    ProvisionedOrganization:
+      type: object
+      additionalProperties: false
+      required: [organization, invitation]
+      properties:
+        organization: { $ref: '#/components/schemas/PlatformOrganization' }
+        invitation: { anyOf: [{ $ref: '#/components/schemas/Invitation' }, { type: 'null' }] }
+    OrganizationMember:
+      type: object
+      additionalProperties: false
+      required: [user_id, email, display_name, role, enabled, email_verified, created_at, can_change_role, can_remove]
+      properties:
+        user_id: { $ref: '#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
         role: { $ref: '#/components/schemas/OrganizationRole' }
+        enabled: { type: boolean }
+        email_verified: { type: boolean }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        can_change_role: { type: boolean }
+        can_remove: { type: boolean }
+    OrganizationMemberPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/OrganizationMember' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    OrganizationRoleChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties: { role: { $ref: '#/components/schemas/OrganizationRole' } }
+    ProjectMember:
+      type: object
+      additionalProperties: false
+      required: [user_id, email, display_name, role, access_source, created_at, can_change_role, can_remove]
+      properties:
+        user_id: { $ref: '#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+        access_source: { $ref: '#/components/schemas/EffectiveAccessSource' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        can_change_role: { type: boolean }
+        can_remove: { type: boolean }
+    ProjectMemberPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/ProjectMember' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    AddProjectMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id, role]
+      properties:
+        user_id: { $ref: '#/components/schemas/Uuid' }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+    ProjectRoleChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties: { role: { $ref: '#/components/schemas/ProjectRole' } }
+    InvitationTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties: { token: { type: string, minLength: 40, maxLength: 128, writeOnly: true } }
+    NewUserInvitationAcceptanceRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password, display_name, locale]
+      properties:
+        token: { type: string, minLength: 40, maxLength: 128, writeOnly: true }
+        password: { type: string, minLength: 12, maxLength: 256, writeOnly: true }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        locale: { $ref: '#/components/schemas/SupportedLocale' }
+    InvitationInspection:
+      type: object
+      additionalProperties: false
+      required: [scope, organization_name, project_name, role, inviter_display_name, expires_at, account_state]
+      properties:
+        scope: { $ref: '#/components/schemas/InvitationScope' }
+        organization_name: { type: string, minLength: 1, maxLength: 120 }
+        project_name: { type: [string, 'null'], minLength: 1, maxLength: 120 }
+        role: { type: string, enum: [owner, admin, member] }
+        inviter_display_name: { type: string, minLength: 1, maxLength: 120 }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        account_state: { type: string, enum: [new_user, existing_user] }
+    InvitationAcceptance:
+      type: object
+      additionalProperties: false
+      required: [status, scope, organization_id, project_id, role, user_id]
+      properties:
+        status: { const: accepted }
+        scope: { $ref: '#/components/schemas/InvitationScope' }
+        organization_id: { $ref: '#/components/schemas/Uuid' }
+        project_id: { $ref: '#/components/schemas/NullableUuid' }
+        role: { type: string, enum: [owner, admin, member] }
+        user_id: { $ref: '#/components/schemas/Uuid' }
+    Invitation:
+      type: object
+      additionalProperties: false
+      required: [id, scope, organization_id, organization_name, project_id, project_name, recipient_email, role, inviter_display_name, created_at, expires_at, status]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        scope: { $ref: '#/components/schemas/InvitationScope' }
+        organization_id: { $ref: '#/components/schemas/Uuid' }
+        organization_name: { type: string, minLength: 1, maxLength: 120 }
+        project_id: { $ref: '#/components/schemas/NullableUuid' }
+        project_name: { type: [string, 'null'], minLength: 1, maxLength: 120 }
+        recipient_email: { type: string, format: email }
+        role: { type: string, enum: [owner, admin, member] }
+        inviter_display_name: { type: string, minLength: 1, maxLength: 120 }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        status: { $ref: '#/components/schemas/InvitationStatus' }
+    InvitationPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/Invitation' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    CreateOrganizationInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [email, role, locale]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        role: { $ref: '#/components/schemas/OrganizationRole' }
+        locale: { $ref: '#/components/schemas/SupportedLocale' }
+    CreateProjectInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [email, role, locale]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+        locale: { $ref: '#/components/schemas/SupportedLocale' }
+    AccessAuditRecord:
+      type: object
+      additionalProperties: false
+      required: [id, actor_kind, actor_user_id, action, organization_id, project_id, target_user_id, invitation_id, previous_role, new_role, outcome, request_id, created_at]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        actor_kind: { $ref: '#/components/schemas/AuditActorKind' }
+        actor_user_id: { $ref: '#/components/schemas/NullableUuid' }
+        action: { $ref: '#/components/schemas/AuditAction' }
+        organization_id: { $ref: '#/components/schemas/NullableUuid' }
+        project_id: { $ref: '#/components/schemas/NullableUuid' }
+        target_user_id: { $ref: '#/components/schemas/NullableUuid' }
+        invitation_id: { $ref: '#/components/schemas/NullableUuid' }
+        previous_role: { type: [string, 'null'], enum: [owner, admin, member, super_admin, null] }
+        new_role: { type: [string, 'null'], enum: [owner, admin, member, super_admin, null] }
+        outcome: { $ref: '#/components/schemas/AuditOutcome' }
+        request_id: { type: [string, 'null'], maxLength: 128 }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+    AccessAuditPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 100, items: { $ref: '#/components/schemas/AccessAuditRecord' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
     AttentionWindowKind: { type: string, enum: [24h, 7d], default: 24h }
     AttentionPriority: { type: string, enum: [urgent, high, normal] }
     AttentionItemKind:
@@ -3160,7 +3979,9 @@ components:
       additionalProperties: false
       required: [error, message, request_id]
       properties:
-        error: { type: string, example: not_found }
+        error:
+          type: string
+          enum: [validation_failed, unauthorized, invalid_credentials, email_verification_required, registration_disabled, registration_conflict, untrusted_origin, forbidden, not_found, organization_not_found, project_not_found, application_not_found, user_not_found, user_not_eligible, setup_already_completed, invalid_setup_token, setup_rate_limited, privilege_confirmation_required, current_password_invalid, self_promotion_forbidden, last_super_admin_required, last_organization_owner_required, organization_limit_reached, invitation_unusable, invitation_account_mismatch, invitation_exists, rate_limited, mail_unavailable, idempotency_key_reused, operation_already_completed, internal_error]
         message: { type: string, example: resource not found }
         request_id: { type: string, example: 0ec02ed2-8483-4981-893e-bffc535897d7 }
         fields:
@@ -3175,7 +3996,7 @@ components:
         service_version: { type: string, example: 0.1.0 }
         git_commit: { type: string, example: ac23c0b4d042e8d430ea6880f6b66ed1a9d4580a }
         api_version: { type: string, const: v1 }
-        required_database_migration: { type: integer, format: int64, example: 24 }
+        required_database_migration: { type: integer, format: int64, example: 27 }
     Organization:
       type: object
       additionalProperties: false
@@ -3302,7 +4123,7 @@ components:
     Project:
       type: object
       additionalProperties: false
-      required: [id, slug, name, created_at, archived_at, application_count, runtime_group_count]
+      required: [id, slug, name, created_at, archived_at, application_count, runtime_group_count, effective_project_role, effective_access_source, capabilities]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
         slug: { type: string }
@@ -3311,6 +4132,9 @@ components:
         archived_at: { $ref: '#/components/schemas/NullableTimestamp' }
         application_count: { type: integer, format: int64, minimum: 0 }
         runtime_group_count: { type: integer, format: int64, minimum: 0 }
+        effective_project_role: { anyOf: [{ $ref: '#/components/schemas/ProjectRole' }, { type: 'null' }] }
+        effective_access_source: { anyOf: [{ $ref: '#/components/schemas/EffectiveAccessSource' }, { type: 'null' }] }
+        capabilities: { $ref: '#/components/schemas/AccessCapabilities' }
     ProjectPage:
       type: object
       additionalProperties: false
@@ -3331,6 +4155,9 @@ components:
           release_count,
           runtime_group_count,
           latest_observed_at,
+          effective_project_role,
+          effective_access_source,
+          capabilities,
         ]
       properties:
         id: { $ref: '#/components/schemas/Uuid' }
@@ -3341,6 +4168,9 @@ components:
         release_count: { type: integer, format: int64, minimum: 0 }
         runtime_group_count: { type: integer, format: int64, minimum: 0 }
         latest_observed_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        effective_project_role: { anyOf: [{ $ref: '#/components/schemas/ProjectRole' }, { type: 'null' }] }
+        effective_access_source: { anyOf: [{ $ref: '#/components/schemas/EffectiveAccessSource' }, { type: 'null' }] }
+        capabilities: { $ref: '#/components/schemas/AccessCapabilities' }
     ApplicationPage:
       type: object
       additionalProperties: false

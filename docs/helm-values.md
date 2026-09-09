@@ -37,7 +37,9 @@ Each chart also accepts `imagePullSecrets: []`, a list such as `[{name: registry
 | `server.resources.limits` | `{cpu: "1", memory: 512Mi}` | Server Pod resource limits. |
 | `web.resources.requests` | `{cpu: 25m, memory: 32Mi}` | Web Pod resource requests. |
 | `web.resources.limits` | `{cpu: 250m, memory: 128Mi}` | Web Pod resource limits. |
-| `server.registrationEnabled` | `false` | Enable public signup; each signup creates an Organization and owner. Private installations use `/setup` for the first owner. |
+| `server.publicSignupEnabled` | `false` | Enable uninvited public signup. Requires `multiple` mode and usable mail. Each verified signup creates an Organization owner, never a super-administrator. Setup and invitation registration remain available when false. |
+| `server.registrationEnabled` | Unset | Deprecated compatibility key for one upgrade window. When present it takes precedence over `publicSignupEnabled`; migrate the value and remove this key after checking rendered configuration. |
+| `server.organizationMode` | `single` | `single` permits only the first Organization; `multiple` permits further super-admin provisioning and is required by public signup. Authorization semantics are otherwise identical. |
 | `server.sessionLifetimeSeconds` | `43200` | Session lifetime in seconds; minimum `300`. |
 | `server.corsOrigins` | `[]` | Additional exact browser origins for external proxies or local access, for example `https://admin.example.com` or `http://127.0.0.1:3000`. Paths, wildcards, query strings, fragments, and commas are rejected. The Web ingress origin is added automatically. |
 | `podDisruptionBudget.enabled` | `true` | Create separate Server and Web disruption budgets. |
@@ -51,11 +53,11 @@ Each chart also accepts `imagePullSecrets: []`, a list such as `[{name: registry
 | `database.existingSecret` | `okoscope-database` | Required existing Secret containing the external PostgreSQL connection URL. The chart does not provision PostgreSQL. |
 | `database.urlKey` | `database-url` | Key containing the connection URL. |
 | `internalSecret.existingSecret` | `""` | Existing internal-key Secret. Empty generates a retained Secret and reuses it through Helm `lookup` on upgrades. Supply an external Secret for offline GitOps rendering. |
-| `internalSecret.adminCredentialKey` | `admin-credential` | Administrative credential key. |
+| `internalSecret.adminCredentialKey` | `admin-credential` | Setup-compatibility and break-glass recovery credential key. It is not accepted as a normal browser or tenant principal. |
 | `internalSecret.webhookEncryptionKey` | `webhook-encryption-key` | Stable webhook encryption key. |
 | `internalSecret.identityTokenKey` | `identity-token-key` | Identity token key. |
 | `internalSecret.mailEncryptionKey` | `mail-encryption-key` | Dedicated 32-byte, 64-hex-character key protecting secret-bearing mail outbox data. Generated and retained when `internalSecret.existingSecret` is empty; required in an external internal Secret. |
-| `setupAuthorization.existingSecret` | `""` | Existing first-owner setup Secret. Empty generates and retains a setup-token Secret, reused through `lookup`. Use an external Secret for offline GitOps rendering. |
+| `setupAuthorization.existingSecret` | `""` | Existing first-super-administrator setup Secret. Empty generates and retains a setup-token Secret, reused through `lookup`. Use an external Secret for offline GitOps rendering. |
 | `setupAuthorization.tokenKey` | `setup-token` | Setup authorization token key. |
 | `setupAuthorization.expiresAtKey` | `setup-token-expires-at` | Optional expiration key read only from an externally managed setup Secret. See the setup procedure in the installation guide. |
 
@@ -93,12 +95,15 @@ These values describe what the Server advertises to remote agents; they do not c
 | `agentInstallation.caSecret.name` | `""` | Required for `custom_ca`, must be empty for `system`. Names a CA Secret to create in the agent namespace; the server chart does not create it. |
 | `agentInstallation.caSecret.key` | `ca.crt` | CA certificate key advertised to agents. |
 
-### Migrations and notifications
+### Migrations, invitations, and notifications
 
 | Value | Default | Meaning / constraints |
 | --- | --- | --- |
 | `migration.backoffLimit` | `2` | Migration Job retry limit, `0–6`. |
 | `migration.activeDeadlineSeconds` | `300` | Migration Job deadline in seconds, `30–3600`. Failed migration blocks installation/upgrade. |
+| `invitations.lifetimeSeconds` | `604800` | Invitation lifetime in seconds, `300–2592000` (five minutes to 30 days). Default is seven days. |
+| `invitations.createLimitPerHour` | `20` | Per-policy invitation creation bound, `1–1000` per hour. |
+| `invitations.resendLimitPerHour` | `5` | Per-policy resend bound, `1–100` per hour. Resend rotates the token. |
 | `notifications.enabled` | `false` | Enable the notification delivery worker. |
 | `notifications.pollMilliseconds` | `1000` | Worker polling interval in milliseconds, minimum `100`. |
 | `notifications.claimSize` | `50` | Maximum deliveries claimed per poll, `1–1000`. |
@@ -108,11 +113,11 @@ These values describe what the Server advertises to remote agents; they do not c
 
 ### Transactional email
 
-Mail is disabled by default. SMTP username/password values are intentionally not accepted anywhere in the schema: create an existing Kubernetes Secret and configure only its name and key names. Organization creation is mail-free; enabled mail supports account security workflows and Application-created messages to verified owners.
+Mail is disabled by default. SMTP username/password values are intentionally not accepted anywhere in the schema: create an existing Kubernetes Secret and configure only its name and key names. Initial setup and operator recovery are mail-free. Invitation issuance and public signup require usable mail and fail closed without partial state. Enabled mail supports localized Organization/Project invitations, account security workflows, and Application-created messages to verified owners.
 
 | Value | Default | Meaning / constraints |
 | --- | --- | --- |
-| `mail.enabled` | `false` | Enable transactional enqueueing and the PostgreSQL-backed SMTP worker. Required by public registration. |
+| `mail.enabled` | `false` | Enable transactional enqueueing and the PostgreSQL-backed SMTP worker. Required by invitation issuance and public signup, but not by setup or invite acceptance. |
 | `mail.publicWebUrl` | `""` | Browser origin used in action links. Required when mail is enabled; HTTPS is mandatory unless development plaintext is explicit. No path, query, fragment, or credentials. |
 | `mail.developmentPlaintext` | `false` | Permit local HTTP action links and plaintext SMTP. Unsuitable for shared or Internet-accessible installations. |
 | `mail.smtp.host` | `""` | Provider-neutral SMTP hostname, required when enabled. |

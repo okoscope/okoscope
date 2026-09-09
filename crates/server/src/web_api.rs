@@ -17,11 +17,37 @@ use crate::{admin_auth::AdminAuthenticator, database::REQUIRED_MIGRATION};
 pub const API_VERSION: &str = "v1";
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrganizationMode {
+    #[default]
+    Single,
+    Multiple,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InvitationConfig {
+    pub lifetime: std::time::Duration,
+    pub create_limit_per_hour: u32,
+    pub resend_limit_per_hour: u32,
+}
+
+impl Default for InvitationConfig {
+    fn default() -> Self {
+        Self {
+            lifetime: std::time::Duration::from_secs(604_800),
+            create_limit_per_hour: 20,
+            resend_limit_per_hour: 5,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WebApiConfig {
     pub cors_origins: Vec<String>,
     pub admin_authenticator: Option<AdminAuthenticator>,
-    pub registration_enabled: bool,
+    pub public_signup_enabled: bool,
+    pub organization_mode: OrganizationMode,
+    pub invitations: InvitationConfig,
     pub mail: crate::transactional_mail::MailConfig,
     pub secure_session_cookie: bool,
     pub session_lifetime: std::time::Duration,
@@ -35,7 +61,9 @@ impl Default for WebApiConfig {
         Self {
             cors_origins: Vec::new(),
             admin_authenticator: None,
-            registration_enabled: false,
+            public_signup_enabled: false,
+            organization_mode: OrganizationMode::Single,
+            invitations: InvitationConfig::default(),
             mail: crate::transactional_mail::MailConfig::default(),
             secure_session_cookie: true,
             session_lifetime: crate::auth::DEFAULT_SESSION_LIFETIME,
@@ -75,7 +103,9 @@ impl WebApiConfig {
         Ok(Self {
             cors_origins: validated,
             admin_authenticator: None,
-            registration_enabled: false,
+            public_signup_enabled: false,
+            organization_mode: OrganizationMode::Single,
+            invitations: InvitationConfig::default(),
             mail: crate::transactional_mail::MailConfig::default(),
             secure_session_cookie: true,
             session_lifetime: crate::auth::DEFAULT_SESSION_LIFETIME,
@@ -119,13 +149,24 @@ impl WebApiConfig {
     #[must_use]
     pub fn with_user_auth(
         mut self,
-        registration_enabled: bool,
+        public_signup_enabled: bool,
         secure_session_cookie: bool,
         session_lifetime: std::time::Duration,
     ) -> Self {
-        self.registration_enabled = registration_enabled;
+        self.public_signup_enabled = public_signup_enabled;
         self.secure_session_cookie = secure_session_cookie;
         self.session_lifetime = session_lifetime;
+        self
+    }
+
+    #[must_use]
+    pub fn with_access_policy(
+        mut self,
+        organization_mode: OrganizationMode,
+        invitations: InvitationConfig,
+    ) -> Self {
+        self.organization_mode = organization_mode;
+        self.invitations = invitations;
         self
     }
 
@@ -384,7 +425,7 @@ mod tests {
             service_version: "1",
             git_commit: "unknown",
             api_version: "v1",
-            required_database_migration: 26,
+            required_database_migration: 27,
         };
         let value = serde_json::to_value(info).unwrap();
         assert_eq!(value["git_commit"], "unknown");

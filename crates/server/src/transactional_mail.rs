@@ -389,6 +389,21 @@ pub enum TemplateData {
         application_name: String,
         project_name: String,
     },
+    OrganizationInvitation {
+        action_url: String,
+        organization_name: String,
+        inviter_display_name: String,
+        role: String,
+        expires_minutes: i64,
+    },
+    ProjectInvitation {
+        action_url: String,
+        organization_name: String,
+        project_name: String,
+        inviter_display_name: String,
+        role: String,
+        expires_minutes: i64,
+    },
 }
 
 impl TemplateData {
@@ -398,6 +413,8 @@ impl TemplateData {
             Self::ResetPassword { .. } => "reset_password",
             Self::PasswordChanged => "password_changed",
             Self::ApplicationCreated { .. } => "application_created",
+            Self::OrganizationInvitation { .. } => "organization_invitation",
+            Self::ProjectInvitation { .. } => "project_invitation",
         }
     }
 }
@@ -421,6 +438,52 @@ pub async fn enqueue(
     action_id: Option<Uuid>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), MailError> {
+    enqueue_referenced(
+        tx,
+        config,
+        logical_key,
+        recipients,
+        data,
+        action_id,
+        None,
+        expires_at,
+    )
+    .await
+}
+
+pub async fn enqueue_invitation(
+    tx: &mut Transaction<'_, Postgres>,
+    config: &MailConfig,
+    logical_key: &str,
+    recipient: (String, Locale),
+    data: &TemplateData,
+    invitation_id: Uuid,
+    expires_at: DateTime<Utc>,
+) -> Result<(), MailError> {
+    enqueue_referenced(
+        tx,
+        config,
+        logical_key,
+        &[recipient],
+        data,
+        None,
+        Some(invitation_id),
+        Some(expires_at),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_referenced(
+    tx: &mut Transaction<'_, Postgres>,
+    config: &MailConfig,
+    logical_key: &str,
+    recipients: &[(String, Locale)],
+    data: &TemplateData,
+    action_id: Option<Uuid>,
+    invitation_id: Option<Uuid>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<(), MailError> {
     if !config.enabled || recipients.is_empty() {
         return Ok(());
     }
@@ -439,6 +502,7 @@ pub async fn enqueue(
             data.kind(),
             &serialized,
             action_id,
+            invitation_id,
             expires_at,
         )
         .await?;
@@ -470,6 +534,7 @@ async fn insert_encrypted(
     kind: &str,
     serialized: &[u8],
     action_id: Option<Uuid>,
+    invitation_id: Option<Uuid>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<(), MailError> {
     let id = Uuid::new_v4();
@@ -477,9 +542,9 @@ async fn insert_encrypted(
         encrypt_payload(&config.encryption_key, id, kind, recipient, serialized)?;
     let retention =
         chrono::Duration::from_std(config.retention).map_err(|_| MailError::InvalidPayload)?;
-    sqlx::query("INSERT INTO transactional_mail_outbox(id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,payload_nonce,action_id,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+$10) ON CONFLICT(logical_key,recipient_email) DO NOTHING")
+    sqlx::query("INSERT INTO transactional_mail_outbox(id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,payload_nonce,action_id,invitation_id,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+$11) ON CONFLICT(logical_key,recipient_email) DO NOTHING")
         .bind(id).bind(logical_key).bind(kind).bind(recipient).bind(locale.as_str())
-        .bind(ciphertext).bind(nonce.to_vec()).bind(action_id).bind(expires_at).bind(retention)
+        .bind(ciphertext).bind(nonce.to_vec()).bind(action_id).bind(invitation_id).bind(expires_at).bind(retention)
         .execute(&mut **tx).await?;
     Ok(())
 }
@@ -586,6 +651,12 @@ fn render_en(data: &TemplateData) -> RenderedMail {
             note: "This is an informational notification; no action is required.",
             scope: Some(("PROJECT", project_name)),
         }),
+        data @ TemplateData::OrganizationInvitation { .. } => {
+            render_organization_invitation(Locale::En, data)
+        }
+        data @ TemplateData::ProjectInvitation { .. } => {
+            render_project_invitation(Locale::En, data)
+        }
     }
 }
 
@@ -653,7 +724,126 @@ fn render_ru(data: &TemplateData) -> RenderedMail {
             note: "Это информационное уведомление, никаких действий не требуется.",
             scope: Some(("ПРОЕКТ", project_name)),
         }),
+        data @ TemplateData::OrganizationInvitation { .. } => {
+            render_organization_invitation(Locale::Ru, data)
+        }
+        data @ TemplateData::ProjectInvitation { .. } => {
+            render_project_invitation(Locale::Ru, data)
+        }
     }
+}
+
+fn render_organization_invitation(locale: Locale, data: &TemplateData) -> RenderedMail {
+    let TemplateData::OrganizationInvitation {
+        action_url,
+        organization_name,
+        inviter_display_name,
+        role,
+        expires_minutes,
+    } = data
+    else {
+        unreachable!("organization invitation renderer receives a closed template variant")
+    };
+    let duration = format_duration(locale, *expires_minutes);
+    let role = role_label(locale, role);
+    let (subject, language, status, heading, action, message, note, scope) = match locale {
+        Locale::En => (
+            "You are invited to an Okoscope Organization",
+            "en",
+            "ACTION REQUIRED",
+            "Organization invitation",
+            "Review invitation",
+            format!(
+                "{inviter_display_name} invited you to {organization_name} with the {role} role."
+            ),
+            format!(
+                "This one-time invitation expires in {duration}. Opening the link does not accept it; confirm the invitation in Okoscope. If you did not expect it, you can safely ignore this message."
+            ),
+            "ORGANIZATION",
+        ),
+        Locale::Ru => (
+            "Приглашение в организацию Okoscope",
+            "ru",
+            "ТРЕБУЕТСЯ ДЕЙСТВИЕ",
+            "Приглашение в организацию",
+            "Открыть приглашение",
+            format!(
+                "{inviter_display_name} приглашает вас в организацию {organization_name} с ролью «{role}»."
+            ),
+            format!(
+                "Одноразовое приглашение действует {duration}. Переход по ссылке не принимает его автоматически: подтвердите приглашение в Okoscope. Если вы не ожидали это письмо, просто проигнорируйте его."
+            ),
+            "ОРГАНИЗАЦИЯ",
+        ),
+    };
+    render_console(&ConsoleTemplate {
+        subject,
+        language,
+        event: "organization.invitation",
+        status,
+        heading,
+        message: &message,
+        action: Some((action, action_url)),
+        note: &note,
+        scope: Some((scope, organization_name)),
+    })
+}
+
+fn render_project_invitation(locale: Locale, data: &TemplateData) -> RenderedMail {
+    let TemplateData::ProjectInvitation {
+        action_url,
+        organization_name,
+        project_name,
+        inviter_display_name,
+        role,
+        expires_minutes,
+    } = data
+    else {
+        unreachable!("project invitation renderer receives a closed template variant")
+    };
+    let duration = format_duration(locale, *expires_minutes);
+    let role = role_label(locale, role);
+    let (subject, language, status, heading, action, message, note, scope) = match locale {
+        Locale::En => (
+            "You are invited to an Okoscope Project",
+            "en",
+            "ACTION REQUIRED",
+            "Project invitation",
+            "Review invitation",
+            format!(
+                "{inviter_display_name} invited you to Project {project_name} in {organization_name} with the {role} role."
+            ),
+            format!(
+                "This one-time invitation expires in {duration}. Opening the link does not accept it; confirm the invitation in Okoscope. If you did not expect it, you can safely ignore this message."
+            ),
+            "PROJECT",
+        ),
+        Locale::Ru => (
+            "Приглашение в проект Okoscope",
+            "ru",
+            "ТРЕБУЕТСЯ ДЕЙСТВИЕ",
+            "Приглашение в проект",
+            "Открыть приглашение",
+            format!(
+                "{inviter_display_name} приглашает вас в проект {project_name} организации {organization_name} с ролью «{role}»."
+            ),
+            format!(
+                "Одноразовое приглашение действует {duration}. Переход по ссылке не принимает его автоматически: подтвердите приглашение в Okoscope. Если вы не ожидали это письмо, просто проигнорируйте его."
+            ),
+            "ПРОЕКТ",
+        ),
+    };
+    render_console(&ConsoleTemplate {
+        subject,
+        language,
+        event: "project.invitation",
+        status,
+        heading,
+        message: &message,
+        action: Some((action, action_url)),
+        note: &note,
+        scope: Some((scope, project_name)),
+    })
 }
 
 struct ConsoleTemplate<'a> {
@@ -675,6 +865,15 @@ fn render_console(template: &ConsoleTemplate<'_>) -> RenderedMail {
         subject: template.subject.to_owned(),
         text,
         html,
+    }
+}
+
+fn role_label(locale: Locale, role: &str) -> &str {
+    match (locale, role) {
+        (Locale::Ru, "owner") => "владелец",
+        (Locale::Ru, "admin") => "администратор",
+        (Locale::Ru, "member") => "участник",
+        _ => role,
     }
 }
 
@@ -1091,6 +1290,9 @@ async fn retry(pool: &PgPool, id: Uuid, worker: Uuid, attempt: i32) -> Result<()
 pub async fn cleanup(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM user_email_actions WHERE (expires_at<now() OR consumed_at IS NOT NULL OR revoked_at IS NOT NULL) AND created_at<now()-interval '30 days'").execute(pool).await?;
     sqlx::query("DELETE FROM transactional_mail_outbox WHERE retain_until<now() AND (delivered_at IS NOT NULL OR terminal_at IS NOT NULL)").execute(pool).await?;
+    sqlx::query("DELETE FROM invitations WHERE retain_until<now()")
+        .execute(pool)
+        .await?;
     sqlx::query("WITH candidates AS (SELECT u.id user_id,m.organization_id FROM users u JOIN organization_memberships m ON m.user_id=u.id AND m.role='owner' WHERE u.email_verified_at IS NULL AND u.created_at<now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id=u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships other WHERE other.organization_id=m.organization_id AND other.user_id<>u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships external WHERE external.user_id=u.id AND external.organization_id<>m.organization_id) LIMIT 100), deleted_organizations AS (DELETE FROM organizations o USING candidates c WHERE o.id=c.organization_id RETURNING c.user_id) DELETE FROM users u USING deleted_organizations d WHERE u.id=d.user_id")
         .execute(pool).await?;
     Ok(())
@@ -1202,7 +1404,7 @@ mod tests {
         }
     }
 
-    fn representative_templates() -> [TemplateData; 4] {
+    fn representative_templates() -> [TemplateData; 6] {
         [
             TemplateData::VerifyEmail {
                 action_url: "https://example.com/verify#sample".into(),
@@ -1218,7 +1420,45 @@ mod tests {
                 application_name: "Payments API".into(),
                 project_name: "Production".into(),
             },
+            TemplateData::OrganizationInvitation {
+                action_url: "https://example.com/invite#token=sample".into(),
+                organization_name: "Northstar".into(),
+                inviter_display_name: "Alice".into(),
+                role: "member".into(),
+                expires_minutes: 10_080,
+            },
+            TemplateData::ProjectInvitation {
+                action_url: "https://example.com/invite#token=sample".into(),
+                organization_name: "Northstar".into(),
+                project_name: "Production".into(),
+                inviter_display_name: "Alice".into(),
+                role: "admin".into(),
+                expires_minutes: 10_080,
+            },
         ]
+    }
+
+    #[test]
+    fn invitation_templates_use_fragment_links_and_escape_context() {
+        for locale in [Locale::En, Locale::Ru] {
+            let mail = render(
+                locale,
+                &TemplateData::ProjectInvitation {
+                    action_url: "https://ui.example.com/invite#token=secret".into(),
+                    organization_name: "<North & South>".into(),
+                    project_name: "<Production>".into(),
+                    inviter_display_name: "<Alice>".into(),
+                    role: "member".into(),
+                    expires_minutes: 10_080,
+                },
+            );
+            assert!(mail.text.contains("/invite#token=secret"));
+            assert!(mail.html.contains("/invite#token=secret"));
+            assert!(mail.html.contains("&lt;Alice&gt;"));
+            assert!(mail.html.contains("&lt;North &amp; South&gt;"));
+            assert!(mail.html.contains("&lt;Production&gt;"));
+            assert!(!mail.html.contains("<Alice>"));
+        }
     }
 
     #[test]

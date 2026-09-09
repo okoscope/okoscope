@@ -81,23 +81,60 @@ if helm template rejected "$root/deploy/helm/okoscope" \
   exit 1
 fi
 helm template okoscope "$root/deploy/helm/okoscope" -f "$root/deploy/helm/fixtures/self-hosted-ingress.yaml" \
-  --set server.registrationEnabled=true \
+  --set server.publicSignupEnabled=true \
+  --set server.organizationMode=multiple \
   --set mail.enabled=true \
   --set mail.publicWebUrl=https://okoscope.example.com \
   --set mail.smtp.host=smtp.example.com \
   --set mail.smtp.existingSecret=okoscope-smtp \
   --set mail.sender.address=noreply@example.com \
   > "$work/self-hosted-public-registration.yaml"
-grep -q 'OKOSCOPE_REGISTRATION_ENABLED: "true"' "$work/self-hosted-public-registration.yaml"
+grep -q 'OKOSCOPE_PUBLIC_SIGNUP_ENABLED: "true"' "$work/self-hosted-public-registration.yaml"
 grep -q 'OKOSCOPE_MAIL_ENABLED: "true"' "$work/self-hosted-public-registration.yaml"
 grep -q '^kind: Ingress$' "$work/self-hosted-public-registration.yaml"
-grep -q 'OKOSCOPE_REGISTRATION_ENABLED: "false"' "$work/self-hosted-ingress.yaml"
-grep -q 'OKOSCOPE_REGISTRATION_ENABLED: "false"' "$work/self-hosted.yaml"
+helm template legacy-registration "$root/deploy/helm/okoscope" \
+  --set server.registrationEnabled=true \
+  --set server.organizationMode=multiple \
+  --set mail.enabled=true \
+  --set mail.publicWebUrl=https://okoscope.example.com \
+  --set mail.smtp.host=smtp.example.com \
+  --set mail.smtp.existingSecret=okoscope-smtp \
+  --set mail.sender.address=noreply@example.com \
+  > "$work/self-hosted-legacy-registration.yaml"
+grep -q 'OKOSCOPE_PUBLIC_SIGNUP_ENABLED: "true"' "$work/self-hosted-legacy-registration.yaml"
+grep -q 'OKOSCOPE_PUBLIC_SIGNUP_ENABLED: "false"' "$work/self-hosted-ingress.yaml"
+grep -q 'OKOSCOPE_PUBLIC_SIGNUP_ENABLED: "false"' "$work/self-hosted.yaml"
+grep -q 'OKOSCOPE_ORGANIZATION_MODE: "single"' "$work/self-hosted.yaml"
+grep -q 'OKOSCOPE_INVITATION_LIFETIME_SECONDS: "604800"' "$work/self-hosted.yaml"
+grep -q 'OKOSCOPE_INVITATION_CREATE_LIMIT_PER_HOUR: "20"' "$work/self-hosted.yaml"
+grep -q 'OKOSCOPE_INVITATION_RESEND_LIMIT_PER_HOUR: "5"' "$work/self-hosted.yaml"
 if helm template rejected "$root/deploy/helm/okoscope" \
-  --set server.registrationEnabled=true >/dev/null 2>&1; then
-  echo 'public registration without usable mail must be rejected' >&2
+  --set server.publicSignupEnabled=true --set server.organizationMode=multiple >/dev/null 2>&1; then
+  echo 'public signup without usable mail must be rejected' >&2
   exit 1
 fi
+if helm template rejected "$root/deploy/helm/okoscope" \
+  --set server.publicSignupEnabled=true \
+  --set mail.enabled=true \
+  --set mail.publicWebUrl=https://okoscope.example.com \
+  --set mail.smtp.host=smtp.example.com \
+  --set mail.smtp.existingSecret=okoscope-smtp \
+  --set mail.sender.address=noreply@example.com >/dev/null 2>&1; then
+  echo 'public signup in single-Organization mode must be rejected' >&2
+  exit 1
+fi
+for invalid in \
+  'invitations.lifetimeSeconds=299' \
+  'invitations.lifetimeSeconds=2592001' \
+  'invitations.createLimitPerHour=0' \
+  'invitations.createLimitPerHour=1001' \
+  'invitations.resendLimitPerHour=0' \
+  'invitations.resendLimitPerHour=101'; do
+  if helm template rejected "$root/deploy/helm/okoscope" --set "$invalid" >/dev/null 2>&1; then
+    echo "invitation bound must reject $invalid" >&2
+    exit 1
+  fi
+done
 grep -q 'name: OKOSCOPE_SETUP_TOKEN' "$work/self-hosted.yaml"
 grep -A1 'name: OKOSCOPE_API_BASE_URL' "$work/self-hosted.yaml" | grep -q 'value: /'
 grep -A1 'name: OKOSCOPE_API_UPSTREAM' "$work/self-hosted.yaml" | grep -q 'value: http://okoscope-server:8080'

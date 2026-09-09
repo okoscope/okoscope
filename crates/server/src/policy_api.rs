@@ -13,7 +13,8 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    auth::{UserPrincipal, UserSessionAuthenticator},
+    access_control::resolve_project_access,
+    auth::{IdentityPrincipal, UserSessionAuthenticator},
     policy::{
         BehaviorIdentity, Placement, PlacementMatcher, PolicyEffect, PolicySeed,
         SeedUnavailableReason,
@@ -388,14 +389,36 @@ enum SeedResponse {
 async fn principal(
     headers: &HeaderMap,
     state: &PolicyApiState,
+    project_id: Uuid,
     request_id: &RequestId,
-) -> Result<UserPrincipal, PolicyApiError> {
-    state
+) -> Result<ProjectPrincipal, PolicyApiError> {
+    let identity: IdentityPrincipal = state
         .auth
-        .authenticate_headers(headers)
+        .authenticate_identity_headers(headers)
         .await
         .map_err(|error| PolicyApiError::database(&error, request_id))?
-        .ok_or_else(|| PolicyApiError::unauthorized(request_id))
+        .ok_or_else(|| PolicyApiError::unauthorized(request_id))?;
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|error| PolicyApiError::database(&error, request_id))?
+            .ok_or_else(|| PolicyApiError::not_found(request_id))?;
+    resolve_project_access(&state.pool, identity, organization_id, project_id)
+        .await
+        .map_err(|error| PolicyApiError::database(&error, request_id))?
+        .ok_or_else(|| PolicyApiError::not_found(request_id))?;
+    Ok(ProjectPrincipal {
+        user_id: identity.user_id,
+        organization_id,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ProjectPrincipal {
+    user_id: Uuid,
+    organization_id: Uuid,
 }
 
 async fn get_recomputation(
@@ -404,7 +427,7 @@ async fn get_recomputation(
     Extension(request_id): Extension<RequestId>,
     Path(path): Path<RecomputePath>,
 ) -> Result<Json<RecomputeSummary>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(
         &state,
         principal,
@@ -424,7 +447,7 @@ async fn get_recomputation(
 
 async fn ensure_application(
     state: &PolicyApiState,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<(), PolicyApiError> {
@@ -457,7 +480,7 @@ async fn list_policies(
     Path(path): Path<ApplicationPath>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<PolicySummary>>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
     let mut items:Vec<PolicySummary>=sqlx::query_as("SELECT p.id,p.project_id,p.application_id,p.name,p.current_revision_id,r.revision_number,r.enabled,r.inventory_kind,r.identity_version,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,p.created_by_user_id,p.created_at,p.updated_at FROM runtime_policies p LEFT JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND ($4::uuid IS NULL OR p.id>$4) ORDER BY p.id LIMIT $5")
@@ -474,7 +497,7 @@ async fn get_policy(
     Extension(request_id): Extension<RequestId>,
     Path(path): Path<PolicyPath>,
 ) -> Result<Json<PolicySummary>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let item=sqlx::query_as("SELECT p.id,p.project_id,p.application_id,p.name,p.current_revision_id,r.revision_number,r.enabled,r.inventory_kind,r.identity_version,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,p.created_by_user_id,p.created_at,p.updated_at FROM runtime_policies p LEFT JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.id=$4")
         .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id)
         .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
@@ -489,7 +512,7 @@ async fn list_revisions(
     Path(path): Path<PolicyPath>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<PolicyRevision>>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
     let mut items:Vec<PolicyRevision>=sqlx::query_as("SELECT r.id,r.policy_id,r.revision_number,r.prior_revision_id,r.enabled,r.inventory_kind,r.identity_version,r.identity_digest,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,r.source_inventory_item_id,r.source_runtime_group_id,r.created_by_user_id,r.created_at FROM runtime_policy_revisions r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND r.policy_id=$4 AND ($5::uuid IS NULL OR r.id<$5) ORDER BY r.id DESC LIMIT $6")
         .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id).bind(query.cursor).bind(limit+1)
@@ -514,7 +537,7 @@ async fn inventory_seed(
     Extension(request_id): Extension<RequestId>,
     Path(path): Path<ItemPath>,
 ) -> Result<Json<SeedResponse>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let row:InventoryIdentityRow=sqlx::query_as("SELECT id,inventory_kind,identity_version,identity_digest,semantic_summary FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
         .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.item_id)
         .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
@@ -539,7 +562,7 @@ async fn group_seed(
     Extension(request_id): Extension<RequestId>,
     Path(path): Path<GroupPath>,
 ) -> Result<Json<SeedResponse>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let row:GroupSeedRow=sqlx::query_as("SELECT i.id item_id,i.inventory_kind,i.identity_version,i.identity_digest,i.semantic_summary,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_event_groups g JOIN runtime_inventory_group_links l ON l.organization_id=g.organization_id AND l.project_id=g.project_id AND l.application_id=g.application_id AND l.group_id=g.id JOIN runtime_inventory_items i ON i.organization_id=l.organization_id AND i.project_id=l.project_id AND i.application_id=l.application_id AND i.id=l.item_id WHERE g.organization_id=$1 AND g.project_id=$2 AND g.application_id=$3 AND g.id=$4 ORDER BY i.id LIMIT 1")
         .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.group_id)
         .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
@@ -575,7 +598,7 @@ async fn list_suppressions(
     Path(path): Path<ApplicationPath>,
     Query(query): Query<SuppressionQuery>,
 ) -> Result<Json<Page<SuppressionSummary>>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
     let mut items: Vec<SuppressionSummary> = sqlx::query_as(
@@ -655,7 +678,7 @@ async fn begin_command<T: DeserializeOwned>(
 
 async fn policy_state_version(
     tx: &mut Transaction<'_, Postgres>,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<i64, PolicyApiError> {
@@ -666,7 +689,7 @@ async fn policy_state_version(
 
 async fn load_revision_identity(
     tx: &mut Transaction<'_, Postgres>,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     input: &mut RevisionInput,
     request_id: &RequestId,
@@ -708,7 +731,7 @@ async fn load_revision_identity(
 #[allow(clippy::too_many_arguments)]
 async fn insert_revision(
     tx: &mut Transaction<'_, Postgres>,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     policy_id: Uuid,
     revision_number: i64,
@@ -749,7 +772,7 @@ async fn insert_revision(
 #[allow(clippy::too_many_arguments)]
 async fn record_command<T: Serialize>(
     tx: &mut Transaction<'_, Postgres>,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     key: Uuid,
     kind: &str,
@@ -771,7 +794,7 @@ async fn create_policy(
     Path(path): Path<ApplicationPath>,
     Json(mut input): Json<CreatePolicyInput>,
 ) -> Result<Json<MutationResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     input.name = normalized_name(&input.name, &request_id)?;
     let key = idempotency_key(&headers, &request_id)?;
@@ -841,7 +864,7 @@ async fn preview_policy(
     Path(path): Path<ApplicationPath>,
     Json(mut input): Json<RevisionInput>,
 ) -> Result<Json<PreviewResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let mut tx = state
         .pool
@@ -924,7 +947,7 @@ async fn replace_policy(
     Path(path): Path<PolicyPath>,
     Json(mut input): Json<ReplacePolicyInput>,
 ) -> Result<Json<MutationResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let key = idempotency_key(&headers, &request_id)?;
     if let Some(name) = &input.name {
         input.name = Some(normalized_name(name, &request_id)?);
@@ -1007,7 +1030,7 @@ async fn set_policy_enabled(
     path: PolicyPath,
     enabled: bool,
 ) -> Result<Json<MutationResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let key = idempotency_key(&headers, &request_id)?;
     let digest = request_digest(&(path.policy_id, enabled)).unwrap();
     let app = ApplicationPath {
@@ -1106,7 +1129,7 @@ async fn disable_policy(
 
 async fn current_policy_state(
     tx: &mut Transaction<'_, Postgres>,
-    principal: UserPrincipal,
+    principal: ProjectPrincipal,
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<i64, PolicyApiError> {
@@ -1121,7 +1144,7 @@ async fn create_suppression(
     Path(path): Path<ApplicationPath>,
     Json(mut input): Json<SuppressionInput>,
 ) -> Result<Json<MutationResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let normalized_reason = input.reason.trim().to_owned();
     input.reason = normalized_reason;
@@ -1205,7 +1228,7 @@ async fn cancel_suppression(
     Extension(request_id): Extension<RequestId>,
     Path(path): Path<SuppressionPath>,
 ) -> Result<Json<MutationResult>, PolicyApiError> {
-    let principal = principal(&headers, &state, &request_id).await?;
+    let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let key = idempotency_key(&headers, &request_id)?;
     let digest = request_digest(&path.suppression_id).unwrap();
     let app = ApplicationPath {

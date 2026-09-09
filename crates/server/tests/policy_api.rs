@@ -50,6 +50,15 @@ async fn session(pool: &sqlx::PgPool, ids: &BootstrapIds, role: &str) -> String 
     .execute(pool)
     .await
     .unwrap();
+    if role == "member" {
+        sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
+            .bind(ids.organization_id)
+            .bind(ids.project_id)
+            .bind(user)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
     sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')").bind(Uuid::new_v4()).bind(user).bind(ids.organization_id).bind(token.digest().as_slice()).execute(pool).await.unwrap();
     format!("{SESSION_COOKIE}={}", token.expose())
 }

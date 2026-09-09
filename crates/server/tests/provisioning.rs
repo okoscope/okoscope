@@ -38,12 +38,13 @@ async fn application_mail_fans_out_only_to_verified_owners(pool: sqlx::PgPool) {
         ..server::transactional_mail::MailConfig::default()
     };
     let app = app_with_mail(pool.clone(), mail);
+    let admin = super_admin_token(&pool).await;
     let organization = app
         .clone()
         .oneshot(request(
             "POST",
             "/api/v1/organizations",
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"acme","name":"Acme"}"#,
         ))
         .await
@@ -61,7 +62,7 @@ async fn application_mail_fans_out_only_to_verified_owners(pool: sqlx::PgPool) {
         .oneshot(request(
             "POST",
             &format!("/api/v1/organizations/{organization_id}/projects"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"core","name":"Core"}"#,
         ))
         .await
@@ -90,7 +91,7 @@ async fn application_mail_fans_out_only_to_verified_owners(pool: sqlx::PgPool) {
         .oneshot(request(
             "POST",
             &format!("/api/v1/projects/{project_id}/applications"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"api","name":"API"}"#,
         ))
         .await
@@ -119,7 +120,7 @@ fn request(method: &str, uri: &str, credential: Option<&str>, body: &str) -> Req
         .header("x-request-id", "provisioning-test")
         .header(header::ORIGIN, "https://ui.example.com");
     if let Some(credential) = credential {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {credential}"));
+        builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={credential}"));
     }
     builder.body(Body::from(body.to_owned())).unwrap()
 }
@@ -151,10 +152,34 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
+async fn super_admin_token(pool: &sqlx::PgPool) -> String {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,$2,$3,now())",
+    )
+    .bind(user_id)
+    .bind(format!("admin-{user_id}@example.test"))
+    .bind("x".repeat(32))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO platform_role_assignments(user_id,role) VALUES($1,'super_admin')")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let token = SessionToken::generate();
+    sqlx::query("INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')")
+        .bind(Uuid::new_v4()).bind(user_id).bind(token.digest().to_vec())
+        .execute(pool).await.unwrap();
+    token.expose().to_owned()
+}
+
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool) {
     let app = app(pool.clone());
+    let admin = super_admin_token(&pool).await;
     let unauthorized = app
         .clone()
         .oneshot(request(
@@ -174,7 +199,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "POST",
             "/api/v1/organizations",
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"acme","name":"Acme"}"#,
         ))
         .await
@@ -188,7 +213,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "POST",
             "/api/v1/organizations",
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"acme","name":"Duplicate"}"#,
         ))
         .await
@@ -200,7 +225,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "POST",
             &format!("/api/v1/organizations/{organization_id}/projects"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"payments","name":"Payments"}"#,
         ))
         .await
@@ -214,7 +239,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "POST",
             &format!("/api/v1/projects/{project_id}/applications"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"payment-api","name":"Payment API"}"#,
         ))
         .await
@@ -235,7 +260,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "GET",
             &format!("/api/v1/projects/{project_id}/applications/{application_id}/credentials"),
-            Some(ADMIN),
+            Some(&admin),
             "",
         ))
         .await
@@ -250,7 +275,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
         .oneshot(request(
             "POST",
             &format!("/api/v1/projects/{project_id}/applications/{application_id}/credentials"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"name":"rotation"}"#,
         ))
         .await
@@ -267,7 +292,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
                 &format!(
                     "/api/v1/projects/{project_id}/applications/{application_id}/credentials/{first_id}"
                 ),
-                Some(ADMIN),
+                Some(&admin),
                 "",
             ))
             .await
@@ -283,7 +308,7 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
                 "/api/v1/projects/{}/applications/{application_id}/credentials",
                 Uuid::new_v4()
             ),
-            Some(ADMIN),
+            Some(&admin),
             "",
         ))
         .await
@@ -303,12 +328,13 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn failed_application_creation_is_atomic(pool: sqlx::PgPool) {
     let app = app(pool.clone());
+    let admin = super_admin_token(&pool).await;
     let missing_project = Uuid::new_v4();
     let response = app
         .oneshot(request(
             "POST",
             &format!("/api/v1/projects/{missing_project}/applications"),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"missing","name":"Missing"}"#,
         ))
         .await
@@ -329,13 +355,14 @@ async fn failed_application_creation_is_atomic(pool: sqlx::PgPool) {
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx::PgPool) {
+    let admin = super_admin_token(&pool).await;
     let app = app(pool);
     let organization_key = Uuid::new_v4();
     let create_organization = || {
         idempotent_request(
             "POST",
             "/api/v1/organizations",
-            Some(ADMIN),
+            Some(&admin),
             organization_key,
             r#"{"slug":"acme","name":"Acme"}"#,
         )
@@ -353,7 +380,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
         .oneshot(request(
             "GET",
             "/api/v1/admin/organizations",
-            Some(ADMIN),
+            Some(&admin),
             "",
         ))
         .await
@@ -368,7 +395,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
         .oneshot(idempotent_request(
             "POST",
             &format!("/api/v1/organizations/{organization_id}/projects"),
-            Some(ADMIN),
+            Some(&admin),
             Uuid::new_v4(),
             r#"{"slug":"payments","name":"Payments"}"#,
         ))
@@ -384,7 +411,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
         .oneshot(idempotent_request(
             "POST",
             &application_uri,
-            Some(ADMIN),
+            Some(&admin),
             application_key,
             application_body,
         ))
@@ -398,7 +425,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
         .oneshot(idempotent_request(
             "POST",
             &application_uri,
-            Some(ADMIN),
+            Some(&admin),
             application_key,
             application_body,
         ))
@@ -413,7 +440,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
         .oneshot(request(
             "GET",
             &format!("/api/v1/admin/projects/{project_id}/applications"),
-            Some(ADMIN),
+            Some(&admin),
             "",
         ))
         .await
@@ -428,6 +455,7 @@ async fn admin_reads_hierarchy_and_idempotency_never_replays_secrets(pool: sqlx:
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
     let app = app(pool.clone());
+    let admin = super_admin_token(&pool).await;
     let mut organization_ids = Vec::new();
     let mut project_ids = Vec::new();
     for (slug, name) in [("owned", "Owned"), ("foreign", "Foreign")] {
@@ -436,7 +464,7 @@ async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
             .oneshot(request(
                 "POST",
                 "/api/v1/organizations",
-                Some(ADMIN),
+                Some(&admin),
                 &format!(r#"{{"slug":"{slug}","name":"{name}"}}"#),
             ))
             .await
@@ -447,7 +475,7 @@ async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
             .oneshot(request(
                 "POST",
                 &format!("/api/v1/organizations/{organization_id}/projects"),
-                Some(ADMIN),
+                Some(&admin),
                 &format!(r#"{{"slug":"{slug}","name":"{name}"}}"#),
             ))
             .await
@@ -490,11 +518,11 @@ async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(
         tenant_cannot_create_organization.status(),
-        StatusCode::UNAUTHORIZED
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         json(tenant_cannot_create_organization).await["error"],
-        "invalid_admin_credential"
+        "forbidden"
     );
 
     let owned_project = app
@@ -580,7 +608,7 @@ async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
         .oneshot(request(
             "POST",
             &format!("/api/v1/projects/{}/applications", project_ids[1]),
-            Some(ADMIN),
+            Some(&admin),
             r#"{"slug":"foreign-app","name":"Foreign App"}"#,
         ))
         .await
