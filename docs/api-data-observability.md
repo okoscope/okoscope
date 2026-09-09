@@ -2,6 +2,35 @@
 
 The Web UI consumes the authoritative backend contract from `openapi/okoscope-v1.yaml`. The contract defines `identity_token`, Runtime Inventory Distribution, Runtime Diff Summary, their concrete response schemas, `limit` bounds, standard responses, and explicit identity-token error codes.
 
+## Application agent health
+
+`GET /api/v1/projects/{project_id}/applications/{application_id}/agent-health`
+returns agents that authenticated for the Application, including agents that
+have not produced a runtime event. The collection is tenant-scoped, uses an
+opaque cursor, and accepts at most 20 agents per page. Supported history shapes
+are fixed at `1h`/one minute, `6h`/five minutes, and `24h`/15 minutes.
+
+The response keeps three facts separate: a recent Application-stream heartbeat,
+advertised capabilities, and accepted Application runtime-event evidence. A
+recent heartbeat is reported as `reporting`, not as proof that the transport is
+currently connected. The server freshness bound is 300 seconds.
+
+Timeline points distinguish received signals, missing signals inside known
+history, and unavailable time before collection or retention coverage. Health
+source buckets are retained for at least 25 hours. Diagnostic deltas are recent
+increments from monotonic counters; they are node-wide, can therefore appear on
+multiple Application cards served by one agent, and must not be attributed to a
+specific workload. Counter decreases produce reset markers and no negative or
+cross-reset delta. Older agents without counters remain visible with diagnostics
+unavailable.
+
+Deploy migration 28 and the compatible server before enabling the stage 2 Web
+surface. A Web rollback can return to the workers-only view independently. A
+server rollback leaves the additive health tables unused; do not reverse the
+migration or delete health buckets, runtime evidence, agent identities,
+credentials, or installation state. Older compatible agents remain supported
+and continue to contribute stream freshness even when counters are unavailable.
+
 ## Runtime Inventory Distribution example
 
 ```json

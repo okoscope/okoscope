@@ -102,6 +102,10 @@ const LIVE_OPERATIONS: &[(&str, &str)] = &[
         "get",
     ),
     (
+        "/api/v1/projects/{project_id}/applications/{application_id}/agent-health",
+        "get",
+    ),
+    (
         "/api/v1/projects/{project_id}/applications/{application_id}/credentials",
         "get",
     ),

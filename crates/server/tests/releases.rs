@@ -441,7 +441,7 @@ async fn release_api_is_paginated_conflict_safe_and_tenant_scoped(pool: sqlx::Pg
         .await
         .unwrap();
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
-    assert_eq!(server::database::REQUIRED_MIGRATION, 27);
+    assert_eq!(server::database::REQUIRED_MIGRATION, 28);
     let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='runtime_events' AND column_name='release_id') OR (table_name='runtime_event_group_memberships' AND column_name='release_id'))").fetch_one(&pool).await.unwrap();
     assert_eq!(columns, 2);
 }

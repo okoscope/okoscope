@@ -705,6 +705,25 @@ paths:
           '401': { $ref: '#/components/responses/Error' },
           '404': { $ref: '#/components/responses/Error' },
         }
+  /api/v1/projects/{project_id}/applications/{application_id}/agent-health:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ApplicationId' }
+    get:
+      operationId: listApplicationAgentHealth
+      parameters:
+        - name: range
+          in: query
+          schema: { type: string, enum: [1h, 6h, 24h], default: 1h }
+        - { $ref: '#/components/parameters/OpaqueCursor' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 20, default: 20 }
+      responses:
+        '200': { $ref: '#/components/responses/ApplicationAgentHealthPage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/applications/{application_id}/credentials:
     parameters:
       [
@@ -3996,7 +4015,7 @@ components:
         service_version: { type: string, example: 0.1.0 }
         git_commit: { type: string, example: ac23c0b4d042e8d430ea6880f6b66ed1a9d4580a }
         api_version: { type: string, const: v1 }
-        required_database_migration: { type: integer, format: int64, example: 27 }
+        required_database_migration: { type: integer, format: int64, example: 28 }
     Organization:
       type: object
       additionalProperties: false
@@ -4213,6 +4232,62 @@ components:
         coverage: { $ref: '#/components/schemas/RuntimeRetentionCoverage' }
         items:
           { type: array, maxItems: 200, items: { $ref: '#/components/schemas/ApplicationWorker' } }
+        next_cursor: { $ref: '#/components/schemas/NullableOpaqueCursor' }
+    AgentDiagnosticDelta:
+      type: object
+      additionalProperties: false
+      required: [category, delta]
+      properties:
+        category: { type: string, enum: [dropped, rate_limited, decode_failed, attribution_failed, capacity, kernel_lost, correlation, delivery_retry, unsupported] }
+        delta: { type: integer, format: int64, minimum: 1 }
+    AgentHealthTimelinePoint:
+      type: object
+      additionalProperties: false
+      required: [start, end, status, diagnostics, reset]
+      properties:
+        start: { $ref: '#/components/schemas/Timestamp' }
+        end: { $ref: '#/components/schemas/Timestamp' }
+        status: { type: string, enum: [received, missing, unavailable] }
+        diagnostics: { type: array, maxItems: 9, items: { $ref: '#/components/schemas/AgentDiagnosticDelta' } }
+        reset: { type: boolean }
+    AgentHealthCoverage:
+      type: object
+      additionalProperties: false
+      required: [available_from, complete]
+      properties:
+        available_from: { $ref: '#/components/schemas/Timestamp' }
+        complete: { type: boolean }
+    ApplicationAgentHealth:
+      type: object
+      additionalProperties: false
+      required: [agent_id, cluster_id, cluster_name, node_name, agent_version, architecture, kernel_release, capabilities, stream_state, last_signal_at, first_event_at, last_event_at, coverage, node_diagnostics, timeline]
+      properties:
+        agent_id: { $ref: '#/components/schemas/Uuid' }
+        cluster_id: { $ref: '#/components/schemas/Uuid' }
+        cluster_name: { type: string, minLength: 1 }
+        node_name: { type: string, minLength: 1 }
+        agent_version: { type: string, minLength: 1 }
+        architecture: { type: [string, 'null'], minLength: 1, maxLength: 64 }
+        kernel_release: { type: [string, 'null'], minLength: 1, maxLength: 255 }
+        capabilities: { type: array, maxItems: 32, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 128 } }
+        stream_state: { type: string, enum: [reporting, stale, authenticated, unknown] }
+        last_signal_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        first_event_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        last_event_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        coverage: { $ref: '#/components/schemas/AgentHealthCoverage' }
+        node_diagnostics: { type: array, maxItems: 9, items: { $ref: '#/components/schemas/AgentDiagnosticDelta' } }
+        timeline: { type: array, minItems: 60, maxItems: 96, items: { $ref: '#/components/schemas/AgentHealthTimelinePoint' }, description: Exactly 60 points for 1h and 72 points for 6h; 24h may contain 96 points. }
+    ApplicationAgentHealthPage:
+      type: object
+      additionalProperties: false
+      required: [range, step_seconds, window_start, window_end, freshness_seconds, items, next_cursor]
+      properties:
+        range: { type: string, enum: [1h, 6h, 24h] }
+        step_seconds: { type: integer, enum: [60, 300, 900] }
+        window_start: { $ref: '#/components/schemas/Timestamp' }
+        window_end: { $ref: '#/components/schemas/Timestamp' }
+        freshness_seconds: { type: integer, const: 300 }
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/ApplicationAgentHealth' } }
         next_cursor: { $ref: '#/components/schemas/NullableOpaqueCursor' }
     RuntimeGroup:
       type: object
@@ -6299,6 +6374,13 @@ components:
         headers: { X-Request-Id: { $ref: '#/components/headers/RequestId' } },
         content:
           { application/json: { schema: { $ref: '#/components/schemas/ApplicationWorkerPage' } } },
+      }
+    ApplicationAgentHealthPage:
+      {
+        description: Bounded Application-stream health and node-wide diagnostics,
+        headers: { X-Request-Id: { $ref: '#/components/headers/RequestId' } },
+        content:
+          { application/json: { schema: { $ref: '#/components/schemas/ApplicationAgentHealthPage' } } },
       }
     InventorySummary:
       {

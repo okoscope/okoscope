@@ -8,6 +8,24 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-09
+
+### Added
+
+- Application-scoped agent health history and an additive paginated API with
+  advertised capabilities, stream freshness, event evidence, node-wide
+  diagnostic deltas, reset markers, and bounded 1-hour, 6-hour, and 24-hour
+  timelines.
+- Application observation health now shows server-derived freshness, reporting
+  node count, actionable no-data reasons, and retained worker data during
+  readiness refresh failures.
+
+### Upgrade notes
+
+- Database migration 28 is required. It adds bounded Application-agent signal
+  and node diagnostic buckets retained for at least 25 hours; existing runtime
+  events and the workers API are unchanged.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added
@@ -73,6 +91,7 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - CI validation for Rust formatting, strict Clippy, userspace tests, PostgreSQL
   migrations, Helm contracts, and Kubernetes manifests.
 
-[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/okoscope/okoscope/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/okoscope/okoscope/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/okoscope/okoscope/releases/tag/v0.1.0

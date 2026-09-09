@@ -2,6 +2,7 @@ pub mod access_api;
 pub mod access_audit;
 pub mod access_control;
 pub mod admin_auth;
+pub mod agent_health;
 pub mod api;
 pub mod application_credentials;
 pub mod attention;

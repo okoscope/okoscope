@@ -77,10 +77,8 @@ impl AgentService for AgentSessionService {
             Some(agent_message::Message::Hello(hello)) => hello,
             _ => return Err(Status::invalid_argument("first message must be hello")),
         };
-        let scope = resolve_session_scope(&self.pool, application_scope, &hello).await?;
-        let (agent_id, _session_id) = register(&self.pool, scope, &hello)
-            .await
-            .map_err(internal)?;
+        let (scope, agent_id, session_id) =
+            establish_agent(&self.pool, application_scope, &hello).await?;
         let capabilities = agent_capabilities(&hello);
         let (sender, receiver) = mpsc::channel(32);
         sender
@@ -119,7 +117,11 @@ impl AgentService for AgentSessionService {
                             })?;
                             sender.send(Ok(ServerMessage { protocol_version: event_model::PROTOCOL_VERSION, message: Some(server_message::Message::BatchAcknowledgement(BatchAcknowledgement { sequence: batch.sequence, accepted_events: accepted, retention_expired_events })) })).await.map_err(|_| Status::unavailable("session response channel closed"))?;
                         }
-                        Some(agent_message::Message::Heartbeat(_)) => { touch_agent(&pool, agent_id).await.map_err(internal)?; }
+                        Some(agent_message::Message::Heartbeat(heartbeat)) => {
+                            touch_agent(&pool, agent_id).await.map_err(internal)?;
+                            crate::agent_health::record_heartbeat(&pool, application_scope, scope.cluster_id, agent_id, &heartbeat)
+                                .await.map_err(|message| if message.starts_with("heartbeat") { Status::invalid_argument(message) } else { internal(message) })?;
+                        }
                         Some(agent_message::Message::ResourceSampleBatch(_)) if !capabilities.has(1 << 3) => return Err(Status::failed_precondition("resource samples require resource.utilization/v1 capability")),
                         Some(agent_message::Message::ResourceSampleBatch(batch)) => {
                             if batch.aggregates.len() > event_model::MAX_RESOURCE_BATCH_AGGREGATES {
@@ -157,9 +159,43 @@ impl AgentService for AgentSessionService {
                     break;
                 }
             }
+            crate::agent_health::end_session(&pool, session_id, application_scope, agent_id).await;
         });
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
+}
+
+async fn establish_agent(
+    pool: &PgPool,
+    application_scope: ApplicationCredentialScope,
+    hello: &AgentHello,
+) -> Result<(SessionScope, Uuid, Uuid), Status> {
+    let bounded = crate::agent_health::validate_capabilities(&hello.capabilities)
+        .map_err(Status::invalid_argument)?;
+    let scope = resolve_session_scope(pool, application_scope, hello).await?;
+    let (agent_id, session_id) = register(pool, scope, hello, &bounded)
+        .await
+        .map_err(internal)?;
+    crate::agent_health::register_application_agent(
+        pool,
+        application_scope,
+        scope.cluster_id,
+        agent_id,
+        &bounded,
+    )
+    .await
+    .map_err(internal)?;
+    crate::agent_health::record_hello_counters(
+        pool,
+        scope.organization_id,
+        scope.cluster_id,
+        agent_id,
+        hello.drop_counters,
+        hello.resource_counters,
+    )
+    .await
+    .map_err(internal)?;
+    Ok((scope, agent_id, session_id))
 }
 
 async fn persist_resource_batch(
@@ -286,11 +322,12 @@ async fn register(
     pool: &PgPool,
     scope: SessionScope,
     hello: &AgentHello,
+    capabilities: &[String],
 ) -> Result<(Uuid, Uuid), sqlx::Error> {
     let architecture = platform_value(&hello.architecture, 64);
     let kernel_release = platform_value(&hello.kernel_release, 255);
     let agent_id: Uuid = sqlx::query_scalar("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version, architecture, kernel_release, capabilities) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (cluster_id, node_name) DO UPDATE SET agent_version=EXCLUDED.agent_version, architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release, capabilities=EXCLUDED.capabilities, last_seen_at=now() RETURNING id")
-        .bind(Uuid::new_v4()).bind(scope.organization_id).bind(scope.cluster_id).bind(&hello.node_name).bind(&hello.agent_version).bind(architecture).bind(kernel_release).bind(serde_json::json!(hello.capabilities)).fetch_one(pool).await?;
+        .bind(Uuid::new_v4()).bind(scope.organization_id).bind(scope.cluster_id).bind(&hello.node_name).bind(&hello.agent_version).bind(architecture).bind(kernel_release).bind(serde_json::json!(capabilities)).fetch_one(pool).await?;
     let session_id = Uuid::new_v4();
     sqlx::query("INSERT INTO agent_sessions (id, organization_id, cluster_id, agent_id, protocol_version) VALUES ($1,$2,$3,$4,$5)")
         .bind(session_id).bind(scope.organization_id).bind(scope.cluster_id).bind(agent_id).bind(i32::try_from(event_model::PROTOCOL_VERSION).unwrap_or(i32::MAX)).execute(pool).await?;
@@ -441,7 +478,8 @@ mod tests {
             cluster_id: ids.cluster_id,
         };
 
-        let (agent_id, _) = register(&pool, scope, &hello("node-a", " x86_64 ", "6.8.1"))
+        let first = hello("node-a", " x86_64 ", "6.8.1");
+        let (agent_id, _) = register(&pool, scope, &first, &first.capabilities)
             .await
             .unwrap();
         let stored: (Option<String>, Option<String>) =
@@ -452,7 +490,8 @@ mod tests {
                 .unwrap();
         assert_eq!(stored, (Some("x86_64".into()), Some("6.8.1".into())));
 
-        let (same_agent_id, _) = register(&pool, scope, &hello("node-a", "unknown", "6.9.2"))
+        let second = hello("node-a", "unknown", "6.9.2");
+        let (same_agent_id, _) = register(&pool, scope, &second, &second.capabilities)
             .await
             .unwrap();
         assert_eq!(same_agent_id, agent_id);
@@ -585,8 +624,8 @@ mod tests {
         );
 
         let (first_registration, same_registration) = tokio::join!(
-            register(&pool, first_scope, &first_hello),
-            register(&pool, first_scope, &first_hello)
+            register(&pool, first_scope, &first_hello, &first_hello.capabilities),
+            register(&pool, first_scope, &first_hello, &first_hello.capabilities)
         );
         assert_eq!(first_registration.unwrap().0, same_registration.unwrap().0);
 
