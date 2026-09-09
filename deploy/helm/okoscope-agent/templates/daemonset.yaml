@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "okoscope-agent.fullname" . }}
+  labels:
+    {{- include "okoscope-agent.labels" . | nindent 4 }}
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  selector:
+    matchLabels:
+      {{- include "okoscope-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "okoscope-agent.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "okoscope-agent.fullname" . }}
+      hostPID: true
+      terminationGracePeriodSeconds: 20
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: {{ include "okoscope-agent.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/okoscope/agent.yaml"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            capabilities:
+              drop: [ALL]
+              add: [BPF, NET_ADMIN, PERFMON, SYS_ADMIN, SYS_RESOURCE]
+          env:
+            - name: OKOSCOPE_NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - {name: RUST_LOG, value: info}
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/okoscope, readOnly: true}
+            - {name: credentials, mountPath: /var/run/secrets/okoscope/applications, readOnly: true}
+            {{- if .Values.server.caSecret.name }}
+            - {name: ca, mountPath: /var/run/secrets/okoscope-ca, readOnly: true}
+            {{- end }}
+            - {name: proc, mountPath: /proc, readOnly: true}
+            - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+            - {name: tracing, mountPath: /sys/kernel/tracing}
+      volumes:
+        - {name: config, configMap: {name: {{ include "okoscope-agent.fullname" . }}}}
+        - name: credentials
+          projected:
+            defaultMode: 0400
+            sources:
+            {{- range $index, $mapping := .Values.workloads }}
+              - secret:
+                  name: {{ $mapping.credentialSecret.name }}
+                  items: [{key: {{ $mapping.credentialSecret.key }}, path: {{ $index | quote }}}]
+            {{- end }}
+        {{- if .Values.server.caSecret.name }}
+        - {name: ca, secret: {secretName: {{ .Values.server.caSecret.name }}}}
+        {{- end }}
+        - {name: proc, hostPath: {path: /proc, type: Directory}}
+        - {name: cgroup, hostPath: {path: /sys/fs/cgroup, type: Directory}}
+        - {name: tracing, hostPath: {path: /sys/kernel/tracing, type: Directory}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}

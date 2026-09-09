@@ -1,0 +1,47 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+argon2.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+chacha20poly1305.workspace = true
+clap.workspace = true
+cookie.workspace = true
+event-model.workspace = true
+futures.workspace = true
+hex.workspace = true
+hmac.workspace = true
+lettre.workspace = true
+protocol.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true
+
+[lints]
+workspace = true

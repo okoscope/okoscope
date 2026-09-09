@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: okoscope-server
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: okoscope-server
+  template:
+    metadata:
+      annotations:
+        okoscope.io/notification-config: "__NOTIFICATION_CONFIG_FINGERPRINT__"
+      labels:
+        app: okoscope-server
+        app.kubernetes.io/name: okoscope-server
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/okoscope/okoscope-server:0000000000000000000000000000000000000000
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          envFrom:
+            - configMapRef:
+                name: okoscope-server
+          env:
+            - name: OKOSCOPE_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: okoscope-secrets, key: database-url}
+            - name: OKOSCOPE_ADMIN_CREDENTIAL
+              valueFrom:
+                secretKeyRef: {name: okoscope-secrets, key: admin-credential}
+            - name: OKOSCOPE_REGISTRATION_ENABLED
+              value: "false"
+            - name: OKOSCOPE_SESSION_LIFETIME_SECONDS
+              value: "43200"
+            - name: OKOSCOPE_WEBHOOK_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: okoscope-secrets, key: webhook-encryption-key}
+            - name: OKOSCOPE_IDENTITY_TOKEN_KEY
+              valueFrom:
+                secretKeyRef: {name: okoscope-secrets, key: identity-token-key}
+          ports:
+            - {name: grpc, containerPort: 4317}
+            - {name: health, containerPort: 8080}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          startupProbe:
+            httpGet: {path: /healthz, port: health}
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: okoscope-server
+spec:
+  selector:
+    app: okoscope-server
+  ports:
+    - {name: grpc, port: 4317, targetPort: grpc}
+    - {name: health, port: 8080, targetPort: 8080}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-server
+data:
+  OKOSCOPE_MIGRATE: "false"
+  OKOSCOPE_DEVELOPMENT_PLAINTEXT: "true"
+  OKOSCOPE_NOTIFICATION_DELIVERY_ENABLED: "__NOTIFICATION_ENABLED__"
+  OKOSCOPE_NOTIFICATION_POLL_MS: "__NOTIFICATION_POLL_MS__"
+  OKOSCOPE_NOTIFICATION_CLAIM_SIZE: "__NOTIFICATION_CLAIM_SIZE__"
+  OKOSCOPE_NOTIFICATION_CONCURRENCY: "__NOTIFICATION_CONCURRENCY__"
+  OKOSCOPE_NOTIFICATION_LEASE_SECONDS: "__NOTIFICATION_LEASE_SECONDS__"
+  OKOSCOPE_WEBHOOK_TIMEOUT_SECONDS: "__WEBHOOK_TIMEOUT_SECONDS__"
+  OKOSCOPE_WEBHOOK_MAX_ATTEMPTS: "__WEBHOOK_MAX_ATTEMPTS__"
+  OKOSCOPE_WEBHOOK_BACKOFF_MIN_SECONDS: "__WEBHOOK_BACKOFF_MIN_SECONDS__"
+  OKOSCOPE_WEBHOOK_BACKOFF_MAX_SECONDS: "__WEBHOOK_BACKOFF_MAX_SECONDS__"
+  OKOSCOPE_WEBHOOK_MAX_RESPONSE_BYTES: "__WEBHOOK_MAX_RESPONSE_BYTES__"
+  OKOSCOPE_NOTIFICATION_DRAIN_SECONDS: "__NOTIFICATION_DRAIN_SECONDS__"
+  # Legacy policy import only; user policies are stored in PostgreSQL.
+  OKOSCOPE_NOTIFICATION_RETENTION_PAUSED: "false"
+  OKOSCOPE_NOTIFICATION_RETENTION_ENABLED: "__RETENTION_ENABLED__"
+  OKOSCOPE_NOTIFICATION_TERMINAL_RETENTION_DAYS: "__TERMINAL_RETENTION_DAYS__"
+  OKOSCOPE_NOTIFICATION_RECOVERY_RETENTION_DAYS: "__RECOVERY_RETENTION_DAYS__"
+  OKOSCOPE_NOTIFICATION_RETENTION_BATCH_SIZE: "__RETENTION_BATCH_SIZE__"
+  OKOSCOPE_NOTIFICATION_RETENTION_POLL_SECONDS: "__RETENTION_POLL_SECONDS__"
+  RUST_LOG: info

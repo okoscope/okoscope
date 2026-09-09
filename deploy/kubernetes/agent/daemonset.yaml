@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: okoscope-agent
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  selector:
+    matchLabels:
+      app: okoscope-agent
+  template:
+    metadata:
+      labels:
+        app: okoscope-agent
+        app.kubernetes.io/name: okoscope-agent
+    spec:
+      serviceAccountName: okoscope-agent
+      hostPID: true
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: agent
+          image: ghcr.io/okoscope/okoscope-agent:0000000000000000000000000000000000000000
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [BPF, NET_ADMIN, PERFMON, SYS_ADMIN, SYS_RESOURCE]
+            runAsUser: 0
+          env:
+            - name: OKOSCOPE_NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - {name: RUST_LOG, value: info}
+          resources:
+            requests: {cpu: 100m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/okoscope, readOnly: true}
+            - {name: secrets, mountPath: /var/run/secrets/okoscope, readOnly: true}
+            - {name: proc, mountPath: /proc, readOnly: true}
+            - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+            - {name: tracing, mountPath: /sys/kernel/tracing}
+      volumes:
+        - {name: config, configMap: {name: okoscope-agent}}
+        - name: secrets
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: okoscope-application-credentials
+                  items: [{key: payment-api, path: applications/payment-api}]
+        - {name: proc, hostPath: {path: /proc, type: Directory}}
+        - {name: cgroup, hostPath: {path: /sys/fs/cgroup, type: Directory}}
+        - {name: tracing, hostPath: {path: /sys/kernel/tracing, type: Directory}}

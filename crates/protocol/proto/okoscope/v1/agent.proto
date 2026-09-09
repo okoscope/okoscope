@@ -1,0 +1,558 @@
+syntax = "proto3";
+
+package okoscope.v1;
+
+service AgentService {
+  rpc OpenSession(stream AgentMessage) returns (stream ServerMessage);
+}
+
+message AgentMessage {
+  uint32 protocol_version = 1;
+  oneof message {
+    AgentHello hello = 10;
+    EventBatch event_batch = 11;
+    Heartbeat heartbeat = 12;
+    ControlResult control_result = 13;
+    WorkloadRevisionEvidence revision_evidence = 14;
+    RevisionReadinessSnapshot readiness_snapshot = 15;
+    OnboardingStatus onboarding_status = 16;
+    ResourceSampleBatch resource_sample_batch = 17;
+  }
+}
+
+message OnboardingStatus {
+  int64 observed_at_unix_nanos = 1;
+  OnboardingState state = 2;
+  OnboardingReason reason = 3;
+}
+
+enum OnboardingState {
+  ONBOARDING_STATE_UNSPECIFIED = 0;
+  ONBOARDING_STATE_AGENT_AUTHENTICATED = 1;
+  ONBOARDING_STATE_WORKLOAD_NOT_MATCHED = 2;
+  ONBOARDING_STATE_PERMISSION_DENIED = 3;
+  ONBOARDING_STATE_KERNEL_UNSUPPORTED = 4;
+  ONBOARDING_STATE_WAITING_FOR_EVENT = 5;
+}
+
+enum OnboardingReason {
+  ONBOARDING_REASON_UNSPECIFIED = 0;
+  ONBOARDING_REASON_SELECTOR_NO_MATCH = 1;
+  ONBOARDING_REASON_KUBERNETES_WATCH_FORBIDDEN = 2;
+  ONBOARDING_REASON_EBPF_UNAVAILABLE = 3;
+  ONBOARDING_REASON_BTF_UNAVAILABLE = 4;
+  ONBOARDING_REASON_EVENT_NOT_OBSERVED = 5;
+}
+
+message ServerMessage {
+  uint32 protocol_version = 1;
+  oneof message {
+    SessionAccepted session_accepted = 10;
+    BatchAcknowledgement batch_acknowledgement = 11;
+    ControlMessage control = 12;
+    ResourceBatchAcknowledgement resource_batch_acknowledgement = 13;
+  }
+}
+
+message AgentHello {
+  string agent_version = 1;
+  string node_name = 2;
+  string architecture = 3;
+  string kernel_release = 4;
+  repeated string capabilities = 5;
+  DropCounters drop_counters = 6;
+  string cluster_uid = 7;
+  // Display name only; cluster_uid remains the stable identity. Empty for legacy agents.
+  string cluster_name = 8;
+  ResourceCounters resource_counters = 9;
+}
+
+message SessionAccepted {
+  string organization_id = 1;
+  string cluster_id = 2;
+  string agent_id = 3;
+  uint32 negotiated_protocol_version = 4;
+  string project_id = 5;
+  string application_id = 6;
+}
+
+message Heartbeat {
+  int64 sent_at_unix_nanos = 1;
+  DropCounters drop_counters = 2;
+  ResourceCounters resource_counters = 3;
+}
+
+message ResourceCounters {
+  uint64 discovered = 1;
+  uint64 parse_failed = 2;
+  uint64 counter_reset = 3;
+  uint64 attribution_failed = 4;
+  uint64 state_capacity_dropped = 5;
+  uint64 aggregate_capacity_dropped = 6;
+  uint64 queue_dropped = 7;
+  uint64 expired = 8;
+  uint64 retried = 9;
+  uint64 acknowledged = 10;
+  uint64 unsupported_sources = 11;
+}
+
+message ResourceSampleBatch {
+  uint64 sequence = 1;
+  repeated ResourceAggregate aggregates = 2;
+}
+
+message ResourceBatchAcknowledgement {
+  uint64 sequence = 1;
+  uint32 accepted_aggregates = 2;
+  uint32 duplicate_aggregates = 3;
+  uint32 retention_expired_aggregates = 4;
+  uint32 invalid_aggregates = 5;
+}
+
+message ResourceAggregate {
+  string aggregate_id = 1;
+  uint32 schema_version = 2;
+  int64 interval_start_unix_nanos = 3;
+  int64 interval_end_unix_nanos = 4;
+  uint64 covered_usec = 5;
+  uint32 sample_count = 6;
+  uint32 contributing_containers = 7;
+  string namespace = 8;
+  string workload_uid = 9;
+  string workload_kind = 10;
+  string workload_name = 11;
+  string container_name = 12;
+  string node_name = 13;
+  ReleaseIdentity release_identity = 14;
+  uint64 unavailable_sources = 15;
+  ResourceValues values = 16;
+  uint32 ready_containers = 17;
+}
+
+message ResourceValues {
+  optional uint64 cpu_usage_usec = 1;
+  optional uint64 cpu_nr_periods = 2;
+  optional uint64 cpu_nr_throttled = 3;
+  optional uint64 cpu_throttled_usec = 4;
+  optional uint64 cpu_quota_usec = 5;
+  optional uint64 cpu_period_usec = 6;
+  optional uint64 memory_current_sum_bytes = 7;
+  optional uint64 memory_current_min_bytes = 8;
+  optional uint64 memory_current_max_bytes = 9;
+  optional uint64 memory_anon_sum_bytes = 10;
+  optional uint64 memory_file_sum_bytes = 11;
+  optional uint64 memory_limit_bytes = 12;
+  optional uint64 memory_high_events = 13;
+  optional uint64 memory_max_events = 14;
+  optional uint64 memory_oom_events = 15;
+  optional uint64 memory_oom_kill_events = 16;
+  optional uint64 cpu_psi_some_usec = 17;
+  optional uint64 cpu_psi_full_usec = 18;
+  optional uint64 memory_psi_some_usec = 19;
+  optional uint64 memory_psi_full_usec = 20;
+  optional uint64 io_psi_some_usec = 21;
+  optional uint64 io_psi_full_usec = 22;
+  optional uint64 io_read_bytes = 23;
+  optional uint64 io_write_bytes = 24;
+  optional uint64 io_read_operations = 25;
+  optional uint64 io_write_operations = 26;
+  optional uint64 pids_current_sum = 27;
+  optional uint64 pids_current_max = 28;
+  optional uint64 pids_limit = 29;
+  optional uint64 pids_max_events = 30;
+}
+
+message EventBatch {
+  uint64 sequence = 1;
+  repeated RuntimeEvent events = 2;
+}
+
+message BatchAcknowledgement {
+  uint64 sequence = 1;
+  uint32 accepted_events = 2;
+  // Terminally discarded: observed before the project retention closure.
+  // The entire sequence is acknowledged, including these events.
+  uint32 retention_expired_events = 3;
+}
+
+message RuntimeEvent {
+  string event_id = 1;
+  int64 observed_at_unix_nanos = 2;
+  uint32 schema_version = 3;
+  KubernetesAttribution attribution = 4;
+  ProcessIdentity process = 5;
+  oneof payload {
+    ProcessExec process_exec = 10;
+    Syscall syscall = 11;
+    NetworkConnect network_connect = 12;
+    NetworkDnsQuery network_dns_query = 13;
+    NetworkDnsResponse network_dns_response = 14;
+    NetworkListen network_listen = 15;
+    NetworkAccept network_accept = 16;
+    FileCreate file_create = 17;
+    FileModify file_modify = 18;
+    FileDelete file_delete = 19;
+    FileRename file_rename = 20;
+    ProcessExit process_exit = 21;
+    ContainerTermination container_termination = 22;
+    ContainerRestart container_restart = 23;
+  }
+}
+
+message KubernetesAttribution {
+  reserved 1, 2;
+  reserved "project_id", "application_id";
+  string node_name = 3;
+  string namespace = 4;
+  string pod_uid = 5;
+  string pod_name = 6;
+  string container_id = 7;
+  string container_name = 8;
+  string workload_uid = 9;
+  string workload_kind = 10;
+  string workload_name = 11;
+  optional string release = 12;
+  ReleaseIdentity release_identity = 13;
+}
+
+message ReleaseIdentity {
+  uint32 version = 1;
+  bytes digest = 2;
+  repeated ContainerImageIdentity containers = 3;
+}
+
+message ContainerImageIdentity {
+  ContainerCategory category = 1;
+  string name = 2;
+  bytes digest = 3;
+  optional string image = 4;
+}
+
+enum ContainerCategory { CONTAINER_CATEGORY_UNSPECIFIED = 0; CONTAINER_CATEGORY_INIT = 1; CONTAINER_CATEGORY_APPLICATION = 2; }
+
+message WorkloadRevisionEvidence {
+  string evidence_id = 1;
+  int64 observed_at_unix_nanos = 2;
+  string namespace = 3;
+  string workload_uid = 4;
+  string workload_kind = 5;
+  string workload_name = 6;
+  string replica_set_uid = 7;
+  string replica_set_name = 8;
+  string pod_uid = 9;
+  optional string pod_template_hash = 10;
+  ReleaseIdentity release_identity = 11;
+  bool ready = 12;
+}
+
+message RevisionReadinessSnapshot {
+  string snapshot_id = 1;
+  int64 observed_at_unix_nanos = 2;
+  bool initialized = 3;
+  bool continuous = 4;
+  bytes revision_digest = 5;
+  uint32 pod_count = 6;
+  uint32 ready_pod_count = 7;
+  uint32 workload_ready_pod_count = 8;
+}
+
+message ProcessIdentity {
+  uint64 cgroup_id = 1;
+  uint32 pid = 2;
+  uint32 tgid = 3;
+  string command = 4;
+}
+
+message ProcessExec {
+  string executable = 1;
+  string parent_command = 2;
+}
+
+message ProcessExit {
+  EvidenceSource source = 1;
+  sint32 raw_wait_status = 2;
+  oneof termination {
+    ProcessExited exited = 10;
+    ProcessSignaled signaled = 11;
+  }
+  GenerationCorrelation correlation = 12;
+}
+
+message ProcessExited { uint32 status = 1; }
+
+message ProcessSignaled {
+  uint32 signal = 1;
+  string signal_name = 2;
+  bool core_dump_flag = 3;
+}
+
+message GenerationCorrelation {
+  oneof result {
+    ObservedGeneration observed = 1;
+    UnresolvedGeneration unresolved = 2;
+  }
+}
+
+message ObservedGeneration {
+  uint64 generation = 1;
+  string exec_event_id = 2;
+  string executable = 3;
+}
+
+message UnresolvedGeneration {
+  UnresolvedGenerationReason reason = 1;
+}
+
+message ContainerTermination {
+  EvidenceSource source = 1;
+  string runtime_container_id = 2;
+  string reason = 3;
+  sint32 exit_code = 4;
+  optional int64 started_at_unix_nanos = 5;
+  optional int64 finished_at_unix_nanos = 6;
+}
+
+message ContainerRestart {
+  EvidenceSource source = 1;
+  string runtime_container_id = 2;
+  uint32 restart_count = 3;
+  uint32 restart_delta = 4;
+  bool observation_gap = 5;
+  ContainerTermination previous_termination = 6;
+  optional string waiting_reason = 7;
+}
+
+message Syscall {
+  string name = 1;
+}
+
+message FileCreate { string path = 1; }
+message FileModify { string path = 1; }
+message FileDelete { string path = 1; }
+message FileRename {
+  string old_path = 1;
+  string new_path = 2;
+  optional bool replaced = 3;
+}
+
+message NetworkConnect {
+  NetworkAddressFamily address_family = 1;
+  bytes destination_address = 2;
+  uint32 destination_port = 3;
+  NetworkConnectOutcome outcome = 4;
+  optional uint32 errno = 5;
+  DnsContext dns_context = 6;
+}
+
+message NetworkListen {
+  NetworkTransport transport = 1;
+  NetworkAddressFamily address_family = 2;
+  bytes local_address = 3;
+  uint32 local_port = 4;
+}
+
+message NetworkAccept {
+  NetworkTransport transport = 1;
+  NetworkAddressFamily address_family = 2;
+  bytes local_address = 3;
+  uint32 local_port = 4;
+  bytes remote_address = 5;
+  uint32 remote_port = 6;
+}
+
+message NetworkDnsQuery {
+  uint32 transaction_id = 1;
+  DnsDirection direction = 2;
+  DnsTransport transport = 3;
+  bytes resolver_address = 4;
+  string name = 5;
+  DnsQueryType query_type = 6;
+}
+
+message NetworkDnsResponse {
+  uint32 transaction_id = 1;
+  DnsDirection direction = 2;
+  DnsTransport transport = 3;
+  bytes resolver_address = 4;
+  string name = 5;
+  DnsQueryType query_type = 6;
+  DnsResponseCode response_code = 7;
+  bool truncated = 8;
+  repeated DnsAddressAnswer answers = 9;
+  repeated DnsCname cname_chain = 10;
+  optional uint32 effective_ttl_seconds = 11;
+}
+
+message DnsAddressAnswer {
+  string name = 1;
+  bytes address = 2;
+  uint32 ttl_seconds = 3;
+}
+
+message DnsCname {
+  string alias = 1;
+  string canonical = 2;
+  uint32 ttl_seconds = 3;
+}
+
+message DnsContext {
+  repeated string names = 1;
+  int64 observed_at_unix_nanos = 2;
+  int64 expires_at_unix_nanos = 3;
+  DnsConfidence confidence = 4;
+  bool ambiguous = 5;
+}
+
+enum DnsQueryType {
+  DNS_QUERY_TYPE_UNSPECIFIED = 0;
+  DNS_QUERY_TYPE_A = 1;
+  DNS_QUERY_TYPE_AAAA = 2;
+}
+
+enum DnsTransport {
+  DNS_TRANSPORT_UNSPECIFIED = 0;
+  DNS_TRANSPORT_UDP = 1;
+  DNS_TRANSPORT_TCP = 2;
+}
+
+enum DnsDirection {
+  DNS_DIRECTION_UNSPECIFIED = 0;
+  DNS_DIRECTION_EGRESS = 1;
+  DNS_DIRECTION_INGRESS = 2;
+}
+
+enum DnsResponseCode {
+  DNS_RESPONSE_CODE_UNSPECIFIED = 0;
+  DNS_RESPONSE_CODE_NO_ERROR = 1;
+  DNS_RESPONSE_CODE_FORM_ERR = 2;
+  DNS_RESPONSE_CODE_SERV_FAIL = 3;
+  DNS_RESPONSE_CODE_NX_DOMAIN = 4;
+  DNS_RESPONSE_CODE_NOT_IMP = 5;
+  DNS_RESPONSE_CODE_REFUSED = 6;
+}
+
+enum DnsConfidence {
+  DNS_CONFIDENCE_UNSPECIFIED = 0;
+  DNS_CONFIDENCE_OBSERVED_RECENTLY = 1;
+}
+
+enum NetworkAddressFamily {
+  NETWORK_ADDRESS_FAMILY_UNSPECIFIED = 0;
+  NETWORK_ADDRESS_FAMILY_IPV4 = 1;
+  NETWORK_ADDRESS_FAMILY_IPV6 = 2;
+}
+
+enum NetworkTransport {
+  NETWORK_TRANSPORT_UNSPECIFIED = 0;
+  NETWORK_TRANSPORT_TCP = 1;
+}
+
+enum NetworkConnectOutcome {
+  NETWORK_CONNECT_OUTCOME_UNSPECIFIED = 0;
+  NETWORK_CONNECT_OUTCOME_SUCCEEDED = 1;
+  NETWORK_CONNECT_OUTCOME_IN_PROGRESS = 2;
+  NETWORK_CONNECT_OUTCOME_FAILED = 3;
+}
+
+enum EvidenceSource {
+  EVIDENCE_SOURCE_UNSPECIFIED = 0;
+  EVIDENCE_SOURCE_KERNEL = 1;
+  EVIDENCE_SOURCE_KUBERNETES = 2;
+  EVIDENCE_SOURCE_DERIVED = 3;
+}
+
+enum UnresolvedGenerationReason {
+  UNRESOLVED_GENERATION_REASON_UNSPECIFIED = 0;
+  UNRESOLVED_GENERATION_REASON_BEFORE_OBSERVATION = 1;
+  UNRESOLVED_GENERATION_REASON_EVICTED = 2;
+  UNRESOLVED_GENERATION_REASON_GENERATION_MISMATCH = 3;
+  UNRESOLVED_GENERATION_REASON_CONTAINER_LIFETIME_MISMATCH = 4;
+}
+
+message DropCounters {
+  uint64 filtered = 1;
+  uint64 unattributed = 2;
+  uint64 unsupported = 3;
+  uint64 decode_failed = 4;
+  uint64 capacity = 5;
+  uint64 kernel_lost = 6;
+  uint64 connect_correlation_capacity = 7;
+  uint64 connect_correlation_miss = 8;
+  uint64 connect_decode_failed = 9;
+  uint64 connect_unsupported_family = 10;
+  uint64 connect_kernel_lost = 11;
+  uint64 dns_packet_decode_failed = 12;
+  uint64 dns_malformed_compression = 13;
+  uint64 dns_truncated = 14;
+  uint64 dns_unsupported_record = 15;
+  uint64 dns_correlation_miss = 16;
+  uint64 dns_correlation_capacity = 17;
+  uint64 dns_tcp_reassembly = 18;
+  uint64 dns_rate_limited = 19;
+  uint64 dns_capacity = 20;
+  uint64 dns_kernel_lost = 21;
+  uint64 dns_kernel_unsupported_framing = 22;
+  uint64 dns_attribution_failed = 23;
+  uint64 dns_oversize = 24;
+  uint64 inbound_decode_failed = 25;
+  uint64 inbound_attribution_failed = 26;
+  uint64 inbound_unsupported_family = 27;
+  uint64 inbound_kernel_lost = 28;
+  uint64 inbound_rate_limited = 29;
+  uint64 inbound_correlation_miss = 30;
+  uint64 file_correlation_capacity = 31;
+  uint64 file_correlation_miss = 32;
+  uint64 file_path_read_failed = 33;
+  uint64 file_path_relative = 34;
+  uint64 file_path_invalid = 35;
+  uint64 file_path_oversize = 36;
+  uint64 file_fd_miss = 37;
+  uint64 file_filtered = 38;
+  uint64 file_kernel_lost = 39;
+  uint64 file_aggregation_capacity = 40;
+  uint64 file_decode_failed = 41;
+  uint64 file_attribution_failed = 42;
+  uint64 file_rate_limited = 43;
+  uint64 file_unsupported_object = 44;
+  uint64 exit_decode_failed = 45;
+  uint64 exit_kernel_lost = 46;
+  uint64 exit_attribution_failed = 47;
+  uint64 exit_rate_limited = 48;
+  uint64 exit_correlation_before_observation = 49;
+  uint64 exit_correlation_evicted = 50;
+  uint64 exit_correlation_generation_mismatch = 51;
+  uint64 exit_correlation_container_mismatch = 52;
+  uint64 lifecycle_capacity = 53;
+  uint64 lifecycle_invalid_status = 54;
+  uint64 lifecycle_deduplicated = 55;
+  uint64 lifecycle_attribution_failed = 56;
+  uint64 release_evidence_complete = 57;
+  uint64 release_evidence_incomplete = 58;
+  uint64 release_evidence_duplicate = 59;
+  uint64 release_evidence_conflict = 60;
+  uint64 release_evidence_sent = 61;
+  uint64 release_evidence_replayed = 62;
+  uint64 release_evidence_dropped = 63;
+}
+
+message ControlMessage {
+  string request_id = 1;
+  oneof command {
+    Ping ping = 10;
+  }
+}
+
+message Ping {}
+
+message ControlResult {
+  string request_id = 1;
+  ControlStatus status = 2;
+  string detail = 3;
+}
+
+enum ControlStatus {
+  CONTROL_STATUS_UNSPECIFIED = 0;
+  CONTROL_STATUS_APPLIED = 1;
+  CONTROL_STATUS_UNSUPPORTED = 2;
+  CONTROL_STATUS_REJECTED = 3;
+}

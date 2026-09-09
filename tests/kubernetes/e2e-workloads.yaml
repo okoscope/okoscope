@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Namespace
+metadata: {name: okoscope-demo}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-api
+  namespace: okoscope-demo
+  labels: {app: payment-api}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: payment-api}}
+  template:
+    metadata: {labels: {app: payment-api}}
+    spec:
+      containers:
+        - name: payment-api
+          image: busybox:1.37
+          command: [httpd, -f, -p, "8080"]
+          ports:
+            - {name: http, containerPort: 8080, protocol: TCP}
+        - name: file-activity
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                mkdir -p /tmp/okoscope-files/excluded
+                set -C; : > /tmp/okoscope-files/report; set +C
+                printf x >> /tmp/okoscope-files/report
+                printf y >> /tmp/okoscope-files/report
+                : > /tmp/okoscope-files/report
+                mv /tmp/okoscope-files/report /tmp/okoscope-files/report.done
+                rm /tmp/okoscope-files/report.done
+                : > /tmp/okoscope-files/excluded/private
+                rm /tmp/okoscope-files/excluded/private
+                sleep 30
+              done
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-api
+  namespace: okoscope-demo
+spec:
+  selector: {app: payment-api}
+  ports:
+    - {name: http, port: 8080, targetPort: http, protocol: TCP}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-api
+  namespace: okoscope-demo
+  labels: {app: control-api}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: control-api}}
+  template:
+    metadata: {labels: {app: control-api}}
+    spec:
+      containers:
+        - name: control-api
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                mkdir -p /tmp/okoscope-files
+                set -C; : > /tmp/okoscope-files/control; set +C
+                printf x >> /tmp/okoscope-files/control
+                : > /tmp/okoscope-files/control
+                mv /tmp/okoscope-files/control /tmp/okoscope-files/control.done
+                rm /tmp/okoscope-files/control.done
+                sleep 30
+              done
