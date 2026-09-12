@@ -185,16 +185,6 @@ async fn establish_agent(
     )
     .await
     .map_err(internal)?;
-    crate::agent_health::record_hello_counters(
-        pool,
-        scope.organization_id,
-        scope.cluster_id,
-        agent_id,
-        hello.drop_counters,
-        hello.resource_counters,
-    )
-    .await
-    .map_err(internal)?;
     Ok((scope, agent_id, session_id))
 }
 

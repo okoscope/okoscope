@@ -282,7 +282,10 @@ mod linux {
                             payload: observation.payload,
                         };
                         if rate_limiter.allow() { streams.route(event); }
-                        else { counters.capacity_dropped.fetch_add(1, Ordering::Relaxed); }
+                        else {
+                            streams.record_rate_limited(event.attribution.application_id);
+                            counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     while let Some(decoded) = observer.next_file_event() {
                         let Ok(decoded) = decoded else {
@@ -303,6 +306,7 @@ mod linux {
                         for event in ready {
                             if rate_limiter.allow() { streams.route(event); }
                             else {
+                                streams.record_rate_limited(event.attribution.application_id);
                                 counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                                 counters.file_rate_limited.fetch_add(1, Ordering::Relaxed);
                             }
@@ -311,6 +315,7 @@ mod linux {
                     for event in file_aggregator.drain_expired(Instant::now()) {
                         if rate_limiter.allow() { streams.route(event); }
                         else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                             counters.file_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
@@ -329,6 +334,7 @@ mod linux {
                         if dns_rate_limiter.allow() && rate_limiter.allow() {
                             streams.route(event);
                         } else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.dns_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -340,6 +346,7 @@ mod linux {
                         if (!is_accept || inbound_rate_limiter.allow()) && rate_limiter.allow() {
                             streams.route(event);
                         } else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.inbound_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -354,6 +361,7 @@ mod linux {
                         if rate_limiter.allow() {
                             streams.route(event);
                         } else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -370,6 +378,7 @@ mod linux {
                         if rate_limiter.allow() {
                             streams.route(event);
                         } else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                             counters.exit_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
@@ -396,6 +405,7 @@ mod linux {
                     for event in file_aggregator.drain_all() {
                         if rate_limiter.allow() { streams.route(event); }
                         else {
+                            streams.record_rate_limited(event.attribution.application_id);
                             counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                             counters.file_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }

@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode, header::COOKIE},
 };
 use chrono::Utc;
-use protocol::v1::{DropCounters, Heartbeat};
+use protocol::v1::{ApplicationDiagnosticSnapshot, DropCounters, Heartbeat};
 use server::{
     agent_health::{record_heartbeat, register_application_agent},
     application_credentials::ApplicationCredentialScope,
@@ -100,7 +100,7 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
     )
     .await
     .unwrap();
-    for decode_failed in [3, 8] {
+    for decode_failed in [3, 8, 2, 4] {
         record_heartbeat(
             &pool,
             scope,
@@ -109,10 +109,48 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
             &Heartbeat {
                 sent_at_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap(),
                 drop_counters: Some(DropCounters {
-                    decode_failed,
+                    decode_failed: decode_failed + 100,
                     ..Default::default()
                 }),
                 resource_counters: None,
+                application_diagnostics: Some(ApplicationDiagnosticSnapshot {
+                    decode_failed,
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let other_application = Uuid::new_v4();
+    sqlx::query("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'other-app','Other Application')")
+        .bind(other_application).bind(first.organization_id).bind(first.project_id)
+        .execute(&pool).await.unwrap();
+    let other_scope = ApplicationCredentialScope {
+        credential_id: Uuid::new_v4(),
+        application_id: other_application,
+        ..scope
+    };
+    register_application_agent(&pool, other_scope, first.cluster_id, agent_id, &[])
+        .await
+        .unwrap();
+    for dropped in [10, 60] {
+        record_heartbeat(
+            &pool,
+            other_scope,
+            first.cluster_id,
+            agent_id,
+            &Heartbeat {
+                sent_at_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap(),
+                drop_counters: Some(DropCounters {
+                    decode_failed: 10_000,
+                    ..Default::default()
+                }),
+                resource_counters: None,
+                application_diagnostics: Some(ApplicationDiagnosticSnapshot {
+                    dropped,
+                    ..Default::default()
+                }),
             },
         )
         .await
@@ -138,12 +176,27 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
             count
         );
         assert_eq!(body["items"][0]["stream_state"], "reporting");
+        assert_eq!(body["items"][0]["diagnostics_available"], true);
         assert!(body["items"][0]["first_event_at"].is_null());
         assert_eq!(
             body["items"][0]["node_diagnostics"][0]["category"],
             "decode_failed"
         );
-        assert_eq!(body["items"][0]["node_diagnostics"][0]["delta"], 5);
+        assert_eq!(body["items"][0]["node_diagnostics"][0]["delta"], 7);
+        assert!(
+            body["items"][0]["timeline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|point| point["diagnostics_available"] == true)
+        );
+        assert!(
+            body["items"][0]["timeline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|point| point["reset"] == true)
+        );
     }
     let foreign = app
         .clone()

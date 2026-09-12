@@ -6,7 +6,7 @@ use axum::{
     routing::get,
 };
 use chrono::{DateTime, Duration, Timelike, Utc};
-use protocol::v1::{DropCounters, Heartbeat, ResourceCounters};
+use protocol::v1::{ApplicationDiagnosticSnapshot, Heartbeat};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use std::collections::HashMap;
@@ -172,6 +172,7 @@ struct AgentHealth {
     first_event_at: Option<DateTime<Utc>>,
     last_event_at: Option<DateTime<Utc>>,
     coverage: HistoryCoverage,
+    diagnostics_available: bool,
     node_diagnostics: Vec<DiagnosticDelta>,
     timeline: Vec<TimelinePoint>,
 }
@@ -194,6 +195,7 @@ struct TimelinePoint {
     end: DateTime<Utc>,
     status: &'static str,
     diagnostics: Vec<DiagnosticDelta>,
+    diagnostics_available: bool,
     reset: bool,
 }
 
@@ -248,37 +250,6 @@ pub async fn register_application_agent(
     Ok(())
 }
 
-pub async fn record_hello_counters(
-    pool: &PgPool,
-    organization_id: Uuid,
-    cluster_id: Uuid,
-    agent_id: Uuid,
-    drop_counters: Option<DropCounters>,
-    resource_counters: Option<ResourceCounters>,
-) -> Result<(), sqlx::Error> {
-    if drop_counters.is_none() && resource_counters.is_none() {
-        return Ok(());
-    }
-    let received_at = Utc::now();
-    let heartbeat = Heartbeat {
-        sent_at_unix_nanos: received_at.timestamp_nanos_opt().unwrap_or_default(),
-        drop_counters,
-        resource_counters,
-    };
-    let mut tx = pool.begin().await?;
-    record_diagnostics(
-        &mut tx,
-        organization_id,
-        cluster_id,
-        agent_id,
-        received_at,
-        &heartbeat,
-        received_at,
-    )
-    .await?;
-    tx.commit().await
-}
-
 pub async fn record_heartbeat(
     pool: &PgPool,
     scope: ApplicationCredentialScope,
@@ -295,9 +266,9 @@ pub async fn record_heartbeat(
     record_signal(&mut tx, scope, agent_id, received_at)
         .await
         .map_err(|_| "database error")?;
-    record_diagnostics(
+    record_application_diagnostics(
         &mut tx,
-        scope.organization_id,
+        scope,
         cluster_id,
         agent_id,
         sent_at,
@@ -329,24 +300,22 @@ async fn record_signal(
     Ok(())
 }
 
-async fn record_diagnostics(
+async fn record_application_diagnostics(
     tx: &mut Transaction<'_, Postgres>,
-    organization_id: Uuid,
+    scope: ApplicationCredentialScope,
     cluster_id: Uuid,
     agent_id: Uuid,
     sent_at: DateTime<Utc>,
     heartbeat: &Heartbeat,
     received_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let current = categorized(
-        heartbeat.drop_counters.as_ref(),
-        heartbeat.resource_counters.as_ref(),
-    );
-    let Some(current) = current else {
+    let Some(snapshot) = heartbeat.application_diagnostics.as_ref() else {
         return Ok(());
     };
-    let previous: Option<(DateTime<Utc>, serde_json::Value)> = sqlx::query_as("SELECT sent_at,drop_counters FROM agent_counter_baselines WHERE organization_id=$1 AND cluster_id=$2 AND agent_id=$3 FOR UPDATE")
-        .bind(organization_id).bind(cluster_id).bind(agent_id).fetch_optional(&mut **tx).await?;
+    let current = application_values(snapshot);
+    let previous: Option<(DateTime<Utc>, serde_json::Value)> = sqlx::query_as("SELECT sent_at,counters FROM application_agent_counter_baselines WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND agent_id=$5 FOR UPDATE")
+        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
+        .bind(cluster_id).bind(agent_id).fetch_optional(&mut **tx).await?;
     if previous.as_ref().is_some_and(|(at, _)| sent_at <= *at) {
         return Ok(());
     }
@@ -360,12 +329,13 @@ async fn record_diagnostics(
         .as_ref()
         .filter(|_| !reset)
         .map(|old| deltas(old, &current));
-    sqlx::query("INSERT INTO agent_counter_baselines(organization_id,cluster_id,agent_id,sent_at,drop_counters) VALUES($1,$2,$3,$4,$5) ON CONFLICT(organization_id,cluster_id,agent_id) DO UPDATE SET sent_at=EXCLUDED.sent_at,drop_counters=EXCLUDED.drop_counters")
-        .bind(organization_id).bind(cluster_id).bind(agent_id).bind(sent_at).bind(serde_json::json!(current))
+    sqlx::query("INSERT INTO application_agent_counter_baselines(organization_id,project_id,application_id,cluster_id,agent_id,sent_at,counters) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id) DO UPDATE SET sent_at=EXCLUDED.sent_at,counters=EXCLUDED.counters")
+        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
+        .bind(cluster_id).bind(agent_id).bind(sent_at).bind(serde_json::json!(current))
         .execute(&mut **tx).await?;
     upsert_diagnostic_bucket(
         tx,
-        organization_id,
+        scope,
         cluster_id,
         agent_id,
         minute(received_at),
@@ -377,7 +347,7 @@ async fn record_diagnostics(
 
 async fn upsert_diagnostic_bucket(
     tx: &mut Transaction<'_, Postgres>,
-    organization_id: Uuid,
+    scope: ApplicationCredentialScope,
     cluster_id: Uuid,
     agent_id: Uuid,
     bucket: DateTime<Utc>,
@@ -385,74 +355,26 @@ async fn upsert_diagnostic_bucket(
     deltas: Option<[i64; DIAGNOSTIC_COUNT]>,
 ) -> Result<(), sqlx::Error> {
     let d = deltas.unwrap_or([0; DIAGNOSTIC_COUNT]);
-    sqlx::query("INSERT INTO agent_diagnostic_buckets(organization_id,cluster_id,agent_id,bucket_at,diagnostics_available,reset,dropped,rate_limited,decode_failed,attribution_failed,capacity,kernel_lost,correlation,delivery_retry,unsupported) VALUES($1,$2,$3,$4,TRUE,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(organization_id,cluster_id,agent_id,bucket_at) DO UPDATE SET diagnostics_available=TRUE,reset=agent_diagnostic_buckets.reset OR EXCLUDED.reset,dropped=agent_diagnostic_buckets.dropped+EXCLUDED.dropped,rate_limited=agent_diagnostic_buckets.rate_limited+EXCLUDED.rate_limited,decode_failed=agent_diagnostic_buckets.decode_failed+EXCLUDED.decode_failed,attribution_failed=agent_diagnostic_buckets.attribution_failed+EXCLUDED.attribution_failed,capacity=agent_diagnostic_buckets.capacity+EXCLUDED.capacity,kernel_lost=agent_diagnostic_buckets.kernel_lost+EXCLUDED.kernel_lost,correlation=agent_diagnostic_buckets.correlation+EXCLUDED.correlation,delivery_retry=agent_diagnostic_buckets.delivery_retry+EXCLUDED.delivery_retry,unsupported=agent_diagnostic_buckets.unsupported+EXCLUDED.unsupported")
-        .bind(organization_id).bind(cluster_id).bind(agent_id).bind(bucket).bind(reset)
+    sqlx::query("INSERT INTO application_agent_diagnostic_buckets(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at,reset,dropped,rate_limited,decode_failed,attribution_failed,capacity,kernel_lost,correlation,delivery_retry,unsupported) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at) DO UPDATE SET reset=application_agent_diagnostic_buckets.reset OR EXCLUDED.reset,dropped=application_agent_diagnostic_buckets.dropped+EXCLUDED.dropped,rate_limited=application_agent_diagnostic_buckets.rate_limited+EXCLUDED.rate_limited,decode_failed=application_agent_diagnostic_buckets.decode_failed+EXCLUDED.decode_failed,attribution_failed=application_agent_diagnostic_buckets.attribution_failed+EXCLUDED.attribution_failed,capacity=application_agent_diagnostic_buckets.capacity+EXCLUDED.capacity,kernel_lost=application_agent_diagnostic_buckets.kernel_lost+EXCLUDED.kernel_lost,correlation=application_agent_diagnostic_buckets.correlation+EXCLUDED.correlation,delivery_retry=application_agent_diagnostic_buckets.delivery_retry+EXCLUDED.delivery_retry,unsupported=application_agent_diagnostic_buckets.unsupported+EXCLUDED.unsupported")
+        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
+        .bind(cluster_id).bind(agent_id).bind(bucket).bind(reset)
         .bind(d[0]).bind(d[1]).bind(d[2]).bind(d[3]).bind(d[4]).bind(d[5]).bind(d[6]).bind(d[7]).bind(d[8])
         .execute(&mut **tx).await?;
     Ok(())
 }
 
-fn categorized(
-    drop: Option<&DropCounters>,
-    resource: Option<&ResourceCounters>,
-) -> Option<Vec<u64>> {
-    if drop.is_none() && resource.is_none() {
-        return None;
-    }
-    let d = drop.copied().unwrap_or_default();
-    let r = resource.copied().unwrap_or_default();
-    Some(vec![
-        d.release_evidence_dropped.saturating_add(r.queue_dropped),
-        d.dns_rate_limited
-            .saturating_add(d.inbound_rate_limited)
-            .saturating_add(d.file_rate_limited)
-            .saturating_add(d.exit_rate_limited),
-        d.decode_failed
-            .saturating_add(d.connect_decode_failed)
-            .saturating_add(d.dns_packet_decode_failed)
-            .saturating_add(d.inbound_decode_failed)
-            .saturating_add(d.file_decode_failed)
-            .saturating_add(d.exit_decode_failed)
-            .saturating_add(r.parse_failed),
-        d.unattributed
-            .saturating_add(d.dns_attribution_failed)
-            .saturating_add(d.inbound_attribution_failed)
-            .saturating_add(d.file_attribution_failed)
-            .saturating_add(d.exit_attribution_failed)
-            .saturating_add(d.lifecycle_attribution_failed)
-            .saturating_add(r.attribution_failed),
-        d.capacity
-            .saturating_add(d.connect_correlation_capacity)
-            .saturating_add(d.dns_correlation_capacity)
-            .saturating_add(d.dns_capacity)
-            .saturating_add(d.file_correlation_capacity)
-            .saturating_add(d.file_aggregation_capacity)
-            .saturating_add(d.lifecycle_capacity)
-            .saturating_add(r.state_capacity_dropped)
-            .saturating_add(r.aggregate_capacity_dropped),
-        d.kernel_lost
-            .saturating_add(d.connect_kernel_lost)
-            .saturating_add(d.dns_kernel_lost)
-            .saturating_add(d.inbound_kernel_lost)
-            .saturating_add(d.file_kernel_lost)
-            .saturating_add(d.exit_kernel_lost),
-        d.connect_correlation_miss
-            .saturating_add(d.dns_correlation_miss)
-            .saturating_add(d.inbound_correlation_miss)
-            .saturating_add(d.file_correlation_miss)
-            .saturating_add(d.exit_correlation_before_observation)
-            .saturating_add(d.exit_correlation_evicted)
-            .saturating_add(d.exit_correlation_generation_mismatch)
-            .saturating_add(d.exit_correlation_container_mismatch),
-        r.retried,
-        d.unsupported
-            .saturating_add(d.connect_unsupported_family)
-            .saturating_add(d.dns_unsupported_record)
-            .saturating_add(d.dns_kernel_unsupported_framing)
-            .saturating_add(d.inbound_unsupported_family)
-            .saturating_add(d.file_unsupported_object)
-            .saturating_add(r.unsupported_sources),
-    ])
+fn application_values(value: &ApplicationDiagnosticSnapshot) -> Vec<u64> {
+    vec![
+        value.dropped,
+        value.rate_limited,
+        value.decode_failed,
+        value.attribution_failed,
+        value.capacity,
+        value.kernel_lost,
+        value.correlation,
+        value.delivery_retry,
+        value.unsupported,
+    ]
 }
 
 fn deltas(old: &[u64], new: &[u64]) -> [i64; DIAGNOSTIC_COUNT] {
@@ -468,7 +390,7 @@ async fn cleanup(
     let cutoff = now - Duration::hours(HEALTH_RETENTION_HOURS);
     for table in [
         "application_agent_signal_buckets",
-        "agent_diagnostic_buckets",
+        "application_agent_diagnostic_buckets",
     ] {
         let query = format!(
             "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE bucket_at<$1 ORDER BY bucket_at LIMIT 500)"
@@ -649,6 +571,7 @@ async fn build_agent_health(
         end - Duration::hours(HEALTH_RETENTION_HOURS),
     );
     let timeline = timeline(&buckets, start, end, range.step_minutes(), coverage_from);
+    let diagnostics_available = buckets.iter().any(|bucket| bucket.diagnostics_available);
     let node_diagnostics = sum_diagnostics(&buckets);
     let stream_state = match row.last_heartbeat_at {
         None => "authenticated",
@@ -673,6 +596,7 @@ async fn build_agent_health(
             available_from: coverage_from,
             complete: coverage_from <= start,
         },
+        diagnostics_available,
         node_diagnostics,
         timeline,
     })
@@ -686,7 +610,7 @@ async fn fetch_buckets(
     end: DateTime<Utc>,
 ) -> Result<Vec<BucketRow>, sqlx::Error> {
     let step = range.step_minutes();
-    sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,bool_or(diagnostics_available) diagnostics_available,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM agent_diagnostic_buckets WHERE organization_id=$1 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.diagnostics_available,FALSE) diagnostics_available,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
+    sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE diagnostics_available,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM application_agent_diagnostic_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.diagnostics_available,FALSE) diagnostics_available,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
         .bind(row.organization_id).bind(row.project_id).bind(row.application_id).bind(row.agent_id)
         .bind(row.cluster_id).bind(step).bind(start).bind(end)
         .fetch_all(pool).await
@@ -715,6 +639,7 @@ fn timeline(
                 "missing"
             },
             diagnostics: row.map_or_else(Vec::new, diagnostics),
+            diagnostics_available: row.is_some_and(|r| r.diagnostics_available),
             reset: row.is_some_and(|r| r.reset),
         });
         at += Duration::minutes(step);
@@ -829,6 +754,7 @@ mod tests {
                         delta: i64::MAX,
                     })
                     .collect(),
+                diagnostics_available: true,
                 reset: true,
             })
             .collect()
@@ -854,6 +780,7 @@ mod tests {
                 available_from: at,
                 complete: true,
             },
+            diagnostics_available: true,
             node_diagnostics: DIAGNOSTIC_NAMES
                 .into_iter()
                 .map(|category| DiagnosticDelta {
@@ -876,32 +803,20 @@ mod tests {
     }
 
     #[test]
-    fn categorized_counters_are_closed_and_reset_safe() {
-        let old = categorized(
-            Some(&DropCounters {
-                decode_failed: 5,
-                ..Default::default()
-            }),
-            None,
-        )
-        .unwrap();
-        let new = categorized(
-            Some(&DropCounters {
-                decode_failed: 8,
-                ..Default::default()
-            }),
-            None,
-        )
-        .unwrap();
+    fn application_counters_are_closed_and_reset_safe() {
+        let old = application_values(&ApplicationDiagnosticSnapshot {
+            decode_failed: 5,
+            ..Default::default()
+        });
+        let new = application_values(&ApplicationDiagnosticSnapshot {
+            decode_failed: 8,
+            ..Default::default()
+        });
         assert_eq!(deltas(&old, &new)[2], 3);
-        let reset = categorized(
-            Some(&DropCounters {
-                decode_failed: 2,
-                ..Default::default()
-            }),
-            None,
-        )
-        .unwrap();
+        let reset = application_values(&ApplicationDiagnosticSnapshot {
+            decode_failed: 2,
+            ..Default::default()
+        });
         assert!(
             reset
                 .iter()
