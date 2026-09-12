@@ -8,6 +8,18 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Application agent health now reports only diagnostic losses assigned to the
+  selected workload's authenticated stream. Node-wide and pre-attribution
+  counters remain internal, and older agents explicitly report diagnostics as
+  unavailable instead of projecting cluster activity into an Application.
+
+### Upgrade notes
+
+- Database migration 29 is required. It adds independently resettable,
+  tenant- and Application-scoped diagnostic baselines and history buckets.
+
 ## [0.2.1] - 2026-09-09
 
 ### Added

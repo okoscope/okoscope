@@ -115,7 +115,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
     assert_eq!(build.headers()[header::CACHE_CONTROL], "no-store");
     let build = json(build).await;
     assert_eq!(build["api_version"], "v1");
-    assert_eq!(build["required_database_migration"], 28);
+    assert_eq!(build["required_database_migration"], 29);
     assert!(build.get("database_url").is_none());
 
     let notification_health = app

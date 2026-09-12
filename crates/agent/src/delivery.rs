@@ -6,7 +6,7 @@ use std::{
 
 use event_model::RuntimeEvent;
 
-use crate::counters::Counters;
+use crate::counters::{ApplicationCounters, Counters};
 
 #[derive(Clone, Debug)]
 pub struct PendingBatch {
@@ -115,9 +115,17 @@ impl EventBuffer {
     }
 
     #[must_use]
-    pub fn replay_pending(&self, counters: &Counters) -> Vec<PendingBatch> {
+    pub fn replay_pending(
+        &self,
+        counters: &Counters,
+        application_counters: &ApplicationCounters,
+    ) -> Vec<PendingBatch> {
         let batches: Vec<_> = self.pending.values().cloned().collect();
         counters.retried.fetch_add(
+            batches.iter().map(|batch| batch.events.len() as u64).sum(),
+            Ordering::Relaxed,
+        );
+        application_counters.delivery_retry.fetch_add(
             batches.iter().map(|batch| batch.events.len() as u64).sum(),
             Ordering::Relaxed,
         );
@@ -218,7 +226,13 @@ mod tests {
         assert!(!buffer.push(event(), &counters));
         let batch = buffer.next_batch(&counters).unwrap();
         assert_eq!(batch.events.len(), 2);
-        assert_eq!(buffer.replay_pending(&counters).len(), 1);
+        let application_counters = ApplicationCounters::default();
+        assert_eq!(
+            buffer
+                .replay_pending(&counters, &application_counters)
+                .len(),
+            1
+        );
         assert!(buffer.acknowledge(batch.sequence, &counters));
         let snapshot = counters.snapshot();
         assert_eq!(snapshot.capacity_dropped, 1);

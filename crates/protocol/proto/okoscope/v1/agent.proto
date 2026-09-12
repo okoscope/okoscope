@@ -80,6 +80,21 @@ message Heartbeat {
   int64 sent_at_unix_nanos = 1;
   DropCounters drop_counters = 2;
   ResourceCounters resource_counters = 3;
+  // Diagnostics assigned to this authenticated Application stream only.
+  // Absent for older agents; servers must not substitute node-wide counters.
+  ApplicationDiagnosticSnapshot application_diagnostics = 4;
+}
+
+message ApplicationDiagnosticSnapshot {
+  uint64 dropped = 1;
+  uint64 rate_limited = 2;
+  uint64 decode_failed = 3;
+  uint64 attribution_failed = 4;
+  uint64 capacity = 5;
+  uint64 kernel_lost = 6;
+  uint64 correlation = 7;
+  uint64 delivery_retry = 8;
+  uint64 unsupported = 9;
 }
 
 message ResourceCounters {

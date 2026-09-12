@@ -1,6 +1,37 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Default)]
+pub struct ApplicationCounters {
+    pub dropped: AtomicU64,
+    pub rate_limited: AtomicU64,
+    pub decode_failed: AtomicU64,
+    pub attribution_failed: AtomicU64,
+    pub capacity: AtomicU64,
+    pub kernel_lost: AtomicU64,
+    pub correlation: AtomicU64,
+    pub delivery_retry: AtomicU64,
+    pub unsupported: AtomicU64,
+}
+
+impl ApplicationCounters {
+    #[must_use]
+    pub fn snapshot(&self) -> protocol::v1::ApplicationDiagnosticSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        protocol::v1::ApplicationDiagnosticSnapshot {
+            dropped: load(&self.dropped),
+            rate_limited: load(&self.rate_limited),
+            decode_failed: load(&self.decode_failed),
+            attribution_failed: load(&self.attribution_failed),
+            capacity: load(&self.capacity),
+            kernel_lost: load(&self.kernel_lost),
+            correlation: load(&self.correlation),
+            delivery_retry: load(&self.delivery_retry),
+            unsupported: load(&self.unsupported),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct Counters {
     pub filtered: AtomicU64,
     pub unattributed: AtomicU64,

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     attribution::{KubernetesWatchState, ReleaseObservation},
     config::{LoadedApplicationCredential, ResourceObservationConfig, SafetyLimits, ServerConfig},
-    counters::Counters,
+    counters::{ApplicationCounters, Counters},
     delivery::EventBuffer,
     session::{connect_with_backoff, handle_control},
 };
@@ -23,7 +23,7 @@ enum StreamItem {
 
 #[derive(Debug)]
 pub struct ApplicationStreams {
-    routes: BTreeMap<Uuid, mpsc::Sender<StreamItem>>,
+    routes: BTreeMap<Uuid, (mpsc::Sender<StreamItem>, Arc<ApplicationCounters>)>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
     counters: Arc<Counters>,
@@ -46,7 +46,11 @@ impl ApplicationStreams {
         let mut tasks = Vec::with_capacity(credentials.len());
         for credential in credentials {
             let (sender, receiver) = mpsc::channel(safety.queue_capacity);
-            routes.insert(credential.route_id, sender);
+            let application_counters = Arc::new(ApplicationCounters::default());
+            routes.insert(
+                credential.route_id,
+                (sender, Arc::clone(&application_counters)),
+            );
             tasks.push(tokio::spawn(run_stream(
                 server.clone(),
                 credential,
@@ -58,6 +62,7 @@ impl ApplicationStreams {
                 receiver,
                 shutdown.subscribe(),
                 counters.clone(),
+                application_counters,
                 watch_ready.clone(),
                 kernel_degraded,
             )));
@@ -72,7 +77,7 @@ impl ApplicationStreams {
 
     pub fn route(&self, event: RuntimeEvent) -> bool {
         let route_id = event.attribution.application_id;
-        let Some(sender) = self.routes.get(&route_id) else {
+        let Some((sender, application_counters)) = self.routes.get(&route_id) else {
             self.counters
                 .unattributed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -83,6 +88,9 @@ impl ApplicationStreams {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.counters
                     .capacity_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                application_counters
+                    .dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 false
             }
@@ -95,7 +103,7 @@ impl ApplicationStreams {
             ReleaseObservation::Evidence { route_id, .. }
             | ReleaseObservation::Snapshot { route_id, .. } => *route_id,
         };
-        let Some(sender) = self.routes.get(&route_id) else {
+        let Some((sender, application_counters)) = self.routes.get(&route_id) else {
             self.counters
                 .release_evidence_dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -113,12 +121,15 @@ impl ApplicationStreams {
             self.counters
                 .release_evidence_dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            application_counters
+                .dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             false
         }
     }
 
     pub fn route_resource(&self, route_id: Uuid, aggregate: ResourceAggregate) -> bool {
-        let Some(sender) = self.routes.get(&route_id) else {
+        let Some((sender, application_counters)) = self.routes.get(&route_id) else {
             self.counters
                 .resource_attribution_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -133,7 +144,18 @@ impl ApplicationStreams {
             self.counters
                 .resource_queue_dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            application_counters
+                .dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             false
+        }
+    }
+
+    pub fn record_rate_limited(&self, route_id: Uuid) {
+        if let Some((_, counters)) = self.routes.get(&route_id) {
+            counters
+                .rate_limited
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -161,6 +183,7 @@ async fn run_stream(
     mut receiver: mpsc::Receiver<StreamItem>,
     mut shutdown: watch::Receiver<bool>,
     counters: Arc<Counters>,
+    application_counters: Arc<ApplicationCounters>,
     watch_ready: watch::Receiver<KubernetesWatchState>,
     kernel_degraded: bool,
 ) {
@@ -186,12 +209,18 @@ async fn run_stream(
                 continue;
             }
         };
-        for batch in buffer.replay_pending(&counters) {
+        for batch in buffer.replay_pending(&counters, &application_counters) {
             if send_batch(&session.sender, batch).await.is_err() {
                 break;
             }
         }
-        let _ = replay_resource_batches(&session.sender, &resource_pending, &counters).await;
+        let _ = replay_resource_batches(
+            &session.sender,
+            &resource_pending,
+            &counters,
+            &application_counters,
+        )
+        .await;
         let mut flush = tokio::time::interval(Duration::from_millis(10));
         let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
         let mut release_dirty = true;
@@ -201,7 +230,7 @@ async fn run_stream(
                     let Some(item) = item else { return };
                     buffer_stream_item(item, &mut buffer, &mut release_pending,
                         &mut resource_queued, queue_capacity, resource_queue_capacity,
-                        &mut release_dirty, &counters);
+                        &mut release_dirty, &counters, &application_counters);
                 }
                 _ = flush.tick() => {
                     flush_release_observations(&session.sender, &release_pending,
@@ -213,19 +242,12 @@ async fn run_stream(
                     }
                     if flush_resource_queue(
                         &session.sender, &mut resource_queued, &mut resource_pending,
-                        &mut resource_sequence, resource_queue_capacity, resource_batch_size,
-                        &counters,
+                        &mut resource_sequence, (resource_queue_capacity, resource_batch_size),
+                        &counters, &application_counters,
                     ).await.is_err() { break; }
                 }
                 _ = heartbeat.tick() => {
-                    let message = AgentMessage {
-                        protocol_version: event_model::PROTOCOL_VERSION,
-                        message: Some(agent_message::Message::Heartbeat(Heartbeat {
-                            sent_at_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-                            drop_counters: Some(counters.snapshot().into()),
-                            resource_counters: Some(counters.resource_snapshot()),
-                        })),
-                    };
+                    let message = heartbeat_message(&counters, &application_counters);
                     if session.sender.send(message).await.is_err() { break; }
                     let selector_matched = !release_pending.is_empty();
                     let kubernetes_watch_state = *watch_ready.borrow();
@@ -262,9 +284,14 @@ async fn replay_resource_batches(
     sender: &mpsc::Sender<AgentMessage>,
     pending: &BTreeMap<u64, Vec<ResourceAggregate>>,
     counters: &Counters,
+    application_counters: &ApplicationCounters,
 ) -> Result<(), mpsc::error::SendError<AgentMessage>> {
     for (&sequence, aggregates) in pending {
         counters.resource_retried.fetch_add(
+            aggregates.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        application_counters.delivery_retry.fetch_add(
             aggregates.len() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -278,10 +305,11 @@ async fn flush_resource_queue(
     queued: &mut Vec<ResourceAggregate>,
     pending: &mut BTreeMap<u64, Vec<ResourceAggregate>>,
     sequence: &mut u64,
-    capacity: usize,
-    batch_size: usize,
+    bounds: (usize, usize),
     counters: &Counters,
+    application_counters: &ApplicationCounters,
 ) -> Result<(), mpsc::error::SendError<AgentMessage>> {
+    let (capacity, batch_size) = bounds;
     if queued.is_empty() {
         return Ok(());
     }
@@ -290,6 +318,9 @@ async fn flush_resource_queue(
     if available == 0 {
         counters
             .resource_queue_dropped
+            .fetch_add(queued.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        application_counters
+            .dropped
             .fetch_add(queued.len() as u64, std::sync::atomic::Ordering::Relaxed);
         queued.clear();
         return Ok(());
@@ -300,6 +331,21 @@ async fn flush_resource_queue(
     send_resource_batch(sender, *sequence, aggregates).await?;
     *sequence = sequence.saturating_add(1);
     Ok(())
+}
+
+fn heartbeat_message(
+    counters: &Counters,
+    application_counters: &ApplicationCounters,
+) -> AgentMessage {
+    AgentMessage {
+        protocol_version: event_model::PROTOCOL_VERSION,
+        message: Some(agent_message::Message::Heartbeat(Heartbeat {
+            sent_at_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            drop_counters: Some(counters.snapshot().into()),
+            resource_counters: Some(counters.resource_snapshot()),
+            application_diagnostics: Some(application_counters.snapshot()),
+        })),
+    }
 }
 
 async fn handle_server_message(
@@ -402,10 +448,15 @@ fn buffer_stream_item(
     resource_queue_capacity: usize,
     release_dirty: &mut bool,
     counters: &Counters,
+    application_counters: &ApplicationCounters,
 ) {
     match item {
         StreamItem::Event(event) => {
-            buffer.push(*event, counters);
+            if !buffer.push(*event, counters) {
+                application_counters
+                    .dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         StreamItem::Release(observation) => {
             let observation = *observation;
@@ -422,6 +473,9 @@ fn buffer_stream_item(
                 counters
                     .release_evidence_dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                application_counters
+                    .dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         StreamItem::Resource(aggregate) => {
@@ -430,6 +484,9 @@ fn buffer_stream_item(
             } else {
                 counters
                     .resource_queue_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                application_counters
+                    .dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -558,7 +615,11 @@ mod tests {
                 retention_expired_events: 1,
             },
         );
-        assert!(buffer.replay_pending(&counters).is_empty());
+        assert!(
+            buffer
+                .replay_pending(&counters, &ApplicationCounters::default())
+                .is_empty()
+        );
         assert_eq!(counters.snapshot().acknowledged, 2);
     }
 
@@ -616,8 +677,14 @@ mod tests {
         drop(failed_receiver);
         let streams = ApplicationStreams {
             routes: BTreeMap::from([
-                (healthy_route, healthy_sender),
-                (failed_route, failed_sender),
+                (
+                    healthy_route,
+                    (healthy_sender, Arc::new(ApplicationCounters::default())),
+                ),
+                (
+                    failed_route,
+                    (failed_sender, Arc::new(ApplicationCounters::default())),
+                ),
             ]),
             shutdown: watch::channel(false).0,
             tasks: Vec::new(),
@@ -640,7 +707,16 @@ mod tests {
         let (full_sender, _full_receiver) = mpsc::channel(1);
         let (healthy_sender, mut healthy_receiver) = mpsc::channel(1);
         let streams = ApplicationStreams {
-            routes: BTreeMap::from([(full_route, full_sender), (healthy_route, healthy_sender)]),
+            routes: BTreeMap::from([
+                (
+                    full_route,
+                    (full_sender, Arc::new(ApplicationCounters::default())),
+                ),
+                (
+                    healthy_route,
+                    (healthy_sender, Arc::new(ApplicationCounters::default())),
+                ),
+            ]),
             shutdown: watch::channel(false).0,
             tasks: Vec::new(),
             counters: Arc::new(Counters::default()),
@@ -649,7 +725,20 @@ mod tests {
         assert!(streams.route(event(full_route)));
         assert!(!streams.route(event(full_route)));
         assert!(streams.route(event(healthy_route)));
+        streams.record_rate_limited(full_route);
         assert_eq!(streams.counters.snapshot().capacity_dropped, 1);
+        assert_eq!(
+            streams.routes[&full_route].1.snapshot().dropped,
+            1,
+            "the failed route owns its diagnostic"
+        );
+        assert_eq!(
+            streams.routes[&healthy_route].1.snapshot().dropped,
+            0,
+            "another route remains isolated"
+        );
+        assert_eq!(streams.routes[&full_route].1.snapshot().rate_limited, 1);
+        assert_eq!(streams.routes[&healthy_route].1.snapshot().rate_limited, 0);
         let StreamItem::Event(received) = healthy_receiver.try_recv().unwrap() else {
             panic!("event")
         };

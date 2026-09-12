@@ -2,7 +2,7 @@ use sqlx::{PgPool, Row};
 use thiserror::Error;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
-pub const REQUIRED_MIGRATION: i64 = 28;
+pub const REQUIRED_MIGRATION: i64 = 29;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationReport {

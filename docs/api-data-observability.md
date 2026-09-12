@@ -18,13 +18,17 @@ currently connected. The server freshness bound is 300 seconds.
 Timeline points distinguish received signals, missing signals inside known
 history, and unavailable time before collection or retention coverage. Health
 source buckets are retained for at least 25 hours. Diagnostic deltas are recent
-increments from monotonic counters; they are node-wide, can therefore appear on
-multiple Application cards served by one agent, and must not be attributed to a
-specific workload. Counter decreases produce reset markers and no negative or
-cross-reset delta. Older agents without counters remain visible with diagnostics
-unavailable.
+increments from monotonic counters owned by the selected Application stream.
+They cover losses after workload attribution, such as that route's bounded queue
+drops and delivery retries. Pre-attribution failures, host activity, unselected
+workloads, kernel-wide losses, and other node diagnostics remain in agent logs
+and internal observability; the server never projects them into an Application.
+Counter decreases produce route-local reset markers and no negative or
+cross-reset delta. Older agents without scoped counters remain visible with
+`diagnostics_available=false`; unavailable does not mean that zero losses were
+observed.
 
-Deploy migration 28 and the compatible server before enabling the stage 2 Web
+Deploy migration 29 and the compatible server before enabling the scoped Web
 surface. A Web rollback can return to the workers-only view independently. A
 server rollback leaves the additive health tables unused; do not reverse the
 migration or delete health buckets, runtime evidence, agent identities,
