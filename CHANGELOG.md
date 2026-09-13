@@ -12,13 +12,16 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 - Application agent health now reports only diagnostic losses assigned to the
   selected workload's authenticated stream. Node-wide and pre-attribution
-  counters remain internal, and older agents explicitly report diagnostics as
-  unavailable instead of projecting cluster activity into an Application.
+  counters remain internal. Application heartbeats without a scoped diagnostic
+  snapshot are now rejected without recording a health sample, and the HTTP API
+  no longer exposes the obsolete diagnostic-availability compatibility flags.
 
 ### Upgrade notes
 
 - Database migration 29 is required. It adds independently resettable,
   tenant- and Application-scoped diagnostic baselines and history buckets.
+- Deploy the matching server, agent, and Web versions together; agents that omit
+  Application-scoped heartbeat diagnostics are no longer compatible.
 
 ## [0.2.1] - 2026-09-09
 

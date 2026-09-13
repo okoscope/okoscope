@@ -80,8 +80,8 @@ message Heartbeat {
   int64 sent_at_unix_nanos = 1;
   DropCounters drop_counters = 2;
   ResourceCounters resource_counters = 3;
-  // Diagnostics assigned to this authenticated Application stream only.
-  // Absent for older agents; servers must not substitute node-wide counters.
+  // Required diagnostics assigned to this authenticated Application stream only.
+  // Servers reject heartbeats that omit this snapshot.
   ApplicationDiagnosticSnapshot application_diagnostics = 4;
 }
 

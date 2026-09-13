@@ -249,8 +249,9 @@ If every personal super-administrator becomes inaccessible, use the audited
 operator recovery procedure in the [access-control operations guide](access-control.md#break-glass-recovery).
 Do not enable public signup or edit PostgreSQL as a recovery shortcut. Application
 credentials are likewise shown only once. Connection readiness uses a 30-second
-compatible-agent heartbeat and becomes `stale` after five minutes; older agents
-remain usable but expose only authentication/event evidence.
+Application heartbeat and becomes `stale` after five minutes. Every heartbeat
+must include Application-scoped diagnostics, so deploy the matching agent and
+server versions together.
 
 An externally managed setup Secret may also contain an RFC 3339 expiry under
 `setup-token-expires-at` (or `setupAuthorization.expiresAtKey`). Once expired, a platform-admin-less

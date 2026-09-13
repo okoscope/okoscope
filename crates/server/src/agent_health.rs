@@ -172,7 +172,6 @@ struct AgentHealth {
     first_event_at: Option<DateTime<Utc>>,
     last_event_at: Option<DateTime<Utc>>,
     coverage: HistoryCoverage,
-    diagnostics_available: bool,
     node_diagnostics: Vec<DiagnosticDelta>,
     timeline: Vec<TimelinePoint>,
 }
@@ -195,7 +194,6 @@ struct TimelinePoint {
     end: DateTime<Utc>,
     status: &'static str,
     diagnostics: Vec<DiagnosticDelta>,
-    diagnostics_available: bool,
     reset: bool,
 }
 
@@ -203,7 +201,6 @@ struct TimelinePoint {
 struct BucketRow {
     bucket_at: DateTime<Utc>,
     received: bool,
-    diagnostics_available: bool,
     reset: bool,
     dropped: i64,
     rate_limited: i64,
@@ -257,6 +254,10 @@ pub async fn record_heartbeat(
     agent_id: Uuid,
     heartbeat: &Heartbeat,
 ) -> Result<(), &'static str> {
+    let snapshot = heartbeat
+        .application_diagnostics
+        .as_ref()
+        .ok_or("heartbeat is missing required application diagnostics")?;
     let received_at = Utc::now();
     let sent_at = DateTime::from_timestamp_nanos(heartbeat.sent_at_unix_nanos);
     if (received_at - sent_at).num_hours().unsigned_abs() > COUNTER_SKEW_HOURS as u64 {
@@ -272,7 +273,7 @@ pub async fn record_heartbeat(
         cluster_id,
         agent_id,
         sent_at,
-        heartbeat,
+        snapshot,
         received_at,
     )
     .await
@@ -306,12 +307,9 @@ async fn record_application_diagnostics(
     cluster_id: Uuid,
     agent_id: Uuid,
     sent_at: DateTime<Utc>,
-    heartbeat: &Heartbeat,
+    snapshot: &ApplicationDiagnosticSnapshot,
     received_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let Some(snapshot) = heartbeat.application_diagnostics.as_ref() else {
-        return Ok(());
-    };
     let current = application_values(snapshot);
     let previous: Option<(DateTime<Utc>, serde_json::Value)> = sqlx::query_as("SELECT sent_at,counters FROM application_agent_counter_baselines WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND agent_id=$5 FOR UPDATE")
         .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
@@ -571,7 +569,6 @@ async fn build_agent_health(
         end - Duration::hours(HEALTH_RETENTION_HOURS),
     );
     let timeline = timeline(&buckets, start, end, range.step_minutes(), coverage_from);
-    let diagnostics_available = buckets.iter().any(|bucket| bucket.diagnostics_available);
     let node_diagnostics = sum_diagnostics(&buckets);
     let stream_state = match row.last_heartbeat_at {
         None => "authenticated",
@@ -596,7 +593,6 @@ async fn build_agent_health(
             available_from: coverage_from,
             complete: coverage_from <= start,
         },
-        diagnostics_available,
         node_diagnostics,
         timeline,
     })
@@ -610,7 +606,7 @@ async fn fetch_buckets(
     end: DateTime<Utc>,
 ) -> Result<Vec<BucketRow>, sqlx::Error> {
     let step = range.step_minutes();
-    sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE diagnostics_available,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM application_agent_diagnostic_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.diagnostics_available,FALSE) diagnostics_available,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
+    sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM application_agent_diagnostic_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
         .bind(row.organization_id).bind(row.project_id).bind(row.application_id).bind(row.agent_id)
         .bind(row.cluster_id).bind(step).bind(start).bind(end)
         .fetch_all(pool).await
@@ -639,7 +635,6 @@ fn timeline(
                 "missing"
             },
             diagnostics: row.map_or_else(Vec::new, diagnostics),
-            diagnostics_available: row.is_some_and(|r| r.diagnostics_available),
             reset: row.is_some_and(|r| r.reset),
         });
         at += Duration::minutes(step);
@@ -648,9 +643,6 @@ fn timeline(
 }
 
 fn diagnostics(row: &BucketRow) -> Vec<DiagnosticDelta> {
-    if !row.diagnostics_available {
-        return Vec::new();
-    }
     diagnostic_pairs(row)
         .into_iter()
         .filter(|(_, value)| *value > 0)
@@ -754,7 +746,6 @@ mod tests {
                         delta: i64::MAX,
                     })
                     .collect(),
-                diagnostics_available: true,
                 reset: true,
             })
             .collect()
@@ -780,7 +771,6 @@ mod tests {
                 available_from: at,
                 complete: true,
             },
-            diagnostics_available: true,
             node_diagnostics: DIAGNOSTIC_NAMES
                 .into_iter()
                 .map(|category| DiagnosticDelta {
