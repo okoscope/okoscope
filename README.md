@@ -31,6 +31,8 @@ Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for
 operator logs and are never presented as failures of the selected workload.
+Application heartbeats require this scoped diagnostic snapshot; the server
+rejects incompatible heartbeats without recording a health sample.
 
 ## Architecture
 

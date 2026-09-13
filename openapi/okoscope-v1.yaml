@@ -4244,13 +4244,12 @@ components:
     AgentHealthTimelinePoint:
       type: object
       additionalProperties: false
-      required: [start, end, status, diagnostics, diagnostics_available, reset]
+      required: [start, end, status, diagnostics, reset]
       properties:
         start: { $ref: '#/components/schemas/Timestamp' }
         end: { $ref: '#/components/schemas/Timestamp' }
         status: { type: string, enum: [received, missing, unavailable] }
         diagnostics: { type: array, maxItems: 9, items: { $ref: '#/components/schemas/AgentDiagnosticDelta' } }
-        diagnostics_available: { type: boolean, description: True only when the agent reported an Application-scoped diagnostic snapshot for this interval. False is unavailable, not zero. }
         reset: { type: boolean }
     AgentHealthCoverage:
       type: object
@@ -4262,7 +4261,7 @@ components:
     ApplicationAgentHealth:
       type: object
       additionalProperties: false
-      required: [agent_id, cluster_id, cluster_name, node_name, agent_version, architecture, kernel_release, capabilities, stream_state, last_signal_at, first_event_at, last_event_at, coverage, diagnostics_available, node_diagnostics, timeline]
+      required: [agent_id, cluster_id, cluster_name, node_name, agent_version, architecture, kernel_release, capabilities, stream_state, last_signal_at, first_event_at, last_event_at, coverage, node_diagnostics, timeline]
       properties:
         agent_id: { $ref: '#/components/schemas/Uuid' }
         cluster_id: { $ref: '#/components/schemas/Uuid' }
@@ -4277,8 +4276,7 @@ components:
         first_event_at: { $ref: '#/components/schemas/NullableTimestamp' }
         last_event_at: { $ref: '#/components/schemas/NullableTimestamp' }
         coverage: { $ref: '#/components/schemas/AgentHealthCoverage' }
-        diagnostics_available: { type: boolean, description: True after this agent has reported scoped diagnostics for the selected Application in the requested window. False is unavailable, not zero. }
-        node_diagnostics: { type: array, maxItems: 9, items: { $ref: '#/components/schemas/AgentDiagnosticDelta' }, description: Application-scoped diagnostic summary retained under its legacy field name for wire compatibility. It never contains node-wide or pre-attribution counters. }
+        node_diagnostics: { type: array, maxItems: 9, items: { $ref: '#/components/schemas/AgentDiagnosticDelta' }, description: Application-scoped diagnostic summary. It never contains node-wide or pre-attribution counters. }
         timeline: { type: array, minItems: 60, maxItems: 96, items: { $ref: '#/components/schemas/AgentHealthTimelinePoint' }, description: Exactly 60 points for 1h and 72 points for 6h; 24h may contain 96 points. }
     ApplicationAgentHealthPage:
       type: object

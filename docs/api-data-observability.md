@@ -24,16 +24,14 @@ drops and delivery retries. Pre-attribution failures, host activity, unselected
 workloads, kernel-wide losses, and other node diagnostics remain in agent logs
 and internal observability; the server never projects them into an Application.
 Counter decreases produce route-local reset markers and no negative or
-cross-reset delta. Older agents without scoped counters remain visible with
-`diagnostics_available=false`; unavailable does not mean that zero losses were
-observed.
+cross-reset delta. Every Application heartbeat must include its scoped
+diagnostic snapshot. The server rejects an incompatible heartbeat before
+persisting its health signal.
 
-Deploy migration 29 and the compatible server before enabling the scoped Web
-surface. A Web rollback can return to the workers-only view independently. A
-server rollback leaves the additive health tables unused; do not reverse the
-migration or delete health buckets, runtime evidence, agent identities,
-credentials, or installation state. Older compatible agents remain supported
-and continue to contribute stream freshness even when counters are unavailable.
+Deploy migration 29, server, agent, and Web together before enabling the scoped
+health surface. A server rollback leaves the additive health tables unused; do
+not reverse the migration or delete health buckets, runtime evidence, agent
+identities, credentials, or installation state.
 
 ## Runtime Inventory Distribution example
 

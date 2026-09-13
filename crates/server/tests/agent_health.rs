@@ -100,6 +100,31 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
     )
     .await
     .unwrap();
+    let incompatible = record_heartbeat(
+        &pool,
+        scope,
+        first.cluster_id,
+        agent_id,
+        &Heartbeat {
+            sent_at_unix_nanos: Utc::now().timestamp_nanos_opt().unwrap(),
+            drop_counters: None,
+            resource_counters: None,
+            application_diagnostics: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        incompatible,
+        Err("heartbeat is missing required application diagnostics")
+    );
+    let signal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM application_agent_signal_buckets WHERE application_id=$1",
+    )
+    .bind(first.application_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(signal_count, 0);
     for decode_failed in [3, 8, 2, 4] {
         record_heartbeat(
             &pool,
@@ -176,7 +201,7 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
             count
         );
         assert_eq!(body["items"][0]["stream_state"], "reporting");
-        assert_eq!(body["items"][0]["diagnostics_available"], true);
+        assert!(body["items"][0].get("diagnostics_available").is_none());
         assert!(body["items"][0]["first_event_at"].is_null());
         assert_eq!(
             body["items"][0]["node_diagnostics"][0]["category"],
@@ -188,7 +213,7 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|point| point["diagnostics_available"] == true)
+                .all(|point| point.get("diagnostics_available").is_none())
         );
         assert!(
             body["items"][0]["timeline"]
