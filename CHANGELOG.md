@@ -8,6 +8,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-14
+
 ### Changed
 
 - Application agent health now reports only diagnostic losses assigned to the
@@ -106,7 +108,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - CI validation for Rust formatting, strict Clippy, userspace tests, PostgreSQL
   migrations, Helm contracts, and Kubernetes manifests.
 
-[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/okoscope/okoscope/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/okoscope/okoscope/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/okoscope/okoscope/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/okoscope/okoscope/releases/tag/v0.1.0
