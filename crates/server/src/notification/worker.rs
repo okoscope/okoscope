@@ -130,6 +130,7 @@ pub struct DeliverySemanticMetadata {
     pub application_id: Option<Uuid>,
     pub group_id: Option<Uuid>,
     pub event_kind: Option<String>,
+    pub user_labels: Vec<Value>,
 }
 
 #[derive(Clone, Debug, FromRow)]
@@ -214,6 +215,11 @@ fn delivery_semantic_metadata(payload: &Value) -> Option<DeliverySemanticMetadat
             .get("event_kind")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        user_labels: payload
+            .get("user_labels")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     };
     (metadata.application_id.is_some()
         || metadata.group_id.is_some()
@@ -312,6 +318,8 @@ async fn materialize_message(
     .bind(outbox.project_id)
     .fetch_all(&mut **tx)
     .await?;
+    let user_labels: Value = sqlx::query_scalar("SELECT COALESCE(jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at'),'[]'::jsonb) FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=$2 ORDER BY l.display_name,l.id LIMIT 20) labels")
+        .bind(outbox.organization_id).bind(outbox.aggregate_id).fetch_one(&mut **tx).await?;
     if destinations.is_empty() {
         stats.no_destinations = stats.no_destinations.saturating_add(1);
         sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='no_destinations',policy_eligibility_reason='no_destinations' WHERE id=$1")
@@ -322,7 +330,7 @@ async fn materialize_message(
     for destination in destinations {
         let suppressed = outbox.source == "backfill" && !destination.deliver_backfill;
         let delivery_id = Uuid::new_v4();
-        let envelope = envelope(outbox, delivery_id);
+        let envelope = envelope(outbox, delivery_id, &user_labels);
         let delivery_status = if suppressed { "suppressed" } else { "pending" };
         let terminal_at = suppressed.then(Utc::now);
         let inserted = sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,outbox_message_id,origin,source,event_name,payload,status,max_attempts,terminal_at,last_error_class,last_error) VALUES ($1,$2,$3,$4,$5,'outbox',$6,'runtime_group.first_seen',$7,$8,$9,$10,$11,$12) ON CONFLICT (outbox_message_id,destination_id) WHERE outbox_message_id IS NOT NULL DO NOTHING")
@@ -352,7 +360,7 @@ async fn materialize_message(
     Ok(())
 }
 
-fn envelope(outbox: &OutboxRow, delivery_id: Uuid) -> WebhookEnvelope {
+fn envelope(outbox: &OutboxRow, delivery_id: Uuid, user_labels: &Value) -> WebhookEnvelope {
     let value = &outbox.payload;
     WebhookEnvelope {
         schema_version: 1,
@@ -369,6 +377,7 @@ fn envelope(outbox: &OutboxRow, delivery_id: Uuid) -> WebhookEnvelope {
             .and_then(Value::as_str)
             .map(str::to_owned),
         semantic_summary: value.get("semantic").cloned(),
+        user_labels: user_labels.as_array().cloned().unwrap_or_default(),
     }
 }
 
@@ -446,6 +455,7 @@ pub async fn test_destination(
         group_id: None,
         event_kind: None,
         semantic_summary: None,
+        user_labels: Vec::new(),
     })?;
     sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,max_attempts) VALUES ($1,$2,$3,$4,'test','test','okoscope.test',$5,'in_flight',$6,now()+make_interval(secs=>$7),1)")
         .bind(delivery_id).bind(organization_id).bind(project_id).bind(destination_id).bind(&payload).bind(lease_owner)

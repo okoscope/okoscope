@@ -26,6 +26,7 @@ pub struct WebhookEnvelope {
     pub group_id: Option<Uuid>,
     pub event_kind: Option<String>,
     pub semantic_summary: Option<Value>,
+    pub user_labels: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +241,7 @@ mod tests {
             group_id: Some(Uuid::from_u128(5)),
             event_kind: Some("process.exec".into()),
             semantic_summary: Some(serde_json::json!({"executable":"sh"})),
+            user_labels: Vec::new(),
         };
         let body = serialize_envelope(&envelope).unwrap();
         assert_eq!(body, serialize_envelope(&envelope).unwrap());

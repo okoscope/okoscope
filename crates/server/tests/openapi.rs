@@ -138,6 +138,14 @@ const LIVE_OPERATIONS: &[(&str, &str)] = &[
         "get",
     ),
     (
+        "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/{item_id}/user-label",
+        "put",
+    ),
+    (
+        "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/{item_id}/user-label",
+        "delete",
+    ),
+    (
         "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/{item_id}/releases",
         "get",
     ),

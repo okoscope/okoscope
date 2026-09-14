@@ -31,6 +31,13 @@ Release comparisons use snapshot-backed positive evidence. Where history require
 
 After the final evidence expires, a group or inventory identity referenced by a runtime policy can remain as a minimal configuration reference with no retained historical counts. Retention does not delete the referencing policy or active notification work. Notification delivery history remains governed by its independent retention settings.
 
+User-assigned runtime behavior labels are configuration rather than observed
+evidence. Raw-event cleanup and disposable inventory-row reconstruction do not
+delete them. A reconstructed identity receives its prior label only when its
+Application, inventory kind, identity version, and digest are all identical.
+Existing notification deliveries retain the label snapshot stored at
+materialization time.
+
 ## Database dependencies
 
 | Data | Retention behavior |

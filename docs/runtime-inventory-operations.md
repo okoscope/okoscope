@@ -2,6 +2,21 @@
 
 Application runtime inventory is an additive projection of accepted runtime events. Raw events, runtime groups, release summaries, and notifications remain the source evidence and continue working when inventory reads are disabled.
 
+Authorized Project users can assign one user label to any stable Application
+inventory identity, including processes, lifecycle events, inbound and outbound
+network activity, DNS queries, syscalls, and file activity. Labels are trimmed,
+limited to 120 Unicode characters, and kept separate from the canonical
+technical `semantic_summary`; they never change grouping, counts, policy
+evaluation, or collected evidence. Duplicate label text is allowed.
+
+The item-scoped `PUT .../runtime-inventory/{item_id}/user-label` and `DELETE`
+operations resolve the stable kind, identity version, and digest on the server.
+Clients cannot supply identity material. The optional `expected_updated_at`
+precondition detects concurrent edits. Inventory and linked runtime-group and
+attention reads expose current labels, while a notification snapshots at most
+20 deterministic labels when its delivery is materialized so retries remain
+unchanged after later edits.
+
 ## Staged rollout
 
 1. Apply database migration 8 and confirm `/ready` reports the required schema.
@@ -68,3 +83,11 @@ To rebuild one controlled tenant scope:
 5. Resume ingestion and inventory reads after reconciliation succeeds.
 
 Never delete `runtime_events`, `runtime_event_groups`, their memberships, or release summaries as part of an inventory rebuild.
+
+User labels are durable configuration stored independently from disposable
+inventory projection rows and raw evidence. A rebuild therefore preserves a
+label and exposes it again when the same Application-scoped kind, identity
+version, and digest is reconstructed. Labels never transfer to another
+Application or identity version, and deleting the owning Application removes
+them by cascade. Label text must not be copied into metric dimensions or
+routine structured logs.

@@ -76,6 +76,21 @@ fn request(uri: &str, credential: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn json_request(
+    uri: &str,
+    method: &str,
+    credential: &str,
+    value: &serde_json::Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(COOKIE, format!("{SESSION_COOKIE}={credential}"))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(value).unwrap()))
+        .unwrap()
+}
+
 async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
@@ -965,4 +980,85 @@ async fn inventory_facets_enforce_bounds_search_cursors_and_tenant_scope(pool: s
         .await
         .unwrap();
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn runtime_behavior_labels_mutate_search_and_preserve_evidence(pool: sqlx::PgPool) {
+    let ids = bootstrap(&pool, &config("inventory-labels")).await.unwrap();
+    let token = owner_session(&pool, &ids).await;
+    let item_id = inventory_item(&pool, &ids, 91).await;
+    let app = inventory_api::router(pool.clone());
+    let base = format!(
+        "/api/v1/projects/{}/applications/{}/runtime-inventory",
+        ids.project_id, ids.application_id
+    );
+    let label_uri = format!("{base}/{item_id}/user-label");
+
+    let created = app
+        .clone()
+        .oneshot(json_request(
+            &label_uri,
+            "PUT",
+            &token,
+            &serde_json::json!({"display_name":"  Database connection  "}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = json(created).await;
+    assert_eq!(created["display_name"], "Database connection");
+    let updated_at = created["updated_at"].clone();
+
+    let detail = json(
+        app.clone()
+            .oneshot(request(&format!("{base}/{item_id}"), &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["user_label"]["display_name"], "Database connection");
+    assert_eq!(detail["semantic_summary"]["executable"], "/app/process-91");
+    let searched = json(
+        app.clone()
+            .oneshot(request(&format!("{base}?search=database"), &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(searched["items"].as_array().unwrap().len(), 1);
+
+    let stale = app.clone().oneshot(json_request(&label_uri, "PUT", &token, &serde_json::json!({"display_name":"NATS connection","expected_updated_at":"2000-01-01T00:00:00Z"}))).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let retry = app.clone().oneshot(json_request(&label_uri, "PUT", &token, &serde_json::json!({"display_name":"Database connection","expected_updated_at":updated_at}))).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let invalid = app
+        .clone()
+        .oneshot(json_request(
+            &label_uri,
+            "PUT",
+            &token,
+            &serde_json::json!({"display_name":"bad\nname"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let deleted = app
+        .clone()
+        .oneshot(json_request(
+            &label_uri,
+            "DELETE",
+            &token,
+            &serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let unnamed = json(
+        app.oneshot(request(&format!("{base}/{item_id}"), &token))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(unnamed["user_label"].is_null());
 }
