@@ -247,6 +247,7 @@ enum ResourceRef {
         runtime_group_id: Uuid,
         event_kind: String,
         semantic_summary: Value,
+        user_labels: Value,
         namespace: String,
         workload_kind: String,
         workload_name: String,
@@ -299,6 +300,7 @@ struct DiscoveryRow {
     occurrence_count: i64,
     event_kind: String,
     semantic_summary: Value,
+    user_labels: Value,
     namespace: String,
     workload_kind: String,
     workload_name: String,
@@ -746,7 +748,7 @@ async fn load_discoveries(
     to: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<DiscoveryRow>, sqlx::Error> {
-    sqlx::query_as("SELECT g.id group_id,g.project_id,p.name project_name,p.slug project_slug,g.application_id,a.name application_name,a.slug application_slug,g.first_seen_at,g.last_seen_at,g.occurrence_count,g.event_kind,g.semantic_summary,g.namespace,g.workload_kind,g.workload_name,(g.first_seen_at BETWEEN $4 AND $5) is_new,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN NULL ELSE e.verdict END policy_verdict,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN 'evaluation_pending' ELSE 'current' END policy_evaluation_state FROM runtime_event_groups g JOIN projects p ON p.organization_id=g.organization_id AND p.id=g.project_id JOIN applications a ON a.organization_id=g.organization_id AND a.project_id=g.project_id AND a.id=g.application_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2) AND ($3::uuid IS NULL OR g.application_id=$3) AND g.status='open' AND (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 OR e.verdict<>'expected') AND NOT EXISTS(SELECT 1 FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions s ON s.organization_id=i.organization_id AND s.project_id=i.project_id AND s.application_id=i.application_id AND s.identity_version=i.identity_version AND s.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND s.cancelled_at IS NULL AND s.expires_at>$5 AND (cardinality(s.cluster_ids)=0 OR g.cluster_id=ANY(s.cluster_ids)) AND (cardinality(s.namespaces)=0 OR g.namespace=ANY(s.namespaces)) AND (cardinality(s.workload_kinds)=0 OR g.workload_kind=ANY(s.workload_kinds)) AND (cardinality(s.workload_names)=0 OR g.workload_name=ANY(s.workload_names))) ORDER BY CASE WHEN e.verdict='policy_conflict' THEN 0 WHEN g.event_kind='container.restart_loop' THEN 1 WHEN g.first_seen_at BETWEEN $4 AND $5 THEN 2 ELSE 3 END,g.occurrence_count DESC,CASE WHEN g.first_seen_at BETWEEN $4 AND $5 THEN g.first_seen_at ELSE g.last_seen_at END DESC,g.id LIMIT $6")
+    sqlx::query_as("SELECT g.id group_id,g.project_id,p.name project_name,p.slug project_slug,g.application_id,a.name application_name,a.slug application_slug,g.first_seen_at,g.last_seen_at,g.occurrence_count,g.event_kind,g.semantic_summary,COALESCE((SELECT jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at') FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.group_id=g.id ORDER BY l.display_name,l.id LIMIT 20) labels),'[]'::jsonb) user_labels,g.namespace,g.workload_kind,g.workload_name,(g.first_seen_at BETWEEN $4 AND $5) is_new,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN NULL ELSE e.verdict END policy_verdict,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN 'evaluation_pending' ELSE 'current' END policy_evaluation_state FROM runtime_event_groups g JOIN projects p ON p.organization_id=g.organization_id AND p.id=g.project_id JOIN applications a ON a.organization_id=g.organization_id AND a.project_id=g.project_id AND a.id=g.application_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2) AND ($3::uuid IS NULL OR g.application_id=$3) AND g.status='open' AND (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 OR e.verdict<>'expected') AND NOT EXISTS(SELECT 1 FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions s ON s.organization_id=i.organization_id AND s.project_id=i.project_id AND s.application_id=i.application_id AND s.identity_version=i.identity_version AND s.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND s.cancelled_at IS NULL AND s.expires_at>$5 AND (cardinality(s.cluster_ids)=0 OR g.cluster_id=ANY(s.cluster_ids)) AND (cardinality(s.namespaces)=0 OR g.namespace=ANY(s.namespaces)) AND (cardinality(s.workload_kinds)=0 OR g.workload_kind=ANY(s.workload_kinds)) AND (cardinality(s.workload_names)=0 OR g.workload_name=ANY(s.workload_names))) ORDER BY CASE WHEN e.verdict='policy_conflict' THEN 0 WHEN g.event_kind='container.restart_loop' THEN 1 WHEN g.first_seen_at BETWEEN $4 AND $5 THEN 2 ELSE 3 END,g.occurrence_count DESC,CASE WHEN g.first_seen_at BETWEEN $4 AND $5 THEN g.first_seen_at ELSE g.last_seen_at END DESC,g.id LIMIT $6")
         .bind(organization_id).bind(project_ids).bind(application_id).bind(from).bind(to).bind(limit)
         .bind(crate::policy::POLICY_EVALUATOR_VERSION).fetch_all(&mut **tx).await
 }
@@ -1091,6 +1093,7 @@ fn discovery_item(r: DiscoveryRow) -> PriorityItem {
             runtime_group_id: r.group_id,
             event_kind: r.event_kind,
             semantic_summary: r.semantic_summary,
+            user_labels: r.user_labels,
             namespace: r.namespace,
             workload_kind: r.workload_kind,
             workload_name: r.workload_name,
@@ -1605,6 +1608,7 @@ mod tests {
                 runtime_group_id: id,
                 event_kind: "process.exec".into(),
                 semantic_summary: serde_json::json!({"executable": "/app/worker"}),
+                user_labels: serde_json::json!([]),
                 namespace: "production".into(),
                 workload_kind: "Deployment".into(),
                 workload_name: "worker".into(),
@@ -1658,6 +1662,7 @@ mod tests {
                 "window_ended_at": now,
                 "container_name": "worker"
             }),
+            user_labels: serde_json::json!([]),
             namespace: "production".into(),
             workload_kind: "Deployment".into(),
             workload_name: "worker".into(),

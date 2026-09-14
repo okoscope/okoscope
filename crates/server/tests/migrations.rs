@@ -43,6 +43,38 @@ async fn migration_only_is_idempotent_when_current(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrator = "MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn runtime_behavior_user_labels_have_durable_scoped_schema(pool: sqlx::PgPool) {
+    let columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='runtime_behavior_user_labels'")
+        .fetch_all(&pool).await.unwrap();
+    for column in [
+        "inventory_kind",
+        "identity_version",
+        "identity_digest",
+        "display_name",
+        "created_by_user_id",
+        "updated_by_user_id",
+    ] {
+        assert!(
+            columns.iter().any(|value| value == column),
+            "missing {column}"
+        );
+    }
+    let indexes: Vec<String> = sqlx::query_scalar("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='runtime_behavior_user_labels'")
+        .fetch_all(&pool).await.unwrap();
+    assert!(
+        indexes
+            .iter()
+            .any(|value| value == "runtime_behavior_user_labels_identity_cover_idx")
+    );
+    assert!(
+        indexes
+            .iter()
+            .any(|value| value == "runtime_behavior_user_labels_search_idx")
+    );
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn transactional_mail_schema_has_verified_backfill_defaults_and_secret_columns(
     pool: sqlx::PgPool,
 ) {

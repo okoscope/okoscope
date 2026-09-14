@@ -8,6 +8,22 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
+### Added
+
+- Application-scoped user labels can name stable runtime behaviors across all
+  supported agent event kinds. The item-scoped API supports validation and
+  optimistic concurrency; inventory, group, attention, search, and newly
+  materialized notification views expose bounded labels without changing
+  technical evidence, identity, policy evaluation, or occurrence accounting.
+
+### Upgrade notes
+
+- Database migration 30 is required. It adds durable, audited runtime behavior
+  labels that survive raw-event and inventory projection cleanup and cascade
+  only with their owning Application.
+
 ## [0.2.2] - 2026-09-14
 
 ### Changed
@@ -108,7 +124,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - CI validation for Rust formatting, strict Clippy, userspace tests, PostgreSQL
   migrations, Helm contracts, and Kubernetes manifests.
 
-[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/okoscope/okoscope/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/okoscope/okoscope/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/okoscope/okoscope/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/okoscope/okoscope/compare/v0.1.0...v0.2.0

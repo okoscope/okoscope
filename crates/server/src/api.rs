@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
@@ -140,6 +141,8 @@ struct GroupSummary {
     fingerprint_version: i16,
     event_kind: String,
     semantic_summary: Value,
+    #[sqlx(skip)]
+    user_labels: Vec<Value>,
     status: String,
     first_seen_at: DateTime<Utc>,
     first_seen_event_id: Option<Uuid>,
@@ -156,6 +159,35 @@ struct GroupSummary {
     actionable: bool,
     #[sqlx(skip)]
     coverage: crate::runtime_retention::history::Coverage,
+}
+
+#[derive(FromRow)]
+struct GroupUserLabels {
+    group_id: Uuid,
+    user_labels: Value,
+}
+
+async fn attach_group_user_labels(
+    pool: &PgPool,
+    organization_id: Uuid,
+    groups: &mut [GroupSummary],
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<_> = groups.iter().map(|group| group.id).collect();
+    let rows: Vec<GroupUserLabels> = sqlx::query_as("SELECT gl.group_id,jsonb_agg(jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) ORDER BY l.display_name,l.id) user_labels FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=ANY($2) GROUP BY gl.group_id")
+        .bind(organization_id).bind(ids).fetch_all(pool).await?;
+    let labels: HashMap<_, _> = rows
+        .into_iter()
+        .map(|row| (row.group_id, row.user_labels))
+        .collect();
+    for group in groups {
+        group.user_labels = labels
+            .get(&group.id)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        group.user_labels.truncate(20);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -374,6 +406,7 @@ async fn list_groups(
     .bind(query.release_id).bind(cursor_time).bind(cursor_id).bind(limit + 1)
     .fetch_all(&state.pool).await?;
     attach_group_policy(&state.pool, organization_id, &mut items).await?;
+    attach_group_user_labels(&state.pool, organization_id, &mut items).await?;
     items.retain(|group| {
         query.verdict.as_ref().is_none_or(|verdict| {
             group.policy_evaluation["verdict"].as_str() == Some(verdict.as_str())
@@ -412,6 +445,12 @@ async fn get_group(
     )
     .bind(organization_id).bind(group_id).fetch_optional(&state.pool).await?.ok_or(ApiError::NotFound)?;
     attach_group_policy(
+        &state.pool,
+        organization_id,
+        std::slice::from_mut(&mut group),
+    )
+    .await?;
+    attach_group_user_labels(
         &state.pool,
         organization_id,
         std::slice::from_mut(&mut group),
@@ -565,6 +604,12 @@ async fn transition_group(
     .await?;
     if let Some(mut group) = group {
         attach_group_policy(
+            &state.pool,
+            organization_id,
+            std::slice::from_mut(&mut group),
+        )
+        .await?;
+        attach_group_user_labels(
             &state.pool,
             organization_id,
             std::slice::from_mut(&mut group),

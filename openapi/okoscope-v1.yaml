@@ -810,7 +810,7 @@ paths:
             name: search,
             in: query,
             schema: { type: string, minLength: 1, maxLength: 200 },
-            description: Case-insensitive search over allowlisted safe semantic identity fields only.,
+            description: Case-insensitive search over the current user label and allowlisted safe semantic identity fields only.,
           }
         - {
             name: identity_token,
@@ -968,6 +968,46 @@ paths:
           '401': { $ref: '#/components/responses/Error' },
           '404': { $ref: '#/components/responses/Error' },
         }
+  /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/{item_id}/user-label:
+    parameters:
+      [
+        { $ref: '#/components/parameters/ProjectId' },
+        { $ref: '#/components/parameters/ApplicationId' },
+        { $ref: '#/components/parameters/InventoryItemId' },
+      ]
+    put:
+      operationId: putApplicationRuntimeInventoryUserLabel
+      description: Assigns a user-provided name to the stable identity resolved from the owned inventory item. The observed semantic summary and identity are not changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PutRuntimeBehaviorUserLabel' }
+      responses:
+        '200':
+          description: Current user label
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: deleteApplicationRuntimeInventoryUserLabel
+      description: Removes the label resolved from the owned inventory item. Deleting an already absent label is successful.
+      parameters:
+        - name: expected_updated_at
+          in: query
+          description: Optional optimistic-concurrency precondition.
+          schema: { type: string, format: date-time }
+      responses:
+        '204': { description: Label absent }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/{item_id}/releases:
     parameters:
       [
@@ -3629,6 +3669,7 @@ components:
           runtime_group_id,
           event_kind,
           semantic_summary,
+          user_labels,
           namespace,
           workload_kind,
           workload_name,
@@ -3640,6 +3681,10 @@ components:
         runtime_group_id: { $ref: '#/components/schemas/Uuid' }
         event_kind: { $ref: '#/components/schemas/RuntimeEventKind' }
         semantic_summary: { $ref: '#/components/schemas/RuntimeEventSemanticSummary' }
+        user_labels:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }
         namespace: { type: string, minLength: 1, maxLength: 253 }
         workload_kind: { type: string, minLength: 1, maxLength: 253 }
         workload_name: { type: string, minLength: 1, maxLength: 253 }
@@ -4015,7 +4060,7 @@ components:
         service_version: { type: string, example: 0.1.0 }
         git_commit: { type: string, example: ac23c0b4d042e8d430ea6880f6b66ed1a9d4580a }
         api_version: { type: string, const: v1 }
-        required_database_migration: { type: integer, format: int64, example: 29 }
+        required_database_migration: { type: integer, format: int64, example: 30 }
     Organization:
       type: object
       additionalProperties: false
@@ -4306,6 +4351,7 @@ components:
           fingerprint_version,
           event_kind,
           semantic_summary,
+          user_labels,
           status,
           first_seen_at,
           first_seen_event_id,
@@ -4330,6 +4376,10 @@ components:
         fingerprint_version: { type: integer }
         event_kind: { type: string }
         semantic_summary: { $ref: '#/components/schemas/RuntimeEventSemanticSummary' }
+        user_labels:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }
         status: { type: string, enum: [open, acknowledged, resolved] }
         first_seen_at: { $ref: '#/components/schemas/Timestamp' }
         first_seen_event_id: { $ref: '#/components/schemas/NullableUuid' }
@@ -5346,11 +5396,15 @@ components:
     DeliverySemanticMetadata:
       type: object
       additionalProperties: false
-      required: [application_id, group_id, event_kind]
+      required: [application_id, group_id, event_kind, user_labels]
       properties:
         application_id: { $ref: '#/components/schemas/NullableUuid' }
         group_id: { $ref: '#/components/schemas/NullableUuid' }
         event_kind: { type: [string, 'null'], maxLength: 100 }
+        user_labels:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }
     NullableDeliverySemanticMetadata:
       oneOf:
         - { $ref: '#/components/schemas/DeliverySemanticMetadata' }
@@ -5651,6 +5705,7 @@ components:
           inventory_kind,
           identity_version,
           semantic_summary,
+          user_label,
           first_seen_at,
           last_seen_at,
           occurrence_count,
@@ -5669,6 +5724,8 @@ components:
         inventory_kind: { $ref: '#/components/schemas/InventoryKind' }
         identity_version: { type: integer, format: int32, minimum: 0, example: 1 }
         semantic_summary: { $ref: '#/components/schemas/InventorySemanticSummary' }
+        user_label:
+          anyOf: [{ $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }, { type: 'null' }]
         first_seen_at: { $ref: '#/components/schemas/Timestamp' }
         last_seen_at: { $ref: '#/components/schemas/Timestamp' }
         occurrence_count: { type: integer, format: int64, minimum: 0 }
@@ -5729,12 +5786,37 @@ components:
     InventoryDistributionEntry:
       type: object
       additionalProperties: false
-      required: [identity_token, semantic_summary, item_count, occurrence_count]
+      required: [identity_token, semantic_summary, user_label, item_count, occurrence_count]
       properties:
         identity_token: { type: string, minLength: 1, maxLength: 1000 }
         semantic_summary: { $ref: '#/components/schemas/InventorySemanticSummary' }
+        user_label:
+          anyOf: [{ $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }, { type: 'null' }]
         item_count: { type: integer, format: int64, minimum: 1 }
         occurrence_count: { type: integer, format: int64, minimum: 1 }
+    RuntimeBehaviorUserLabel:
+      type: object
+      additionalProperties: false
+      required:
+        [display_name, created_by_user_id, updated_by_user_id, created_at, updated_at]
+      properties:
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        created_by_user_id: { $ref: '#/components/schemas/Uuid' }
+        updated_by_user_id: { $ref: '#/components/schemas/Uuid' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    PutRuntimeBehaviorUserLabel:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Unicode display text. The server trims edge whitespace and rejects control characters.
+        expected_updated_at:
+          anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
     InventoryDistributionOther:
       type: object
       additionalProperties: false
@@ -5955,6 +6037,7 @@ components:
           workload_kind,
           workload_name,
           event_kind,
+          user_labels,
           status,
           first_seen_at,
           last_seen_at,
@@ -5967,6 +6050,10 @@ components:
         workload_kind: { type: string }
         workload_name: { type: string }
         event_kind: { type: string }
+        user_labels:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/RuntimeBehaviorUserLabel' }
         status: { type: string, enum: [open, acknowledged, resolved] }
         first_seen_at: { $ref: '#/components/schemas/Timestamp' }
         last_seen_at: { $ref: '#/components/schemas/Timestamp' }

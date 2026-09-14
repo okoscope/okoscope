@@ -27,6 +27,9 @@ projections in PostgreSQL and exposes them through a versioned HTTP API.
 Okoscope also provides runtime grouping, first-seen and release comparisons,
 configurable retention, notification delivery and recovery, Application agent
 health, and role-based access across the platform, Organizations, and Projects.
+Operators can assign human-readable names to stable runtime behaviors of every
+supported event kind while Okoscope keeps the collected technical identity and
+semantic evidence visible and unchanged.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for
