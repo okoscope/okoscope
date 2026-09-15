@@ -293,7 +293,7 @@ async fn inventory_detail_is_raw_only_after_compaction(pool: sqlx::PgPool) {
         f.ids.organization_id,
         f.ids.project_id,
         f.ids.application_id,
-        1,
+        2,
     )
     .await
     .unwrap();
@@ -545,7 +545,7 @@ async fn measured_single_group_retention_workload(pool: sqlx::PgPool) {
         .bind(source.0).bind(copies).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO runtime_event_group_memberships(organization_id,project_id,application_id,event_id,group_id,fingerprint_version,release_id) SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,1,e.release_id FROM runtime_events e WHERE e.project_id=$1 AND NOT EXISTS(SELECT 1 FROM runtime_event_group_memberships m WHERE m.event_id=e.id)")
         .bind(f.ids.project_id).bind(source.1).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,1 FROM runtime_events e WHERE e.project_id=$1 AND NOT EXISTS(SELECT 1 FROM runtime_inventory_event_memberships m WHERE m.event_id=e.id)")
+    sqlx::query("INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,2 FROM runtime_events e WHERE e.project_id=$1 AND NOT EXISTS(SELECT 1 FROM runtime_inventory_event_memberships m WHERE m.event_id=e.id)")
         .bind(f.ids.project_id).bind(source.2).execute(&pool).await.unwrap();
     sqlx::query("ANALYZE runtime_events")
         .execute(&pool)

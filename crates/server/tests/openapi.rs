@@ -1044,6 +1044,7 @@ fn assert_inventory_contract(document: &serde_json::Value) {
         "InventoryDestinationIdentity",
         "InventoryDomainIdentity",
         "InventorySyscallIdentity",
+        "InventoryFileActivityIdentity",
         "InventoryInboundEndpointIdentity",
         "FileActivitySemanticSummary",
         "InventoryItem",

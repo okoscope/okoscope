@@ -2687,11 +2687,10 @@ components:
       {
         type: object,
         additionalProperties: false,
-        required: [kind, process_command, address_family, destination_address, destination_port],
+        required: [kind, address_family, destination_address, destination_port],
         properties:
           {
             kind: { const: destination },
-            process_command: { type: string },
             address_family: { type: string, enum: [ipv4, ipv6] },
             destination_address: { type: string },
             destination_port: { type: integer, minimum: 0, maximum: 65535 },
@@ -2701,11 +2700,10 @@ components:
       {
         type: object,
         additionalProperties: false,
-        required: [kind, process_command, name, query_type],
+        required: [kind, name, query_type],
         properties:
           {
             kind: { const: domain },
-            process_command: { type: string },
             name: { type: string },
             query_type: { type: string },
           },
@@ -2714,11 +2712,10 @@ components:
       {
         type: object,
         additionalProperties: false,
-        required: [kind, process_command, syscall],
+        required: [kind, syscall],
         properties:
           {
             kind: { const: syscall },
-            process_command: { type: string },
             syscall: { type: string },
           },
       }
@@ -2739,11 +2736,10 @@ components:
       {
         type: object,
         additionalProperties: false,
-        required: [kind, process_command, operation, path],
+        required: [kind, operation, path],
         properties:
           {
             kind: { const: file_activity },
-            process_command: { type: string },
             operation: { type: string },
             path: { type: string },
             new_path: { type: string },
@@ -5632,7 +5628,7 @@ components:
         - { $ref: '#/components/schemas/InventoryDomainIdentity' }
         - { $ref: '#/components/schemas/InventorySyscallIdentity' }
         - { $ref: '#/components/schemas/InventoryInboundEndpointIdentity' }
-        - { $ref: '#/components/schemas/FileActivitySemanticSummary' }
+        - { $ref: '#/components/schemas/InventoryFileActivityIdentity' }
         - { $ref: '#/components/schemas/InventoryLifecycleSemanticSummary' }
     InventoryLifecycleSemanticSummary:
       description: User-visible lifecycle identity and termination context; identity_token remains an opaque filtering mechanism.
@@ -5661,27 +5657,42 @@ components:
     InventoryDestinationIdentity:
       type: object
       additionalProperties: false
-      required: [process_command, address_family, destination_address, destination_port]
+      required: [address_family, destination_address, destination_port]
       properties:
-        process_command: { type: string, minLength: 1, example: payments }
         address_family: { type: string, enum: [ipv4, ipv6] }
         destination_address: { type: string, format: ip, example: 203.0.113.7 }
         destination_port: { type: integer, minimum: 1, maximum: 65535, example: 443 }
     InventoryDomainIdentity:
       type: object
       additionalProperties: false
-      required: [process_command, name, query_type]
+      required: [name, query_type]
       properties:
-        process_command: { type: string, minLength: 1, example: payments }
         name: { type: string, minLength: 1, maxLength: 253, example: api.example.com }
         query_type: { type: string, enum: [A, AAAA] }
     InventorySyscallIdentity:
       type: object
       additionalProperties: false
-      required: [process_command, syscall]
+      required: [syscall]
       properties:
-        process_command: { type: string, minLength: 1, example: payments }
         syscall: { type: string, minLength: 1, example: epoll_wait }
+    InventoryFileActivityIdentity:
+      type: object
+      additionalProperties: false
+      required: [operation, path]
+      properties:
+        operation: { $ref: '#/components/schemas/FileActivityOperation' }
+        path: { type: string, minLength: 1, description: Path reported by the process syscall. }
+        new_path:
+          {
+            type: string,
+            minLength: 1,
+            description: Rename destination path reported by the process syscall.,
+          }
+        replaced:
+          {
+            type: [boolean, 'null'],
+            description: Whether rename replaced an existing destination; null means unknown.,
+          }
     InventoryInboundEndpointIdentity:
       type: object
       additionalProperties: false

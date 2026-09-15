@@ -14,18 +14,15 @@ pub enum BehaviorMatcher {
         executable: String,
     },
     Destination {
-        process_command: String,
         address_family: AddressFamily,
         destination_address: IpAddr,
         destination_port: u16,
     },
     Domain {
-        process_command: String,
         name: String,
         query_type: String,
     },
     Syscall {
-        process_command: String,
         syscall: String,
     },
     InboundEndpoint {
@@ -35,7 +32,6 @@ pub enum BehaviorMatcher {
         local_port: u16,
     },
     FileActivity {
-        process_command: String,
         operation: String,
         path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,18 +282,15 @@ fn matcher_from_summary(
             executable: string(summary, "executable")?,
         }),
         "destination" => Ok(BehaviorMatcher::Destination {
-            process_command: string(summary, "process_command")?,
             address_family: address_family(summary)?,
             destination_address: ip(summary, "destination_address")?,
             destination_port: number(summary, "destination_port")?,
         }),
         "domain" => Ok(BehaviorMatcher::Domain {
-            process_command: string(summary, "process_command")?,
             name: string(summary, "name")?,
             query_type: string(summary, "query_type")?,
         }),
         "syscall" => Ok(BehaviorMatcher::Syscall {
-            process_command: string(summary, "process_command")?,
             syscall: string(summary, "syscall")?,
         }),
         "inbound_endpoint" => Ok(BehaviorMatcher::InboundEndpoint {
@@ -307,7 +300,6 @@ fn matcher_from_summary(
             local_port: number(summary, "local_port")?,
         }),
         "file_activity" => Ok(BehaviorMatcher::FileActivity {
-            process_command: string(summary, "process_command")?,
             operation: string(summary, "operation")?,
             path: string(summary, "path")?,
             new_path: summary
@@ -628,7 +620,7 @@ mod tests {
     fn inventory_seed_keeps_only_identity_fields() {
         let seed = BehaviorIdentity::from_inventory(
             "inbound_endpoint",
-            1,
+            crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION.get(),
             &[7; 32],
             &serde_json::json!({
                 "transport": "tcp",
@@ -654,7 +646,7 @@ mod tests {
         assert_eq!(
             BehaviorIdentity::from_inventory(
                 "process",
-                2,
+                1,
                 &[0; 32],
                 &serde_json::json!({"executable":"/app"})
             ),
@@ -663,7 +655,7 @@ mod tests {
         assert_eq!(
             BehaviorIdentity::from_inventory(
                 "process",
-                1,
+                crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION.get(),
                 &[0; 3],
                 &serde_json::json!({"executable":"/app"})
             ),
@@ -678,7 +670,7 @@ mod tests {
         let item_id = Uuid::new_v4();
         let behavior = BehaviorIdentity::from_inventory(
             "process",
-            1,
+            crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION.get(),
             &[1; 32],
             &serde_json::json!({"executable":"/app"}),
         )
@@ -689,6 +681,47 @@ mod tests {
         assert!(seed.placement.namespaces.contains("production"));
         assert_eq!(seed.inside_effect, PolicyEffect::Expected);
         assert_eq!(seed.outside_effect, None);
+    }
+
+    #[test]
+    fn affected_inventory_seeds_ignore_legacy_process_command() {
+        let version = crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION.get();
+        let cases = [
+            (
+                "destination",
+                serde_json::json!({"process_command":"worker","address_family":"ipv4","destination_address":"203.0.113.7","destination_port":443}),
+            ),
+            (
+                "domain",
+                serde_json::json!({"process_command":"worker","name":"api.example.com","query_type":"A"}),
+            ),
+            (
+                "syscall",
+                serde_json::json!({"process_command":"worker","syscall":"epoll_wait"}),
+            ),
+            (
+                "file_activity",
+                serde_json::json!({"process_command":"worker","operation":"modify","path":"/app/data"}),
+            ),
+        ];
+        for (kind, summary) in cases {
+            let behavior =
+                BehaviorIdentity::from_inventory(kind, version, &[9; 32], &summary).unwrap();
+            let serialized = serde_json::to_value(behavior.matcher).unwrap();
+            assert!(serialized.get("process_command").is_none());
+        }
+    }
+
+    #[test]
+    fn affected_matchers_reject_legacy_process_command() {
+        for value in [
+            serde_json::json!({"kind":"destination","process_command":"worker","address_family":"ipv4","destination_address":"203.0.113.7","destination_port":443}),
+            serde_json::json!({"kind":"domain","process_command":"worker","name":"api.example.com","query_type":"A"}),
+            serde_json::json!({"kind":"syscall","process_command":"worker","syscall":"epoll_wait"}),
+            serde_json::json!({"kind":"file_activity","process_command":"worker","operation":"modify","path":"/app/data"}),
+        ] {
+            assert!(serde_json::from_value::<BehaviorMatcher>(value).is_err());
+        }
     }
 
     #[test]

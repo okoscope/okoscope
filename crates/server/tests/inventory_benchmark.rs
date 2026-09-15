@@ -126,7 +126,7 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
 
     let list_started = Instant::now();
     let listed: Vec<(Uuid, i64, i64)> = sqlx::query_as(
-        "SELECT i.id,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) sighting_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=1 ORDER BY i.last_seen_at DESC,i.id DESC LIMIT 200",
+        "SELECT i.id,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) sighting_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 ORDER BY i.last_seen_at DESC,i.id DESC LIMIT 200",
     )
     .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
     .fetch_all(&pool).await.unwrap();
@@ -251,7 +251,7 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
     diff_samples.sort_unstable();
     let mut plans = Vec::new();
     for kind in ["process", "destination", "domain", "syscall"] {
-        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN SELECT identity_digest,occurrence_count FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=1 AND inventory_kind=$4 ORDER BY occurrence_count DESC,identity_digest ASC LIMIT 10")
+        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN SELECT identity_digest,occurrence_count FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=2 AND inventory_kind=$4 ORDER BY occurrence_count DESC,identity_digest ASC LIMIT 10")
             .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(kind).fetch_all(&pool).await.unwrap();
         plans.push((kind, plan));
     }
@@ -283,7 +283,7 @@ async fn hardening_plans(
     ids: &server::bootstrap::BootstrapIds,
     release_id: Uuid,
 ) -> Vec<(String, Vec<String>)> {
-    let summary: Vec<String> = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS) SELECT i.inventory_kind,count(*) FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=1 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) AND EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace='production') GROUP BY i.inventory_kind")
+    let summary: Vec<String> = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS) SELECT i.inventory_kind,count(*) FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) AND EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace='production') GROUP BY i.inventory_kind")
         .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(release_id)
         .fetch_all(pool).await.unwrap();
     let mut plans = vec![("summary".to_owned(), summary)];
@@ -295,7 +295,7 @@ async fn hardening_plans(
         ("container_name", "s.container_name"),
     ] {
         let sql = format!(
-            "EXPLAIN (ANALYZE, BUFFERS) SELECT {expression},count(DISTINCT i.id),sum(s.occurrence_count) FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=1 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) GROUP BY {expression} ORDER BY count(DISTINCT i.id) DESC,{expression} ASC LIMIT 201"
+            "EXPLAIN (ANALYZE, BUFFERS) SELECT {expression},count(DISTINCT i.id),sum(s.occurrence_count) FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) GROUP BY {expression} ORDER BY count(DISTINCT i.id) DESC,{expression} ASC LIMIT 201"
         );
         let plan = sqlx::query_scalar(&sql)
             .bind(ids.organization_id)

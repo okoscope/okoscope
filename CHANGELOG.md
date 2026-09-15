@@ -8,6 +8,22 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-15
+
+### Changed
+
+- Application runtime inventory identity version 2 groups outbound destinations,
+  DNS behavior, syscalls, and file activity across Linux thread commands. Raw
+  occurrences and Runtime Groups retain the originating command, while managed
+  policies for these behaviors apply to every thread in the Application.
+
+### Upgrade notes
+
+- Version 1 runtime evidence and user-authored runtime state are not migrated.
+  Pause one selected Application, back up the database, perform the documented
+  Application-scoped destructive reset, deploy compatible server and Web
+  releases, and resume ingestion with a fresh version-2 inventory.
+
 ## [0.3.0] - 2026-09-14
 
 ### Added
@@ -124,7 +140,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - CI validation for Rust formatting, strict Clippy, userspace tests, PostgreSQL
   migrations, Helm contracts, and Kubernetes manifests.
 
-[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/okoscope/okoscope/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/okoscope/okoscope/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/okoscope/okoscope/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/okoscope/okoscope/compare/v0.2.0...v0.2.1
