@@ -9,10 +9,18 @@ use event_model::{
     FileActivityPath, FileModify, KubernetesAttribution, NetworkAddressFamily, NetworkConnect,
     NetworkConnectOutcome, NetworkDnsQuery, ProcessIdentity, RuntimeEvent, SyscallEvent,
 };
-use server::{auth::SessionScope, ingestion::{IngestionContext, persist_batch}};
+use server::{
+    auth::SessionScope,
+    ingestion::{IngestionContext, persist_batch},
+};
 use uuid::Uuid;
 
-fn event(project_id: Uuid, application_id: Uuid, command: &str, payload: EventPayload) -> RuntimeEvent {
+fn event(
+    project_id: Uuid,
+    application_id: Uuid,
+    command: &str,
+    payload: EventPayload,
+) -> RuntimeEvent {
     RuntimeEvent {
         id: Uuid::new_v4(),
         observed_at: Utc::now() - Duration::seconds(2),
@@ -32,7 +40,12 @@ fn event(project_id: Uuid, application_id: Uuid, command: &str, payload: EventPa
             release: None,
             release_identity: None,
         },
-        process: ProcessIdentity { cgroup_id: 42, pid: 100, tgid: 100, command: command.into() },
+        process: ProcessIdentity {
+            cgroup_id: 42,
+            pid: 100,
+            tgid: 100,
+            command: command.into(),
+        },
         payload,
     }
 }
@@ -50,17 +63,38 @@ async fn main() -> Result<()> {
         .bind(cluster_id).bind(organization_id).execute(&pool).await?;
     sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'e2e-node','test')")
         .bind(agent_id).bind(organization_id).bind(cluster_id).execute(&pool).await?;
-    let destination = || EventPayload::NetworkConnect(NetworkConnect::new(
-        NetworkAddressFamily::Ipv4, "192.0.2.10".parse::<IpAddr>().unwrap(), 5432,
-        NetworkConnectOutcome::Succeeded, None,
-    ).unwrap());
-    let domain = || EventPayload::NetworkDnsQuery(NetworkDnsQuery {
-        transaction_id: 7, direction: DnsDirection::Egress, transport: DnsTransport::Udp,
-        resolver_address: "192.0.2.53".parse().unwrap(),
-        name: DnsName::new("db.example.test").unwrap(), query_type: DnsQueryType::A,
-    });
-    let syscall = || EventPayload::Syscall(SyscallEvent { name: "openat".into() });
-    let file = || EventPayload::FileModify(FileModify { path: FileActivityPath::new("/var/lib/e2e/data.db").unwrap() });
+    let destination = || {
+        EventPayload::NetworkConnect(
+            NetworkConnect::new(
+                NetworkAddressFamily::Ipv4,
+                "192.0.2.10".parse::<IpAddr>().unwrap(),
+                5432,
+                NetworkConnectOutcome::Succeeded,
+                None,
+            )
+            .unwrap(),
+        )
+    };
+    let domain = || {
+        EventPayload::NetworkDnsQuery(NetworkDnsQuery {
+            transaction_id: 7,
+            direction: DnsDirection::Egress,
+            transport: DnsTransport::Udp,
+            resolver_address: "192.0.2.53".parse().unwrap(),
+            name: DnsName::new("db.example.test").unwrap(),
+            query_type: DnsQueryType::A,
+        })
+    };
+    let syscall = || {
+        EventPayload::Syscall(SyscallEvent {
+            name: "openat".into(),
+        })
+    };
+    let file = || {
+        EventPayload::FileModify(FileModify {
+            path: FileActivityPath::new("/var/lib/e2e/data.db").unwrap(),
+        })
+    };
     let mut events = Vec::new();
     for command in ["r-api", "actix-rt|system"] {
         events.push(event(project_id, application_id, command, destination()));
@@ -68,7 +102,13 @@ async fn main() -> Result<()> {
         events.push(event(project_id, application_id, command, syscall()));
         events.push(event(project_id, application_id, command, file()));
     }
-    let context = IngestionContext { scope: SessionScope { organization_id, cluster_id }, agent_id };
+    let context = IngestionContext {
+        scope: SessionScope {
+            organization_id,
+            cluster_id,
+        },
+        agent_id,
+    };
     persist_batch(&pool, context, &events).await?;
     println!("{organization_id} {project_id} {application_id}");
     Ok(())
