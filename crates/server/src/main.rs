@@ -283,7 +283,7 @@ enum Command {
         project_id: Uuid,
         #[arg(long)]
         application_id: Option<Uuid>,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 2)]
         identity_version: i16,
         #[arg(long, default_value_t = 500)]
         batch_size: i64,
@@ -298,7 +298,7 @@ enum Command {
         project_id: Uuid,
         #[arg(long)]
         application_id: Uuid,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 2)]
         identity_version: i16,
     },
     /// Enqueue idempotent evaluation work for existing Runtime Groups and inventory sightings.

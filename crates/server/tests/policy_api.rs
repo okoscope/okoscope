@@ -65,7 +65,7 @@ async fn session(pool: &sqlx::PgPool, ids: &BootstrapIds, role: &str) -> String 
 
 async fn item(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',1,$5,$6,now(),now(),1)").bind(id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(vec![7_u8;32]).bind(serde_json::json!({"executable":"/app"})).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',2,$5,$6,now(),now(),1)").bind(id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(vec![7_u8;32]).bind(serde_json::json!({"executable":"/app"})).execute(pool).await.unwrap();
     id
 }
 

@@ -11,7 +11,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const CURRENT_INVENTORY_IDENTITY_VERSION: InventoryIdentityVersion =
-    InventoryIdentityVersion::new_unchecked(1);
+    InventoryIdentityVersion::new_unchecked(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InventoryIdentityVersion(i16);
@@ -294,24 +294,17 @@ fn fingerprint_with_version(
             (InventoryKind::Process, json!({"executable": executable}))
         }
         EventPayload::Syscall(syscall) => {
-            let command = required("process_command", &event.process.command)?;
             let syscall = required("syscall_name", &syscall.name)?.to_ascii_lowercase();
             encoder.field(InventoryKind::Syscall.as_str().as_bytes());
-            encoder.field(command.as_bytes());
             encoder.field(syscall.as_bytes());
-            (
-                InventoryKind::Syscall,
-                json!({"process_command": command, "syscall": syscall}),
-            )
+            (InventoryKind::Syscall, json!({"syscall": syscall}))
         }
         EventPayload::NetworkConnect(connect) => {
-            let command = required("process_command", &event.process.command)?;
             let family = match connect.address_family {
                 NetworkAddressFamily::Ipv4 => "ipv4",
                 NetworkAddressFamily::Ipv6 => "ipv6",
             };
             encoder.field(InventoryKind::Destination.as_str().as_bytes());
-            encoder.field(command.as_bytes());
             encoder.field(family.as_bytes());
             match connect.destination_address {
                 std::net::IpAddr::V4(address) => encoder.field(&address.octets()),
@@ -321,7 +314,6 @@ fn fingerprint_with_version(
             (
                 InventoryKind::Destination,
                 json!({
-                    "process_command": command,
                     "address_family": family,
                     "destination_address": connect.destination_address,
                     "destination_port": connect.destination_port
@@ -343,69 +335,47 @@ fn fingerprint_with_version(
             false,
         ),
         EventPayload::NetworkDnsQuery(query) => {
-            let command = required("process_command", &event.process.command)?;
             let query_type = dns_query_type(query.query_type);
             encoder.field(InventoryKind::Domain.as_str().as_bytes());
-            encoder.field(command.as_bytes());
             encoder.field(query.name.as_str().as_bytes());
             encoder.field(query_type.as_bytes());
             (
                 InventoryKind::Domain,
                 json!({
-                    "process_command": command,
                     "name": query.name,
                     "query_type": query.query_type
                 }),
             )
         }
         EventPayload::NetworkDnsResponse(response) => {
-            let command = required("process_command", &event.process.command)?;
             let query_type = dns_query_type(response.query_type);
             encoder.field(InventoryKind::Domain.as_str().as_bytes());
-            encoder.field(command.as_bytes());
             encoder.field(response.name.as_str().as_bytes());
             encoder.field(query_type.as_bytes());
             (
                 InventoryKind::Domain,
                 json!({
-                    "process_command": command,
                     "name": response.name,
                     "query_type": response.query_type
                 }),
             )
         }
-        EventPayload::FileCreate(value) => file_activity_fingerprint(
-            &mut encoder,
-            &event.process.command,
-            "create",
-            value.path.as_str(),
-            None,
-            None,
-        )?,
-        EventPayload::FileModify(value) => file_activity_fingerprint(
-            &mut encoder,
-            &event.process.command,
-            "modify",
-            value.path.as_str(),
-            None,
-            None,
-        )?,
-        EventPayload::FileDelete(value) => file_activity_fingerprint(
-            &mut encoder,
-            &event.process.command,
-            "delete",
-            value.path.as_str(),
-            None,
-            None,
-        )?,
+        EventPayload::FileCreate(value) => {
+            file_activity_fingerprint(&mut encoder, "create", value.path.as_str(), None, None)
+        }
+        EventPayload::FileModify(value) => {
+            file_activity_fingerprint(&mut encoder, "modify", value.path.as_str(), None, None)
+        }
+        EventPayload::FileDelete(value) => {
+            file_activity_fingerprint(&mut encoder, "delete", value.path.as_str(), None, None)
+        }
         EventPayload::FileRename(value) => file_activity_fingerprint(
             &mut encoder,
-            &event.process.command,
             "rename",
             value.old_path.as_str(),
             Some(value.new_path.as_str()),
             value.replaced,
-        )?,
+        ),
         EventPayload::ProcessExit(value) => {
             let identity = match &value.correlation {
                 GenerationCorrelation::Observed { executable, .. } => {
@@ -474,15 +444,12 @@ fn fingerprint_with_version(
 
 fn file_activity_fingerprint(
     encoder: &mut CanonicalEncoder,
-    command: &str,
     operation: &str,
     path: &str,
     new_path: Option<&str>,
     replaced: Option<bool>,
-) -> Result<(InventoryKind, Value), InventoryFingerprintError> {
-    let command = required("process_command", command)?;
+) -> (InventoryKind, Value) {
     encoder.field(InventoryKind::FileActivity.as_str().as_bytes());
-    encoder.field(command.as_bytes());
     encoder.field(operation.as_bytes());
     encoder.field(path.as_bytes());
     if let Some(new_path) = new_path {
@@ -491,16 +458,15 @@ fn file_activity_fingerprint(
     if let Some(replaced) = replaced {
         encoder.field(&[u8::from(replaced)]);
     }
-    Ok((
+    (
         InventoryKind::FileActivity,
         json!({
-            "process_command": command,
             "operation": operation,
             "path": path,
             "new_path": new_path,
             "replaced": replaced,
         }),
-    ))
+    )
 }
 
 fn inbound_endpoint_fingerprint(
@@ -712,14 +678,14 @@ mod tests {
         let first = fingerprint(scope(&event), &event).unwrap();
         let mut other_scope = scope(&event);
         other_scope.application_id = Uuid::from_u128(99);
-        let second_version = InventoryIdentityVersion::new(2).unwrap();
+        let previous_version = InventoryIdentityVersion::new(1).unwrap();
         assert_ne!(
             first.digest,
             fingerprint(other_scope, &event).unwrap().digest
         );
         assert_ne!(
             first.digest,
-            fingerprint_with_version(scope(&event), &event, second_version)
+            fingerprint_with_version(scope(&event), &event, previous_version)
                 .unwrap()
                 .digest
         );
@@ -768,6 +734,47 @@ mod tests {
         assert_eq!(first.digest, second.digest);
         assert!(first.semantic_summary.get("outcome").is_none());
         assert!(first.semantic_summary.get("dns_context").is_none());
+    }
+
+    fn assert_command_independent(mut first: RuntimeEvent) {
+        let first_fingerprint = fingerprint(scope(&first), &first).unwrap();
+        first.process.command = "actix-rt|system".into();
+        let second_fingerprint = fingerprint(scope(&first), &first).unwrap();
+        assert_eq!(first_fingerprint.digest, second_fingerprint.digest);
+        assert_eq!(
+            first_fingerprint.semantic_summary,
+            second_fingerprint.semantic_summary
+        );
+        assert!(
+            first_fingerprint
+                .semantic_summary
+                .get("process_command")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn affected_inventory_identities_are_process_command_independent() {
+        let destination = event(EventPayload::NetworkConnect(
+            NetworkConnect::new(
+                NetworkAddressFamily::Ipv4,
+                "203.0.113.7".parse().unwrap(),
+                443,
+                NetworkConnectOutcome::Succeeded,
+                None,
+            )
+            .unwrap(),
+        ));
+        let (domain, _) = dns_events();
+        let syscall = event(EventPayload::Syscall(SyscallEvent {
+            name: "epoll_wait".into(),
+        }));
+        let file = event(EventPayload::FileModify(FileModify {
+            path: FileActivityPath::new("/app/data/report").unwrap(),
+        }));
+        for event in [destination, domain, syscall, file] {
+            assert_command_independent(event);
+        }
     }
 
     #[test]

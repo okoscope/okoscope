@@ -148,7 +148,7 @@ async fn release(pool: &sqlx::PgPool, ids: &BootstrapIds, version: &str, age_day
 
 async fn inventory_item(pool: &sqlx::PgPool, ids: &BootstrapIds, seed: u8) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',1,$5,jsonb_build_object('executable',$6),now(),now(),1)")
+    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',2,$5,jsonb_build_object('executable',$6),now(),now(),1)")
         .bind(id)
         .bind(ids.organization_id)
         .bind(ids.project_id)
@@ -763,7 +763,7 @@ async fn inventory_summary_normalizes_legacy_lifecycle_kinds(pool: sqlx::PgPool)
     {
         let mut digest = vec![0_u8; 32];
         digest[0] = u8::try_from(index + 1).unwrap();
-        sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,1,$6,'{}'::jsonb,$7,$7,$8)")
+        sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,2,$6,'{}'::jsonb,$7,$7,$8)")
             .bind(Uuid::new_v4())
             .bind(ids.organization_id)
             .bind(ids.project_id)

@@ -1,6 +1,6 @@
 # Runtime inventory operations
 
-Application runtime inventory is an additive projection of accepted runtime events. Raw events, runtime groups, release summaries, and notifications remain the source evidence and continue working when inventory reads are disabled.
+Application runtime inventory is an additive projection of accepted runtime events. Version 2 groups outbound destinations, DNS behavior, syscalls, and file activity by canonical Application behavior rather than Linux thread command. Raw events and process-aware Runtime Groups continue to retain the command for investigation.
 
 Authorized Project users can assign one user label to any stable Application
 inventory identity, including processes, lifecycle events, inbound and outbound
@@ -28,7 +28,7 @@ unchanged after later edits.
      --organization-id ORGANIZATION_UUID \
      --project-id PROJECT_UUID \
      --application-id APPLICATION_UUID \
-     --identity-version 1 \
+     --identity-version 2 \
      --batch-size 500 \
      --throttle-ms 25
    ```
@@ -40,7 +40,7 @@ unchanged after later edits.
      --organization-id ORGANIZATION_UUID \
      --project-id PROJECT_UUID \
      --application-id APPLICATION_UUID \
-     --identity-version 1
+     --identity-version 2
    ```
 
 5. Enable inventory API and UI traffic only after reconciliation exits successfully.
@@ -82,7 +82,29 @@ To rebuild one controlled tenant scope:
 4. Run `inventory-backfill` and `inventory-reconcile` for that Application.
 5. Resume ingestion and inventory reads after reconciliation succeeds.
 
-Never delete `runtime_events`, `runtime_event_groups`, their memberships, or release summaries as part of an inventory rebuild.
+Never delete `runtime_events`, `runtime_event_groups`, their memberships, or release summaries as part of an ordinary inventory rebuild. The version-2 cutover for an explicitly selected Application is a separate destructive reset: pause ingestion and reads, take a database backup, verify Organization/Project/Application identifiers and preflight counts, remove all Application runtime evidence and user-authored runtime state in one reviewed transaction, verify zero residual rows and preserved Application/release/deployment/credential/agent/resource records, deploy compatible server and Web releases, then resume and reconcile. Rollback requires restoring the backup before ingestion resumes.
+
+For that one-time cutover, first record the three trusted identifiers from the
+database and take a restorable PostgreSQL backup. Pause the selected
+Application's agent and block its inventory UI/API access. Review
+[`ops/queries/reset-application-runtime.sql`](../ops/queries/reset-application-runtime.sql),
+then run it with explicit psql variables:
+
+```sh
+psql "$OKOSCOPE_DATABASE_URL" \
+  --set=organization_id=ORGANIZATION_UUID \
+  --set=project_id=PROJECT_UUID \
+  --set=application_id=APPLICATION_UUID \
+  --file=ops/queries/reset-application-runtime.sql
+```
+
+The transaction aborts unless the identifiers resolve to exactly one
+Application, prints preflight counts, verifies targeted state is absent, and
+compares preserved-row counts before committing. Do not resume ingestion if it
+fails. After deploying compatible releases, resume the selected agent, run
+`inventory-reconcile` with identity version 2, and inspect fresh occurrences.
+To roll back, keep ingestion paused, restore the captured database backup,
+deploy the previous server and Web releases, and only then resume traffic.
 
 User labels are durable configuration stored independently from disposable
 inventory projection rows and raw evidence. A rebuild therefore preserves a

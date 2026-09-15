@@ -589,7 +589,7 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
         organization_id: ids.organization_id,
         project_id: ids.project_id,
         application_id: Some(ids.application_id),
-        identity_version: 1,
+        identity_version: 2,
         batch_size: 2,
         throttle: std::time::Duration::ZERO,
     };
@@ -605,7 +605,7 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
         ids.organization_id,
         ids.project_id,
         ids.application_id,
-        1,
+        2,
     )
     .await
     .unwrap();
@@ -1047,7 +1047,7 @@ async fn inbound_events_are_transactional_replay_safe_and_group_only_by_local_en
         ids.organization_id,
         ids.project_id,
         ids.application_id,
-        1,
+        2,
     )
     .await
     .unwrap();

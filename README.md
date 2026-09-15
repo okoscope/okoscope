@@ -30,6 +30,10 @@ health, and role-based access across the platform, Organizations, and Projects.
 Operators can assign human-readable names to stable runtime behaviors of every
 supported event kind while Okoscope keeps the collected technical identity and
 semantic evidence visible and unchanged.
+Outbound destinations, DNS behavior, syscalls, and file activity are grouped by
+canonical behavior across all Linux thread commands in an Application. Raw
+occurrences and process-aware Runtime Groups retain the originating command for
+investigation, while managed policies for these behaviors apply across threads.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for
