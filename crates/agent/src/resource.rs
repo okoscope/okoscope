@@ -119,6 +119,7 @@ struct OpenAggregate {
 pub struct ResourceSampler {
     state_limit: usize,
     aggregate_limit: usize,
+    sample_interval_seconds: u64,
     previous: HashMap<LifetimeKey, Previous>,
     open: BTreeMap<AggregateKey, OpenAggregate>,
 }
@@ -130,6 +131,7 @@ impl ResourceSampler {
         Self {
             state_limit: config.max_cgroup_states,
             aggregate_limit: config.max_open_aggregates,
+            sample_interval_seconds: config.sample_interval_seconds,
             previous: HashMap::new(),
             open: BTreeMap::new(),
         }
@@ -205,9 +207,7 @@ impl ResourceSampler {
             }
             return;
         };
-        let elapsed = (now - previous.observed_at)
-            .num_microseconds()
-            .and_then(|value| u64::try_from(value).ok());
+        let elapsed = usable_coverage(previous.observed_at, now, self.sample_interval_seconds);
         let values = elapsed.and_then(|covered| {
             delta(&snapshot, &previous.snapshot, covered)
                 .ok()
@@ -321,6 +321,27 @@ impl ResourceSampler {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn usable_coverage(
+    previous: DateTime<Utc>,
+    current: DateTime<Utc>,
+    sample_interval_seconds: u64,
+) -> Option<u64> {
+    let covered = (current - previous)
+        .num_microseconds()
+        .and_then(|value| u64::try_from(value).ok())?;
+    let crossed_bucket = bucket_start(previous) != bucket_start(current);
+    let maximum_cross_bucket_coverage = sample_interval_seconds
+        .saturating_add(2)
+        .saturating_mul(1_000_000);
+    if crossed_bucket {
+        (covered <= maximum_cross_bucket_coverage)
+            .then(|| covered.min(sample_interval_seconds.saturating_mul(1_000_000)))
+    } else {
+        Some(covered)
     }
 }
 
@@ -636,6 +657,30 @@ fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_sample_crossing_a_bucket_boundary_restarts_the_baseline() {
+        let previous = Utc.timestamp_opt(1_800_000_055, 0).single().unwrap();
+        let delayed = previous + chrono::Duration::seconds(30);
+
+        assert_eq!(usable_coverage(previous, delayed, 15), None);
+    }
+
+    #[test]
+    fn on_schedule_sample_crossing_a_bucket_boundary_keeps_coverage() {
+        let previous = Utc.timestamp_opt(1_800_000_055, 0).single().unwrap();
+        let next = previous + chrono::Duration::seconds(15);
+
+        assert_eq!(usable_coverage(previous, next, 15), Some(15_000_000));
+    }
+
+    #[test]
+    fn slightly_late_cross_bucket_sample_cannot_overfill_the_minute() {
+        let previous = Utc.timestamp_opt(1_800_000_055, 0).single().unwrap();
+        let next = previous + chrono::Duration::milliseconds(15_500);
+
+        assert_eq!(usable_coverage(previous, next, 15), Some(15_000_000));
+    }
 
     fn attribution(
         route_id: Uuid,

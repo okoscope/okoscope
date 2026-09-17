@@ -27,6 +27,13 @@ The chart and agent reject state, queue, and batch sizes outside their bounded
 ranges. Disable the profile to stop cgroup scans and capability advertisement;
 stored history remains subject to retention.
 
+The cgroup hierarchy is live: unrelated containers may disappear while a scan
+is in progress. The agent skips entries that vanish during traversal instead of
+aborting the complete sample. If a delayed sample crosses a UTC minute boundary,
+the agent restarts that cgroup baseline rather than assigning multi-minute
+coverage to the new bucket; the affected interval remains an explicit gap and
+normal coverage resumes from subsequent samples.
+
 Collection requires cgroup v2 and the existing read-only `/sys/fs/cgroup` host
 mount. The agent advertises the resource capability only when the profile is
 enabled and `/sys/fs/cgroup/cgroup.controllers` exists. Unsupported or missing

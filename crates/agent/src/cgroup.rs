@@ -89,35 +89,68 @@ impl CgroupResolver {
     }
 
     fn refresh(&mut self) -> Result<(), CgroupError> {
-        use std::os::unix::fs::MetadataExt;
-
         let mut pending = vec![self.root.clone()];
         let mut containers = HashMap::new();
         while let Some(directory) = pending.pop() {
-            for entry in std::fs::read_dir(&directory)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
-                }
-                let path = entry.path();
-                pending.push(path.clone());
-                let Some(container) = extract_container_id(&path.to_string_lossy()) else {
-                    continue;
-                };
-                let inode = entry.metadata()?.ino();
-                containers.insert(
-                    inode,
-                    ContainerCgroup {
-                        inode,
-                        container_id: container,
-                        path,
-                    },
-                );
-            }
+            let allow_missing = directory != self.root;
+            scan_directory(&directory, &mut pending, &mut containers, allow_missing)?;
         }
         self.containers = containers;
         Ok(())
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn scan_directory(
+    directory: &Path,
+    pending: &mut Vec<PathBuf>,
+    containers: &mut HashMap<u64, ContainerCgroup>,
+    allow_missing: bool,
+) -> Result<(), CgroupError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        pending.push(path.clone());
+        let Some(container) = extract_container_id(&path.to_string_lossy()) else {
+            continue;
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let inode = metadata.ino();
+        containers.insert(
+            inode,
+            ContainerCgroup {
+                inode,
+                container_id: container,
+                path,
+            },
+        );
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -136,6 +169,33 @@ fn extract_container_id(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disappeared_directory_does_not_abort_a_scan() {
+        let disappeared =
+            std::env::temp_dir().join(format!("okoscope-gone-{}", uuid::Uuid::new_v4()));
+        let mut pending = Vec::new();
+        let mut containers = HashMap::new();
+
+        scan_directory(&disappeared, &mut pending, &mut containers, true).unwrap();
+
+        assert!(pending.is_empty());
+        assert!(containers.is_empty());
+    }
+
+    #[test]
+    fn missing_cgroup_root_still_fails_the_scan() {
+        let missing =
+            std::env::temp_dir().join(format!("okoscope-missing-root-{}", uuid::Uuid::new_v4()));
+        let mut pending = Vec::new();
+        let mut containers = HashMap::new();
+
+        let error = scan_directory(&missing, &mut pending, &mut containers, false).unwrap_err();
+
+        assert!(
+            matches!(error, CgroupError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
 
     #[test]
     fn parses_systemd_containerd_cgroup() {
