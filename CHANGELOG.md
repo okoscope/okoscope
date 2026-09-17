@@ -8,6 +8,12 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Resource utilization sampling now tolerates cgroup directories disappearing
+  during a live hierarchy scan and restarts its baseline after a delayed sample
+  crosses a UTC aggregation boundary, preventing avoidable minute gaps.
+
 ## [0.3.1] - 2026-09-15
 
 ### Changed
