@@ -10,6 +10,7 @@ pub mod auth;
 pub mod backfill;
 pub mod bootstrap;
 pub mod database;
+pub mod dns_group_api;
 pub mod grouping;
 pub mod health;
 pub mod ingestion;

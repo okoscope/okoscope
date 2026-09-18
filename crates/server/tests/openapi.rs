@@ -126,6 +126,18 @@ const LIVE_OPERATIONS: &[(&str, &str)] = &[
         "get",
     ),
     (
+        "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups",
+        "get",
+    ),
+    (
+        "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups/distribution",
+        "get",
+    ),
+    (
+        "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups/{group_token}/variants",
+        "get",
+    ),
+    (
         "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/distribution",
         "get",
     ),

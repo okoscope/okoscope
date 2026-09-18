@@ -865,6 +865,92 @@ paths:
           '401': { $ref: '#/components/responses/Error' },
           '404': { $ref: '#/components/responses/Error' },
         }
+  /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups:
+    parameters:
+      [
+        { $ref: '#/components/parameters/ProjectId' },
+        { $ref: '#/components/parameters/ApplicationId' },
+      ]
+    get:
+      operationId: listApplicationRuntimeInventoryDnsGroups
+      description: Returns logical DNS presentation groups. Exact domain inventory identities and evidence remain available through the existing runtime-inventory routes.
+      parameters:
+        - { $ref: '#/components/parameters/DnsGroupReleaseId' }
+        - { $ref: '#/components/parameters/DnsGroupClusterId' }
+        - { $ref: '#/components/parameters/DnsGroupNamespace' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadKind' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadName' }
+        - { $ref: '#/components/parameters/DnsGroupContainerName' }
+        - { $ref: '#/components/parameters/DnsGroupObservedFrom' }
+        - { $ref: '#/components/parameters/DnsGroupObservedTo' }
+        - { $ref: '#/components/parameters/DnsGroupSearch' }
+        - { $ref: '#/components/parameters/DnsGroupVerdict' }
+        - { $ref: '#/components/parameters/DnsGroupSuppressed' }
+        - { $ref: '#/components/parameters/DnsGroupEvaluationPending' }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 4096 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/DnsGroupPage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups/distribution:
+    parameters:
+      [
+        { $ref: '#/components/parameters/ProjectId' },
+        { $ref: '#/components/parameters/ApplicationId' },
+      ]
+    get:
+      operationId: getApplicationRuntimeInventoryDnsGroupDistribution
+      description: Returns a complete-scope top-N logical DNS distribution whose entries and other bucket reconcile with the complete logical-group and exact-observation totals.
+      parameters:
+        - { $ref: '#/components/parameters/DnsGroupReleaseId' }
+        - { $ref: '#/components/parameters/DnsGroupClusterId' }
+        - { $ref: '#/components/parameters/DnsGroupNamespace' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadKind' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadName' }
+        - { $ref: '#/components/parameters/DnsGroupContainerName' }
+        - { $ref: '#/components/parameters/DnsGroupObservedFrom' }
+        - { $ref: '#/components/parameters/DnsGroupObservedTo' }
+        - { $ref: '#/components/parameters/DnsGroupSearch' }
+        - { $ref: '#/components/parameters/DnsGroupVerdict' }
+        - { $ref: '#/components/parameters/DnsGroupSuppressed' }
+        - { $ref: '#/components/parameters/DnsGroupEvaluationPending' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 10, default: 5 } }
+      responses:
+        '200': { $ref: '#/components/responses/DnsGroupDistribution' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups/{group_token}/variants:
+    parameters:
+      [
+        { $ref: '#/components/parameters/ProjectId' },
+        { $ref: '#/components/parameters/ApplicationId' },
+        { name: group_token, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 4096 } },
+      ]
+    get:
+      operationId: listApplicationRuntimeInventoryDnsGroupVariants
+      description: Returns bounded exact DNS identities contributing to one logical group. item_id addresses the unchanged exact inventory detail and history routes.
+      parameters:
+        - { $ref: '#/components/parameters/DnsGroupReleaseId' }
+        - { $ref: '#/components/parameters/DnsGroupClusterId' }
+        - { $ref: '#/components/parameters/DnsGroupNamespace' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadKind' }
+        - { $ref: '#/components/parameters/DnsGroupWorkloadName' }
+        - { $ref: '#/components/parameters/DnsGroupContainerName' }
+        - { $ref: '#/components/parameters/DnsGroupObservedFrom' }
+        - { $ref: '#/components/parameters/DnsGroupObservedTo' }
+        - { $ref: '#/components/parameters/DnsGroupVerdict' }
+        - { $ref: '#/components/parameters/DnsGroupSuppressed' }
+        - { $ref: '#/components/parameters/DnsGroupEvaluationPending' }
+        - { name: cursor, in: query, schema: { type: string, maxLength: 4096 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { $ref: '#/components/responses/DnsGroupVariantPage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/distribution:
     parameters:
       [
@@ -2355,6 +2441,18 @@ components:
       { name: credential_id, in: path, required: true, schema: { type: string, format: uuid } }
     InventoryItemId:
       { name: item_id, in: path, required: true, schema: { type: string, format: uuid } }
+    DnsGroupReleaseId: { name: release_id, in: query, schema: { type: string, format: uuid } }
+    DnsGroupClusterId: { name: cluster_id, in: query, schema: { type: string, format: uuid } }
+    DnsGroupNamespace: { name: namespace, in: query, schema: { type: string, minLength: 1, maxLength: 253 } }
+    DnsGroupWorkloadKind: { name: workload_kind, in: query, schema: { type: string, minLength: 1, maxLength: 253 } }
+    DnsGroupWorkloadName: { name: workload_name, in: query, schema: { type: string, minLength: 1, maxLength: 253 } }
+    DnsGroupContainerName: { name: container_name, in: query, schema: { type: string, minLength: 1, maxLength: 253 } }
+    DnsGroupObservedFrom: { name: observed_from, in: query, schema: { type: string, format: date-time } }
+    DnsGroupObservedTo: { name: observed_to, in: query, schema: { type: string, format: date-time } }
+    DnsGroupSearch: { name: search, in: query, schema: { type: string, minLength: 1, maxLength: 200 } }
+    DnsGroupVerdict: { name: verdict, in: query, schema: { $ref: '#/components/schemas/PolicyVerdict' } }
+    DnsGroupSuppressed: { name: suppressed, in: query, schema: { type: boolean } }
+    DnsGroupEvaluationPending: { name: evaluation_pending, in: query, schema: { type: boolean } }
     PolicyId: { name: policy_id, in: path, required: true, schema: { type: string, format: uuid } }
     GroupId: { name: group_id, in: path, required: true, schema: { type: string, format: uuid } }
     ReleaseId:
@@ -5615,6 +5713,82 @@ components:
         type: string,
         enum: [process, destination, domain, syscall, inbound_endpoint, file_activity, lifecycle],
       }
+    DnsGroupingReason: { type: string, enum: [canonical_name, kubernetes_search_expansion] }
+    DnsGroupingConfidence: { type: string, enum: [exact, high] }
+    DnsLogicalGroup:
+      type: object
+      additionalProperties: false
+      required: [group_token, display_name, process_command, grouping_reason, confidence, first_seen_at, last_seen_at, observation_count, variant_count, query_types, release_count, cluster_count, namespace_count, workload_count, pod_count, container_count]
+      properties:
+        group_token: { type: string, minLength: 1, maxLength: 4096, description: Deterministic opaque token bound to the tenant, Application, process, and logical display name. }
+        display_name: { type: string, minLength: 1, maxLength: 253 }
+        process_command: { type: string, minLength: 1 }
+        grouping_reason: { $ref: '#/components/schemas/DnsGroupingReason' }
+        confidence: { $ref: '#/components/schemas/DnsGroupingConfidence' }
+        first_seen_at: { $ref: '#/components/schemas/Timestamp' }
+        last_seen_at: { $ref: '#/components/schemas/Timestamp' }
+        observation_count: { type: integer, format: int64, minimum: 1 }
+        variant_count: { type: integer, format: int64, minimum: 1 }
+        query_types: { type: array, minItems: 1, maxItems: 2, uniqueItems: true, items: { type: string, enum: [A, AAAA] } }
+        release_count: { type: integer, format: int64, minimum: 0 }
+        cluster_count: { type: integer, format: int64, minimum: 0 }
+        namespace_count: { type: integer, format: int64, minimum: 0 }
+        workload_count: { type: integer, format: int64, minimum: 0 }
+        pod_count: { type: integer, format: int64, minimum: 0 }
+        container_count: { type: integer, format: int64, minimum: 0 }
+    DnsGroupPage:
+      type: object
+      additionalProperties: false
+      required: [coverage, items, next_cursor, total_group_count, total_observation_count]
+      properties:
+        coverage: { $ref: '#/components/schemas/RuntimeRetentionCoverage' }
+        items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/DnsLogicalGroup' } }
+        next_cursor: { type: [string, 'null'], maxLength: 4096 }
+        total_group_count: { type: integer, format: int64, minimum: 0 }
+        total_observation_count: { type: integer, format: int64, minimum: 0 }
+    DnsGroupVariant:
+      type: object
+      additionalProperties: false
+      required: [item_id, name, query_type, first_seen_at, last_seen_at, observation_count]
+      properties:
+        item_id: { $ref: '#/components/schemas/Uuid' }
+        name: { type: string, minLength: 1, maxLength: 253 }
+        query_type: { type: string, enum: [A, AAAA] }
+        first_seen_at: { $ref: '#/components/schemas/Timestamp' }
+        last_seen_at: { $ref: '#/components/schemas/Timestamp' }
+        observation_count: { type: integer, format: int64, minimum: 1 }
+    DnsGroupVariantPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/DnsGroupVariant' } }
+        next_cursor: { type: [string, 'null'], maxLength: 4096 }
+    DnsGroupDistributionOther:
+      type: object
+      additionalProperties: false
+      required: [group_count, observation_count]
+      properties:
+        group_count: { type: integer, format: int64, minimum: 1 }
+        observation_count: { type: integer, format: int64, minimum: 1 }
+    DnsGroupDistributionEntry:
+      type: object
+      additionalProperties: false
+      required: [group]
+      properties: { group: { $ref: '#/components/schemas/DnsLogicalGroup' } }
+    DnsGroupDistribution:
+      type: object
+      additionalProperties: false
+      required: [coverage, total_group_count, total_observation_count, entries, other]
+      properties:
+        coverage: { $ref: '#/components/schemas/RuntimeRetentionCoverage' }
+        total_group_count: { type: integer, format: int64, minimum: 0 }
+        total_observation_count: { type: integer, format: int64, minimum: 0 }
+        entries: { type: array, maxItems: 10, items: { $ref: '#/components/schemas/DnsGroupDistributionEntry' } }
+        other:
+          oneOf:
+            - { $ref: '#/components/schemas/DnsGroupDistributionOther' }
+            - { type: 'null' }
     InventoryReleasePresence:
       {
         type: string,
@@ -6488,6 +6662,15 @@ components:
         content:
           { application/json: { schema: { $ref: '#/components/schemas/InventorySummary' } } },
       }
+    DnsGroupPage:
+      description: Bounded logical DNS presentation-group page
+      content: { application/json: { schema: { $ref: '#/components/schemas/DnsGroupPage' } } }
+    DnsGroupVariantPage:
+      description: Bounded exact DNS resolution variants for a logical group
+      content: { application/json: { schema: { $ref: '#/components/schemas/DnsGroupVariantPage' } } }
+    DnsGroupDistribution:
+      description: Complete-scope bounded logical DNS distribution
+      content: { application/json: { schema: { $ref: '#/components/schemas/DnsGroupDistribution' } } }
     InventoryDistribution:
       {
         description: Complete-scope bounded runtime inventory distribution,

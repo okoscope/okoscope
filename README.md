@@ -34,6 +34,10 @@ Outbound destinations, DNS behavior, syscalls, and file activity are grouped by
 canonical behavior across all Linux thread commands in an Application. Raw
 occurrences and process-aware Runtime Groups retain the originating command for
 investigation, while managed policies for these behaviors apply across threads.
+The Application domain view can additionally present logical DNS destinations:
+A/AAAA questions and corroborated Kubernetes `cluster.local` search expansions
+are grouped for display, while their exact resolver questions remain available
+for policy evaluation, history, and audit.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for

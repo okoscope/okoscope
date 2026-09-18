@@ -15,6 +15,10 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
         include_str!("../src/inventory_api.rs"),
         "/runtime-inventory",
     ),
+    (
+        include_str!("../src/dns_group_api.rs"),
+        "/runtime-inventory/dns-groups",
+    ),
     (include_str!("../src/policy_api.rs"), "/policies"),
     (include_str!("../src/releases.rs"), "/releases"),
     (include_str!("../src/resources.rs"), "/resources"),
