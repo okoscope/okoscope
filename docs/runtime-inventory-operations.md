@@ -16,8 +16,10 @@ logical destinations without changing the stored `domain` inventory items.
 Questions for A and AAAA records share a logical group when their canonical
 name and observed process match. A name ending in the default Kubernetes search
 suffix (`<namespace>.svc.cluster.local`, `svc.cluster.local`, or
-`cluster.local`) is folded into the base name only when that exact base name is
-also present for the same process in the complete effective filter scope.
+`cluster.local`) is folded into the base name when that exact base name is also
+present, or when at least two different exact questions produce the same base
+through different recognized suffixes. Corroboration is limited to one process,
+cluster, namespace, Pod, and container in the complete effective filter scope.
 Unknown cluster domains, ambiguous suffixes, and evidence left without this
 corroboration remain separate groups.
 

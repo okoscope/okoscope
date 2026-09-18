@@ -35,7 +35,8 @@ canonical behavior across all Linux thread commands in an Application. Raw
 occurrences and process-aware Runtime Groups retain the originating command for
 investigation, while managed policies for these behaviors apply across threads.
 The Application domain view can additionally present logical DNS destinations:
-A/AAAA questions and corroborated Kubernetes `cluster.local` search expansions
+A/AAAA questions and Kubernetes `cluster.local` search expansions corroborated
+by an exact base question or multiple search suffixes in one resolver context
 are grouped for display, while their exact resolver questions remain available
 for policy evaluation, history, and audit.
 Application health includes only diagnostic evidence assigned after workload
