@@ -13,6 +13,7 @@ use event_model::{
 use server::{
     auth::{SESSION_COOKIE, SessionScope, SessionToken},
     bootstrap::{BootstrapConfig, BootstrapIds, bootstrap},
+    dns_group_api,
     ingestion::{IngestionContext, persist_batch},
     inventory_api,
 };
@@ -36,6 +37,28 @@ fn config(name: &str) -> BootstrapConfig {
         cluster_credential: format!("cluster-{name}"),
         api_credential: format!("api-{name}"),
     }
+}
+
+fn dns_event(
+    ids: &BootstrapIds,
+    name: &str,
+    query_type: DnsQueryType,
+    command: &str,
+) -> RuntimeEvent {
+    let mut value = event(
+        ids,
+        EventPayload::NetworkDnsQuery(NetworkDnsQuery {
+            transaction_id: rand::random(),
+            direction: DnsDirection::Egress,
+            transport: DnsTransport::Udp,
+            resolver_address: "10.96.0.10".parse().unwrap(),
+            name: DnsName::new(name).unwrap(),
+            query_type,
+        }),
+        None,
+    );
+    value.process.command = command.into();
+    value
 }
 
 fn event(ids: &BootstrapIds, payload: EventPayload, release: Option<&str>) -> RuntimeEvent {
@@ -1061,4 +1084,208 @@ async fn runtime_behavior_labels_mutate_search_and_preserve_evidence(pool: sqlx:
     )
     .await;
     assert!(unnamed["user_label"].is_null());
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(pool: sqlx::PgPool) {
+    let first = bootstrap(&pool, &config("dns-groups-first")).await.unwrap();
+    let first_session = owner_session(&pool, &first).await;
+    let second = bootstrap(&pool, &config("dns-groups-second"))
+        .await
+        .unwrap();
+    let second_session = owner_session(&pool, &second).await;
+    let agent_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-a','test')")
+        .bind(agent_id).bind(first.organization_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    let context = IngestionContext {
+        scope: SessionScope {
+            organization_id: first.organization_id,
+            cluster_id: first.cluster_id,
+        },
+        agent_id,
+    };
+    let mut filtered_expansion = dns_event(
+        &first,
+        "s3.twcstorage.ru.cluster.local",
+        DnsQueryType::A,
+        "api",
+    );
+    filtered_expansion.attribution.namespace = "staging".into();
+    let events = vec![
+        dns_event(&first, "s3.twcstorage.ru", DnsQueryType::A, "api"),
+        dns_event(&first, "s3.twcstorage.ru", DnsQueryType::Aaaa, "api"),
+        dns_event(
+            &first,
+            "s3.twcstorage.ru.cluster.local",
+            DnsQueryType::A,
+            "api",
+        ),
+        dns_event(
+            &first,
+            "s3.twcstorage.ru.svc.cluster.local",
+            DnsQueryType::A,
+            "api",
+        ),
+        filtered_expansion,
+        dns_event(
+            &first,
+            "s3.twcstorage.ru.corp.local",
+            DnsQueryType::A,
+            "api",
+        ),
+        dns_event(
+            &first,
+            "alone.example.cluster.local",
+            DnsQueryType::A,
+            "api",
+        ),
+        dns_event(&first, "s3.twcstorage.ru", DnsQueryType::A, "worker"),
+        dns_event(
+            &first,
+            "s3.twcstorage.ru.cluster.local",
+            DnsQueryType::A,
+            "worker",
+        ),
+    ];
+    persist_batch(&pool, context, &events).await.unwrap();
+    let app = inventory_api::router(pool.clone()).merge(dns_group_api::router(pool.clone()));
+    let base = format!(
+        "/api/v1/projects/{}/applications/{}/runtime-inventory",
+        first.project_id, first.application_id
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            &format!("{base}/dns-groups?limit=1"),
+            &first_session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first_page = json(response).await;
+    assert_eq!(first_page["total_group_count"], 4);
+    assert_eq!(first_page["total_observation_count"], 9);
+    assert!(first_page["next_cursor"].is_string());
+    let cursor = first_page["next_cursor"].as_str().unwrap();
+    let second_page = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups?limit=1&cursor={cursor}"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(second_page["total_group_count"], 4);
+    assert_ne!(
+        first_page["items"][0]["group_token"],
+        second_page["items"][0]["group_token"]
+    );
+
+    let grouped = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups?search=s3.twcstorage.ru.svc.cluster.local"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(grouped["items"].as_array().unwrap().len(), 1);
+    assert_eq!(grouped["items"][0]["display_name"], "s3.twcstorage.ru");
+    assert_eq!(
+        grouped["items"][0]["grouping_reason"],
+        "kubernetes_search_expansion"
+    );
+    assert_eq!(grouped["items"][0]["variant_count"], 4);
+    assert_eq!(grouped["items"][0]["observation_count"], 5);
+    assert_eq!(
+        grouped["items"][0]["query_types"],
+        serde_json::json!(["A", "AAAA"])
+    );
+    let filtered = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups?namespace=staging"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        filtered["items"][0]["display_name"],
+        "s3.twcstorage.ru.cluster.local"
+    );
+    assert_eq!(filtered["items"][0]["grouping_reason"], "canonical_name");
+    let token = grouped["items"][0]["group_token"].as_str().unwrap();
+    let variants = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups/{token}/variants?limit=10"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(variants["items"].as_array().unwrap().len(), 4);
+    let exact_item = variants["items"][0]["item_id"].as_str().unwrap();
+    assert_eq!(
+        app.clone()
+            .oneshot(request(&format!("{base}/{exact_item}"), &first_session))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let distribution = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups/distribution?limit=1"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(distribution["total_group_count"], 4);
+    assert_eq!(distribution["entries"][0]["group"]["observation_count"], 5);
+    assert_eq!(distribution["other"]["group_count"], 3);
+    assert_eq!(distribution["other"]["observation_count"], 4);
+
+    let foreign_base = format!(
+        "/api/v1/projects/{}/applications/{}/runtime-inventory/dns-groups/{token}/variants",
+        second.project_id, second.application_id
+    );
+    assert_eq!(
+        app.oneshot(request(&foreign_base, &second_session))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    sqlx::query("ANALYZE runtime_inventory_items")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE runtime_inventory_event_memberships")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ANALYZE runtime_events")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS) SELECT e.id FROM runtime_inventory_items i JOIN runtime_inventory_event_memberships m ON m.item_id=i.id JOIN runtime_events e ON e.id=m.event_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND i.inventory_kind='domain' AND e.observed_at>=now()-interval '1 day'")
+        .bind(first.organization_id).bind(first.project_id).bind(first.application_id)
+        .fetch_all(&pool).await.unwrap();
+    assert!(plan.iter().any(|line| line.contains("runtime_inventory")));
+    eprintln!("logical DNS scoped foundation plan: {plan:?}");
 }

@@ -9,6 +9,31 @@ limited to 120 Unicode characters, and kept separate from the canonical
 technical `semantic_summary`; they never change grouping, counts, policy
 evaluation, or collected evidence. Duplicate label text is allowed.
 
+## Logical DNS presentation groups
+
+The additive `.../runtime-inventory/dns-groups` API presents DNS observations as
+logical destinations without changing the stored `domain` inventory items.
+Questions for A and AAAA records share a logical group when their canonical
+name and observed process match. A name ending in the default Kubernetes search
+suffix (`<namespace>.svc.cluster.local`, `svc.cluster.local`, or
+`cluster.local`) is folded into the base name only when that exact base name is
+also present for the same process in the complete effective filter scope.
+Unknown cluster domains, ambiguous suffixes, and evidence left without this
+corroboration remain separate groups.
+
+List and distribution aggregation starts from retained event membership after
+tenant, release, Kubernetes, observation-window, policy, suppression, and
+evaluation-state filters. Search matches the logical display name or any exact
+question in the group. The group observation total counts matching retained
+events once; distribution entries plus `other` reconcile with the complete
+logical-group and observation totals.
+
+`.../dns-groups/{group_token}/variants` returns a bounded list of the exact
+name/type identities contributing to a group. Its `item_id` continues to address
+the existing inventory detail, release, sighting, Runtime Group, and occurrence
+history routes. Logical groups therefore describe resolver presentation only;
+they do not prove a connection, change policy identity, or replace raw evidence.
+
 The item-scoped `PUT .../runtime-inventory/{item_id}/user-label` and `DELETE`
 operations resolve the stable kind, identity version, and digest on the server.
 Clients cannot supply identity material. The optional `expected_updated_at`
