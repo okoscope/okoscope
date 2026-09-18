@@ -1112,7 +1112,28 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
         "api",
     );
     filtered_expansion.attribution.namespace = "staging".into();
-    let events = vec![
+    let mut html_cluster = dns_event(
+        &first,
+        "html-to-pdf.rstat.svc.cluster.local",
+        DnsQueryType::A,
+        "dns",
+    );
+    let mut html_namespace = dns_event(
+        &first,
+        "html-to-pdf.rstat.svc.rstat.svc.cluster.local",
+        DnsQueryType::Aaaa,
+        "dns",
+    );
+    let mut html_service = dns_event(
+        &first,
+        "html-to-pdf.rstat.svc.svc.cluster.local",
+        DnsQueryType::A,
+        "dns",
+    );
+    for event in [&mut html_cluster, &mut html_namespace, &mut html_service] {
+        event.attribution.namespace = "rstat".into();
+    }
+    let mut events = vec![
         dns_event(&first, "s3.twcstorage.ru", DnsQueryType::A, "api"),
         dns_event(&first, "s3.twcstorage.ru", DnsQueryType::Aaaa, "api"),
         dns_event(
@@ -1147,7 +1168,27 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
             DnsQueryType::A,
             "worker",
         ),
+        html_cluster,
+        html_namespace,
+        html_service,
     ];
+    for event in &mut events {
+        event.attribution.pod_uid = "shared-resolver-context".into();
+    }
+    events.extend([
+        dns_event(
+            &first,
+            "split.example.cluster.local",
+            DnsQueryType::A,
+            "split-context",
+        ),
+        dns_event(
+            &first,
+            "split.example.svc.cluster.local",
+            DnsQueryType::A,
+            "split-context",
+        ),
+    ]);
     persist_batch(&pool, context, &events).await.unwrap();
     let app = inventory_api::router(pool.clone()).merge(dns_group_api::router(pool.clone()));
     let base = format!(
@@ -1164,8 +1205,8 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let first_page = json(response).await;
-    assert_eq!(first_page["total_group_count"], 4);
-    assert_eq!(first_page["total_observation_count"], 9);
+    assert_eq!(first_page["total_group_count"], 8);
+    assert_eq!(first_page["total_observation_count"], 14);
     assert!(first_page["next_cursor"].is_string());
     let cursor = first_page["next_cursor"].as_str().unwrap();
     let second_page = json(
@@ -1178,7 +1219,7 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
             .unwrap(),
     )
     .await;
-    assert_eq!(second_page["total_group_count"], 4);
+    assert_eq!(second_page["total_group_count"], 8);
     assert_ne!(
         first_page["items"][0]["group_token"],
         second_page["items"][0]["group_token"]
@@ -1201,10 +1242,51 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
         "kubernetes_search_expansion"
     );
     assert_eq!(grouped["items"][0]["variant_count"], 4);
-    assert_eq!(grouped["items"][0]["observation_count"], 5);
+    assert_eq!(grouped["items"][0]["observation_count"], 4);
     assert_eq!(
         grouped["items"][0]["query_types"],
         serde_json::json!(["A", "AAAA"])
+    );
+    let inferred = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups?search=html-to-pdf.rstat.svc.svc.cluster.local"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(inferred["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        inferred["items"][0]["display_name"],
+        "html-to-pdf.rstat.svc"
+    );
+    assert_eq!(
+        inferred["items"][0]["grouping_reason"],
+        "kubernetes_search_expansion"
+    );
+    assert_eq!(inferred["items"][0]["variant_count"], 3);
+    assert_eq!(inferred["items"][0]["observation_count"], 3);
+    let split_context = json(
+        app.clone()
+            .oneshot(request(
+                &format!("{base}/dns-groups?search=split.example"),
+                &first_session,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(split_context["items"].as_array().unwrap().len(), 2);
+    assert!(
+        split_context["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| {
+                item["grouping_reason"] == "canonical_name" && item["variant_count"] == 1
+            })
     );
     let filtered = json(
         app.clone()
@@ -1254,10 +1336,10 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
             .unwrap(),
     )
     .await;
-    assert_eq!(distribution["total_group_count"], 4);
-    assert_eq!(distribution["entries"][0]["group"]["observation_count"], 5);
-    assert_eq!(distribution["other"]["group_count"], 3);
-    assert_eq!(distribution["other"]["observation_count"], 4);
+    assert_eq!(distribution["total_group_count"], 8);
+    assert_eq!(distribution["entries"][0]["group"]["observation_count"], 4);
+    assert_eq!(distribution["other"]["group_count"], 7);
+    assert_eq!(distribution["other"]["observation_count"], 10);
 
     let foreign_base = format!(
         "/api/v1/projects/{}/applications/{}/runtime-inventory/dns-groups/{token}/variants",

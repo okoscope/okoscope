@@ -414,15 +414,43 @@ WITH scoped AS MATERIALIZED (
  AND ($14::bool IS NULL OR $14=EXISTS(SELECT 1 FROM runtime_policy_suppressions z WHERE z.organization_id=i.organization_id AND z.project_id=i.project_id AND z.application_id=i.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR e.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR e.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR e.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR e.workload_name=ANY(z.workload_names))))
  AND ($15::bool IS NULL OR $15=EXISTS(SELECT 1 FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations p ON p.item_id=s.item_id AND p.cluster_id=s.cluster_id AND p.namespace=s.namespace AND p.workload_kind=s.workload_kind AND p.workload_name=s.workload_name AND p.pod_uid=s.pod_uid AND p.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.item_id=i.id AND s.cluster_id=e.cluster_id AND s.namespace=e.namespace AND s.workload_kind=e.workload_kind AND s.workload_name=e.workload_name AND s.pod_uid=e.pod_uid AND s.container_name=e.container_name AND (p.item_id IS NULL OR p.policy_state_version<>COALESCE(ps.state_version,0) OR p.evaluator_version<>$16)))
 ), candidates AS MATERIALIZED (
- SELECT s.*,
- CASE
-  WHEN s.canonical_name LIKE ('%.'||lower(s.namespace)||'.svc.cluster.local') THEN left(s.canonical_name,-length('.'||lower(s.namespace)||'.svc.cluster.local'))
-  WHEN s.canonical_name LIKE '%.svc.cluster.local' THEN left(s.canonical_name,-length('.svc.cluster.local'))
-  WHEN s.canonical_name LIKE '%.cluster.local' THEN left(s.canonical_name,-length('.cluster.local'))
- END candidate_name FROM scoped s
+ SELECT s.*,candidate.candidate_name,candidate.suffix_kind
+ FROM scoped s
+ CROSS JOIN LATERAL (
+  VALUES
+   (left(s.canonical_name,-length('.'||lower(s.namespace)||'.svc.cluster.local')),'namespace'),
+   (left(s.canonical_name,-length('.svc.cluster.local')),'service'),
+   (left(s.canonical_name,-length('.cluster.local')),'cluster')
+ ) candidate(candidate_name,suffix_kind)
+ WHERE (candidate.suffix_kind='namespace' AND s.canonical_name LIKE ('%.'||lower(s.namespace)||'.svc.cluster.local'))
+    OR (candidate.suffix_kind='service' AND s.canonical_name LIKE '%.svc.cluster.local')
+    OR (candidate.suffix_kind='cluster' AND s.canonical_name LIKE '%.cluster.local')
+), candidate_evidence AS MATERIALIZED (
+ SELECT candidate_name,process_command,cluster_id,namespace,pod_uid,container_name,
+        count(DISTINCT canonical_name) exact_name_count,count(DISTINCT suffix_kind) suffix_kind_count
+ FROM candidates
+ GROUP BY candidate_name,process_command,cluster_id,namespace,pod_uid,container_name
 ), normalized AS MATERIALIZED (
- SELECT c.*,CASE WHEN c.candidate_name IS NOT NULL AND EXISTS(SELECT 1 FROM scoped corroborating WHERE corroborating.process_command=c.process_command AND corroborating.canonical_name=c.candidate_name) THEN c.candidate_name ELSE c.canonical_name END display_name
- FROM candidates c
+ SELECT s.*,COALESCE(selected.candidate_name,s.canonical_name) display_name
+ FROM scoped s
+ LEFT JOIN LATERAL (
+  SELECT c.candidate_name
+  FROM candidates c
+  JOIN candidate_evidence evidence ON evidence.candidate_name=c.candidate_name
+   AND evidence.process_command=c.process_command AND evidence.cluster_id=c.cluster_id
+   AND evidence.namespace=c.namespace AND evidence.pod_uid IS NOT DISTINCT FROM c.pod_uid
+   AND evidence.container_name=c.container_name
+  WHERE c.occurrence_id=s.occurrence_id AND c.item_id=s.item_id
+   AND (EXISTS(
+    SELECT 1 FROM scoped corroborating
+    WHERE corroborating.process_command=c.process_command AND corroborating.canonical_name=c.candidate_name
+     AND corroborating.cluster_id=c.cluster_id AND corroborating.namespace=c.namespace
+     AND corroborating.pod_uid IS NOT DISTINCT FROM c.pod_uid
+     AND corroborating.container_name=c.container_name
+   ) OR (evidence.exact_name_count>=2 AND evidence.suffix_kind_count>=2))
+  ORDER BY length(c.candidate_name) DESC,c.candidate_name
+  LIMIT 1
+ ) selected ON true
 ), groups AS MATERIALIZED (
  SELECT display_name,process_command,CASE WHEN bool_or(display_name<>canonical_name) THEN 'kubernetes_search_expansion' ELSE 'canonical_name' END grouping_reason,
  CASE WHEN bool_or(display_name<>canonical_name) THEN 'high' ELSE 'exact' END confidence,

@@ -8,6 +8,15 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-18
+
+### Fixed
+
+- Logical DNS presentation now combines a Kubernetes-expanded destination when
+  multiple exact resolver questions in one Pod/container context corroborate
+  the same base through different search suffixes, even if the base question
+  itself was not retained.
+
 ## [0.3.2] - 2026-09-18
 
 ### Added
@@ -155,7 +164,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - CI validation for Rust formatting, strict Clippy, userspace tests, PostgreSQL
   migrations, Helm contracts, and Kubernetes manifests.
 
-[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/okoscope/okoscope/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/okoscope/okoscope/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/okoscope/okoscope/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/okoscope/okoscope/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/okoscope/okoscope/compare/v0.2.2...v0.3.0
