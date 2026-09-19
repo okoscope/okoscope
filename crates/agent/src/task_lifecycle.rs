@@ -51,6 +51,7 @@ struct ProcessState {
     window_start: DateTime<Utc>,
     baseline_provenance: BaselineProvenance,
     baseline_complete: bool,
+    retired: bool,
 }
 
 #[derive(Debug)]
@@ -89,7 +90,7 @@ impl TaskLifecycleStore {
             cgroup_id: process.cgroup_id,
             tgid: process.tgid,
         };
-        self.observe_process_exit(key.cgroup_id, key.tgid);
+        self.remove_process_state(&key);
         start.validate().ok()?;
         self.states.insert(
             key,
@@ -294,18 +295,38 @@ impl TaskLifecycleStore {
 
     pub fn observe_process_exit(&mut self, cgroup_id: u64, tgid: u32) {
         let key = ProcessKey { cgroup_id, tgid };
-        if let Some(state) = self.states.remove(&key) {
-            for task in state.tasks.keys() {
-                self.task_index.remove(&(tgid, task.tid));
+        let Some(state) = self.states.get_mut(&key) else {
+            return;
+        };
+        state.retired = true;
+        for (task_key, task) in &state.tasks {
+            self.task_index.remove(&(tgid, task_key.tid));
+            if let Some(name) = state.names.get_mut(&task.name) {
+                name.active = name.active.saturating_sub(1);
+                name.exited = name.exited.saturating_add(1);
             }
+            state.exited = state.exited.saturating_add(1);
+            state.gaps.insert(ThreadGapReason::KernelLoss);
+            state.baseline_complete = false;
         }
+        state.tasks.clear();
     }
 
     pub fn flush_due(&mut self, now: DateTime<Utc>) -> Vec<RuntimeEvent> {
-        self.states
-            .values_mut()
-            .filter_map(|state| state.flush(now))
-            .collect()
+        let mut retired = Vec::new();
+        let mut events = Vec::new();
+        for (key, state) in &mut self.states {
+            if let Some(event) = state.flush(now) {
+                events.push(event);
+                if state.retired {
+                    retired.push(key.clone());
+                }
+            }
+        }
+        for key in retired {
+            self.states.remove(&key);
+        }
+        events
     }
 
     fn ensure_state(
@@ -318,7 +339,7 @@ impl TaskLifecycleStore {
     ) -> bool {
         if let Some(state) = self.states.get(key) {
             if state.generation == generation {
-                return true;
+                return !state.retired;
             }
             let tasks = state.tasks.keys().copied().collect::<Vec<_>>();
             self.states.remove(key);
@@ -364,6 +385,14 @@ impl TaskLifecycleStore {
         state.gaps.insert(ThreadGapReason::KernelLoss);
         state.baseline_complete = false;
     }
+
+    fn remove_process_state(&mut self, key: &ProcessKey) {
+        if let Some(state) = self.states.remove(key) {
+            for task in state.tasks.keys() {
+                self.task_index.remove(&(key.tgid, task.tid));
+            }
+        }
+    }
 }
 
 impl ProcessState {
@@ -393,6 +422,7 @@ impl ProcessState {
                 BaselineProvenance::Unavailable
             },
             baseline_complete: start_observed,
+            retired: false,
         }
     }
 
@@ -520,10 +550,10 @@ mod tests {
         }
     }
 
-    fn process(pid: u32) -> ProcessIdentity {
+    fn process(_tid: u32) -> ProcessIdentity {
         ProcessIdentity {
             cgroup_id: 7,
-            pid,
+            pid: 10,
             tgid: 10,
             command: "app".into(),
         }
@@ -620,6 +650,34 @@ mod tests {
             (window.created, window.exited, window.active_at_end),
             (1, 1, 0)
         );
+        window.validate().unwrap();
+    }
+
+    #[test]
+    fn leader_exit_retains_the_final_window_until_its_fixed_boundary() {
+        let start = minute_start(Utc::now());
+        let mut store = TaskLifecycleStore::new(4);
+        store.observe_thread_start(
+            start,
+            attribution(),
+            process(11),
+            generation(),
+            task(11, 100, "worker"),
+        );
+        store.observe_thread_exit(7, 10, 11, 101);
+        store.observe_process_exit(7, 10);
+
+        assert!(store.flush_due(start + Duration::seconds(59)).is_empty());
+        let event = store
+            .flush_due(start + Duration::seconds(60))
+            .pop()
+            .unwrap();
+        let EventPayload::ThreadActivityWindow(window) = event.payload else {
+            panic!()
+        };
+        assert_eq!((window.created, window.exited), (1, 1));
+        window.validate().unwrap();
+        assert!(store.flush_due(start + Duration::seconds(120)).is_empty());
     }
 
     #[test]
