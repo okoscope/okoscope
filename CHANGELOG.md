@@ -35,6 +35,12 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - Per-process thread state assigns an independent task generation and rejects
   stale rename or exit transitions after numeric TID reuse.
 
+### Fixed
+
+- Thread lifecycle windows now identify their owning thread-group leader as
+  the process, so valid non-leader activity passes server validation instead of
+  being retried with a thread ID in the process identity.
+
 ### Upgrade notes
 
 - Database migration 31 is required. It adds idempotent, tenant-scoped thread

@@ -629,12 +629,8 @@ mod linux {
             return;
         };
         let child_command = decoded.child_command;
-        let process = ProcessIdentity {
-            cgroup_id: kernel.cgroup_id,
-            pid: kernel.child_pid,
-            tgid: kernel.child_tgid,
-            command: child_command.clone(),
-        };
+        let process =
+            task_owner_identity(kernel.cgroup_id, kernel.child_tgid, child_command.clone());
         let observed_at = Utc::now();
         if kernel.child_pid == kernel.child_tgid {
             let generation = process_generations.observe_start(
@@ -866,6 +862,30 @@ mod linux {
                 .unwrap_or(bytes.len())],
         )
         .into_owned()
+    }
+
+    fn task_owner_identity(cgroup_id: u64, tgid: u32, command: String) -> ProcessIdentity {
+        ProcessIdentity {
+            cgroup_id,
+            pid: tgid,
+            tgid,
+            command,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::task_owner_identity;
+
+        #[test]
+        fn thread_events_use_the_thread_group_leader_as_process_identity() {
+            let process = task_owner_identity(17, 41, "worker".into());
+
+            assert_eq!(process.cgroup_id, 17);
+            assert_eq!(process.pid, 41);
+            assert_eq!(process.tgid, 41);
+            assert_eq!(process.command, "worker");
+        }
     }
 }
 
