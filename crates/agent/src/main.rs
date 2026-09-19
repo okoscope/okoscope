@@ -134,7 +134,7 @@ mod linux {
         process_runtime::ProcessGenerationStore,
         resource::ResourceSampler,
         syscall::{self, Architecture},
-        task_lifecycle::TaskLifecycleStore,
+        task_lifecycle::{self, TaskLifecycleStore},
     };
     use agent_ebpf_common::KernelEvent;
     use anyhow::{Context, Result};
