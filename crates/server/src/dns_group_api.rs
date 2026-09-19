@@ -430,27 +430,28 @@ WITH scoped AS MATERIALIZED (
         count(DISTINCT canonical_name) exact_name_count,count(DISTINCT suffix_kind) suffix_kind_count
  FROM candidates
  GROUP BY candidate_name,process_command,cluster_id,namespace,pod_uid,container_name
+), corroborating AS MATERIALIZED (
+ SELECT DISTINCT process_command,canonical_name,cluster_id,namespace,pod_uid,container_name
+ FROM scoped
+), selected_candidates AS MATERIALIZED (
+ SELECT DISTINCT ON (c.occurrence_id,c.item_id) c.occurrence_id,c.item_id,c.candidate_name
+ FROM candidates c
+ JOIN candidate_evidence evidence ON evidence.candidate_name=c.candidate_name
+  AND evidence.process_command=c.process_command AND evidence.cluster_id=c.cluster_id
+  AND evidence.namespace=c.namespace AND evidence.pod_uid IS NOT DISTINCT FROM c.pod_uid
+  AND evidence.container_name=c.container_name
+ LEFT JOIN corroborating ON corroborating.process_command=c.process_command
+  AND corroborating.canonical_name=c.candidate_name AND corroborating.cluster_id=c.cluster_id
+  AND corroborating.namespace=c.namespace AND corroborating.pod_uid IS NOT DISTINCT FROM c.pod_uid
+  AND corroborating.container_name=c.container_name
+ WHERE corroborating.canonical_name IS NOT NULL
+    OR (evidence.exact_name_count>=2 AND evidence.suffix_kind_count>=2)
+ ORDER BY c.occurrence_id,c.item_id,length(c.candidate_name) DESC,c.candidate_name
 ), normalized AS MATERIALIZED (
  SELECT s.*,COALESCE(selected.candidate_name,s.canonical_name) display_name
  FROM scoped s
- LEFT JOIN LATERAL (
-  SELECT c.candidate_name
-  FROM candidates c
-  JOIN candidate_evidence evidence ON evidence.candidate_name=c.candidate_name
-   AND evidence.process_command=c.process_command AND evidence.cluster_id=c.cluster_id
-   AND evidence.namespace=c.namespace AND evidence.pod_uid IS NOT DISTINCT FROM c.pod_uid
-   AND evidence.container_name=c.container_name
-  WHERE c.occurrence_id=s.occurrence_id AND c.item_id=s.item_id
-   AND (EXISTS(
-    SELECT 1 FROM scoped corroborating
-    WHERE corroborating.process_command=c.process_command AND corroborating.canonical_name=c.candidate_name
-     AND corroborating.cluster_id=c.cluster_id AND corroborating.namespace=c.namespace
-     AND corroborating.pod_uid IS NOT DISTINCT FROM c.pod_uid
-     AND corroborating.container_name=c.container_name
-   ) OR (evidence.exact_name_count>=2 AND evidence.suffix_kind_count>=2))
-  ORDER BY length(c.candidate_name) DESC,c.candidate_name
-  LIMIT 1
- ) selected ON true
+ LEFT JOIN selected_candidates selected ON selected.occurrence_id=s.occurrence_id
+  AND selected.item_id=s.item_id
 ), groups AS MATERIALIZED (
  SELECT display_name,process_command,CASE WHEN bool_or(display_name<>canonical_name) THEN 'kubernetes_search_expansion' ELSE 'canonical_name' END grouping_reason,
  CASE WHEN bool_or(display_name<>canonical_name) THEN 'high' ELSE 'exact' END confidence,
