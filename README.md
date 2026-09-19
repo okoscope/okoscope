@@ -49,9 +49,8 @@ Task lifecycle specifically uses the BTF tracepoints
 `task_newtask` and `task_rename`; inability to load either hook withholds
 that capability without disabling existing exec, network, DNS, file, resource,
 or Kubernetes lifecycle observation. The production `union` canary matrix is
-Ubuntu 22.04 Linux 5.15.0-138/139-generic and Ubuntu 24.04 Linux
-6.8.0-137-generic; every exact kernel must pass verifier loading before the
-capability is promoted.
+Ubuntu 22.04 Linux 5.15.0-185/187-generic; every exact kernel must pass verifier
+loading before the capability is promoted.
 Application heartbeats expose only lifecycle diagnostics that already have a
 trusted Application route. Pre-route kernel loss, decode failure, and
 attribution failure remain node-local metrics/readiness/log evidence and are

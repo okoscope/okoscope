@@ -37,18 +37,20 @@ and exit CO-RE programs all load and attach. If the verifier or attachment
 rejects any required program, the capability is withheld while existing exec,
 network, DNS, file, resource, and Kubernetes lifecycle observers continue.
 The production `union` canary matrix is Ubuntu 22.04 Linux
-5.15.0-138/139-generic and Ubuntu 24.04 Linux 6.8.0-137-generic. Every exact
+5.15.0-185/187-generic. Every exact
 kernel must pass verifier loading during the production canary.
 
 The implementation uses `tp_btf/task_newtask` for creation and
 `tp_btf/task_rename` for rename, with fixed CO-RE records and bounded ring-buffer
 loss counters. The programs built and the verifier accepted and attached both
 hooks on the local LinuxKit 7.0.12 development kernel; successful load produced
-no verifier rejection log. Decoder fixtures prove leader/non-leader
+no verifier rejection log. The first production canary attached both hooks on
+Ubuntu 22.04 Linux 5.15.0-187-generic without withholding the capability.
+Decoder fixtures prove leader/non-leader
 classification, fixed layouts, malformed-size rejection, bounded UTF-8 command
 handling, and native exit-status decoding. The production `union` inventory is
-Ubuntu 22.04 Linux 5.15.0-138-generic and 5.15.0-139-generic plus Ubuntu 24.04
-Linux 6.8.0-137-generic, all with BTF; those exact kernels remain the rollout
+Ubuntu 22.04 Linux 5.15.0-185-generic and 5.15.0-187-generic, all with BTF;
+those exact kernels remain the rollout
 gate. Failure to load or attach either BTF
 tracepoint withholds the entire `task.lifecycle/v1` capability instead of
 degrading rename accuracy, while existing observers remain enabled.
