@@ -461,6 +461,22 @@ struct InventoryItem {
     group_count: i64,
 }
 
+impl InventoryItem {
+    fn classify_legacy_exit(&mut self) {
+        let Some(summary) = self.semantic_summary.as_object_mut() else {
+            return;
+        };
+        if summary.get("event_kind").and_then(Value::as_str) == Some("process.exit")
+            && !summary.contains_key("classification")
+        {
+            summary.insert(
+                "classification".into(),
+                Value::String("legacy_unclassified".into()),
+            );
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct InventoryItemPage {
     coverage: crate::runtime_retention::history::Coverage,
@@ -482,6 +498,16 @@ struct KindAggregate {
     occurrence_count: i64,
     first_seen_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
+    process_start_count: i64,
+    process_exec_count: i64,
+    process_exit_count: i64,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ProcessLifecycleCounts {
+    created: i64,
+    executed: i64,
+    terminated: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -493,6 +519,7 @@ struct InventorySummary {
     first_seen_at: Option<DateTime<Utc>>,
     last_seen_at: Option<DateTime<Utc>>,
     kinds: Vec<KindCount>,
+    process_lifecycle: ProcessLifecycleCounts,
 }
 
 #[derive(Debug, Serialize)]
@@ -945,7 +972,7 @@ async fn summary(
     let version = CURRENT_INVENTORY_IDENTITY_VERSION.get();
     let search = scope.search_pattern();
     let rows: Vec<KindAggregate> =
-        sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
+        sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.start'),0)::bigint process_start_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.inventory_kind='process'),0)::bigint process_exec_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.exit'),0)::bigint process_exit_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
             .bind(principal.organization_id).bind(project_id).bind(application_id).bind(version)
             .bind(scope.release_id).bind(scope.cluster_id).bind(scope.namespace.as_deref()).bind(scope.workload_kind.as_deref()).bind(scope.workload_name.as_deref()).bind(scope.container_name.as_deref()).bind(scope.observed_from).bind(scope.observed_to).bind(scope.operation.as_deref()).bind(search.as_deref())
             .fetch_all(&state.pool).await?;
@@ -967,7 +994,11 @@ async fn summary(
     .collect();
     let mut first_seen_at: Option<DateTime<Utc>> = None;
     let mut last_seen_at: Option<DateTime<Utc>> = None;
+    let mut process_lifecycle = ProcessLifecycleCounts::default();
     for row in rows {
+        process_lifecycle.created += row.process_start_count;
+        process_lifecycle.executed += row.process_exec_count;
+        process_lifecycle.terminated += row.process_exit_count;
         let kind = kinds
             .iter_mut()
             .find(|kind| kind.kind == row.kind)
@@ -1002,6 +1033,7 @@ async fn summary(
         first_seen_at,
         last_seen_at,
         kinds,
+        process_lifecycle,
     }))
 }
 
@@ -1341,6 +1373,9 @@ async fn list_items(
     .bind(crate::policy::POLICY_EVALUATOR_VERSION)
     .bind(cursor_time).bind(cursor_id).bind(limit + 1)
     .fetch_all(&state.pool).await?;
+    for item in &mut items {
+        item.classify_legacy_exit();
+    }
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items.last().map(|item| item.id)
@@ -1369,9 +1404,11 @@ async fn fetch_item(
     application_id: Uuid,
     item_id: Uuid,
 ) -> Result<InventoryItem, InventoryApiError> {
-    sqlx::query_as::<_, InventoryItem>("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND i.identity_version=$5")
+    let mut item = sqlx::query_as::<_, InventoryItem>("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND i.identity_version=$5")
         .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-        .fetch_optional(&state.pool).await?.ok_or(InventoryApiError::NotFound)
+        .fetch_optional(&state.pool).await?.ok_or(InventoryApiError::NotFound)?;
+    item.classify_legacy_exit();
+    Ok(item)
 }
 
 async fn item_detail(

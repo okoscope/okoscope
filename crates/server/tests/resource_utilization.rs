@@ -9,6 +9,7 @@ use server::{
     auth::{SESSION_COOKIE, SessionScope, SessionToken},
     bootstrap::{BootstrapConfig, BootstrapIds, bootstrap},
     resources::{PersistResourceOutcome, cleanup_project, persist_resource_aggregate},
+    thread_activity_api,
 };
 use sqlx::Row;
 use tower::ServiceExt;
@@ -32,6 +33,124 @@ fn config() -> BootstrapConfig {
         cluster_credential: format!("cluster-{suffix}"),
         api_credential: format!("api-{suffix}"),
     }
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn thread_activity_api_is_scoped_paginated_reconciled_and_strict(pool: sqlx::PgPool) {
+    let ids = bootstrap(&pool, &config()).await.unwrap();
+    let foreign = bootstrap(&pool, &config()).await.unwrap();
+    let token = owner_session(&pool, &ids).await;
+    let agent_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'thread-api-node','test')")
+        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    let epoch = Uuid::new_v4();
+    let base = Utc::now()
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap()
+        - Duration::minutes(3);
+    for offset in 0..3_i64 {
+        sqlx::query("INSERT INTO thread_activity_windows(id,organization_id,project_id,application_id,cluster_id,agent_id,observed_at,process_cgroup_id,process_pid,process_tgid,process_command,process_generation,observation_epoch,start_observed,window_started_at,window_ended_at,created_count,exited_count,active_at_start,active_at_end,peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps) VALUES($1,$2,$3,$4,$5,$6,$7,7,10,10,'app',1,$8,true,$9,$10,2,1,$11,$12,$13,'observed',true,0,$14,'[]'::jsonb)")
+            .bind(Uuid::new_v4()).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
+            .bind(ids.cluster_id).bind(agent_id).bind(base + Duration::minutes(offset + 1)).bind(epoch)
+            .bind(base + Duration::minutes(offset)).bind(base + Duration::minutes(offset + 1))
+            .bind(offset + 1).bind(offset + 2).bind(offset + 3)
+            .bind(serde_json::json!([{"name":"worker","created":2,"exited":1,"active":offset + 2}]))
+            .execute(&pool).await.unwrap();
+    }
+    let app = thread_activity_api::router(pool.clone());
+    let from = base.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let to = (base + Duration::minutes(3)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let uri = format!(
+        "/api/v1/projects/{}/applications/{}/thread-activity?from={}&to={}&limit=2",
+        ids.project_id, ids.application_id, from, to
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header(COOKIE, format!("{SESSION_COOKIE}={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert!(page["next_cursor"].is_string());
+    let summary_uri = format!(
+        "/api/v1/projects/{}/applications/{}/thread-activity/summary?from={}&to={}",
+        ids.project_id, ids.application_id, from, to
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(summary_uri)
+                .header(COOKIE, format!("{SESSION_COOKIE}={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            summary["window_count"].as_i64(),
+            summary["created"].as_i64(),
+            summary["exited"].as_i64()
+        ),
+        (Some(3), Some(6), Some(3))
+    );
+    let malformed = format!(
+        "/api/v1/projects/{}/applications/{}/thread-activity?process_generation=1",
+        ids.project_id, ids.application_id
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(malformed)
+                    .header(COOKIE, format!("{SESSION_COOKIE}={token}"))
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let foreign_uri = format!(
+        "/api/v1/projects/{}/applications/{}/thread-activity",
+        ids.project_id, foreign.application_id
+    );
+    assert_eq!(
+        app.oneshot(
+            Request::builder()
+                .uri(foreign_uri)
+                .header(COOKIE, format!("{SESSION_COOKIE}={token}"))
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 fn aggregate(id: Uuid) -> ResourceAggregate {

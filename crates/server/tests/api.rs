@@ -64,6 +64,7 @@ fn event(project_id: Uuid, application_id: Uuid) -> RuntimeEvent {
         payload: EventPayload::ProcessExec(ProcessExec {
             executable: "/bin/sh".into(),
             parent_command: None,
+            generation: None,
         }),
     }
 }

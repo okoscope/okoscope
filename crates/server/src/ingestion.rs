@@ -25,6 +25,8 @@ pub enum IngestionError {
     RevokedCredential,
     #[error("event cgroup ID exceeds PostgreSQL signed integer range")]
     CgroupOverflow,
+    #[error("lifecycle counter exceeds PostgreSQL signed integer range")]
+    LifecycleCounterOverflow,
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("event payload serialization failed: {0}")]
@@ -153,6 +155,9 @@ async fn persist_event(
     if !owned {
         return Err(IngestionError::InvalidOwnership);
     }
+    if let EventPayload::ThreadActivityWindow(window) = &event.payload {
+        return persist_thread_window(tx, context, event, window).await;
+    }
     let release_id = resolve_release(tx, context, event).await?;
     crate::metrics::record_release_attribution(
         event.attribution.release.is_some() || event.attribution.release_identity.is_some(),
@@ -227,6 +232,59 @@ async fn persist_event(
     .await?;
     record_event_metrics(event, grouping.group_created);
     Ok(1)
+}
+
+async fn persist_thread_window(
+    tx: &mut Transaction<'_, Postgres>,
+    context: IngestionContext,
+    event: &RuntimeEvent,
+    window: &event_model::ThreadActivityWindow,
+) -> Result<u32, IngestionError> {
+    window
+        .validate()
+        .map_err(|_| IngestionError::InvalidTermination)?;
+    let signed =
+        |value: u64| i64::try_from(value).map_err(|_| IngestionError::LifecycleCounterOverflow);
+    let cgroup_id = signed(event.process.cgroup_id)?;
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO thread_activity_windows (id,organization_id,project_id,application_id,cluster_id,agent_id,observed_at,process_cgroup_id,process_pid,process_tgid,process_command,process_generation,observation_epoch,start_observed,window_started_at,window_ended_at,created_count,exited_count,active_at_start,active_at_end,peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) ON CONFLICT (id) DO NOTHING RETURNING id",
+    )
+    .bind(window.id)
+    .bind(context.scope.organization_id)
+    .bind(event.attribution.project_id)
+    .bind(event.attribution.application_id)
+    .bind(context.scope.cluster_id)
+    .bind(context.agent_id)
+    .bind(event.observed_at)
+    .bind(cgroup_id)
+    .bind(i64::from(event.process.pid))
+    .bind(i64::from(event.process.tgid))
+    .bind(&event.process.command)
+    .bind(signed(window.generation.generation)?)
+    .bind(window.generation.observation_epoch)
+    .bind(window.generation.start_observed)
+    .bind(window.window_started_at)
+    .bind(window.window_ended_at)
+    .bind(signed(window.created)?)
+    .bind(signed(window.exited)?)
+    .bind(signed(window.active_at_start)?)
+    .bind(signed(window.active_at_end)?)
+    .bind(signed(window.peak_active)?)
+    .bind(match window.baseline_provenance {
+        event_model::BaselineProvenance::Observed => "observed",
+        event_model::BaselineProvenance::Snapshot => "snapshot",
+        event_model::BaselineProvenance::Unavailable => "unavailable",
+    })
+    .bind(window.baseline_complete)
+    .bind(signed(window.name_overflow)?)
+    .bind(to_value(&window.names)?)
+    .bind(to_value(&window.gaps)?)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if inserted.is_none() {
+        crate::metrics::record_duplicate_event();
+    }
+    Ok(u32::from(inserted.is_some()))
 }
 
 fn record_event_metrics(event: &RuntimeEvent, group_created: bool) {
@@ -325,7 +383,9 @@ fn validate_dns_event(event: &RuntimeEvent) -> Result<(), IngestionError> {
             .dns_context
             .as_ref()
             .is_none_or(|context| context.validate().is_ok()),
-        EventPayload::ProcessExec(_)
+        EventPayload::ProcessStart(_)
+        | EventPayload::ThreadActivityWindow(_)
+        | EventPayload::ProcessExec(_)
         | EventPayload::Syscall(_)
         | EventPayload::NetworkListen(_)
         | EventPayload::NetworkAccept(_)
@@ -345,6 +405,8 @@ fn validate_termination_event(event: &RuntimeEvent) -> Result<(), IngestionError
     use event_model::{EvidenceSource, GenerationCorrelation, ProcessTermination};
 
     let valid = match &event.payload {
+        EventPayload::ProcessStart(value) => value.validate().is_ok(),
+        EventPayload::ThreadActivityWindow(value) => value.validate().is_ok(),
         EventPayload::ProcessExit(value) => {
             let termination_valid = match &value.termination {
                 ProcessTermination::Exited { status } => {

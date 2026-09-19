@@ -11,6 +11,14 @@ pub struct ApplicationCounters {
     pub correlation: AtomicU64,
     pub delivery_retry: AtomicU64,
     pub unsupported: AtomicU64,
+    pub lifecycle_output_dropped: AtomicU64,
+    pub lifecycle_generation_miss: AtomicU64,
+    pub lifecycle_snapshot_failed: AtomicU64,
+    pub lifecycle_snapshot_truncated: AtomicU64,
+    pub lifecycle_rename_miss: AtomicU64,
+    pub lifecycle_name_overflow: AtomicU64,
+    pub lifecycle_incomplete_window: AtomicU64,
+    pub lifecycle_delivery_gap: AtomicU64,
 }
 
 impl ApplicationCounters {
@@ -27,7 +35,37 @@ impl ApplicationCounters {
             correlation: load(&self.correlation),
             delivery_retry: load(&self.delivery_retry),
             unsupported: load(&self.unsupported),
+            lifecycle: Some(protocol::v1::LifecycleDiagnosticSnapshot {
+                output_dropped: load(&self.lifecycle_output_dropped),
+                generation_miss: load(&self.lifecycle_generation_miss),
+                snapshot_failed: load(&self.lifecycle_snapshot_failed),
+                snapshot_truncated: load(&self.lifecycle_snapshot_truncated),
+                rename_miss: load(&self.lifecycle_rename_miss),
+                name_overflow: load(&self.lifecycle_name_overflow),
+                incomplete_window: load(&self.lifecycle_incomplete_window),
+                delivery_gap: load(&self.lifecycle_delivery_gap),
+            }),
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn route_lifecycle_counters_are_unlabeled_and_additive() {
+        let counters = ApplicationCounters::default();
+        counters
+            .lifecycle_name_overflow
+            .fetch_add(3, Ordering::Relaxed);
+        counters
+            .lifecycle_incomplete_window
+            .fetch_add(1, Ordering::Relaxed);
+        let lifecycle = counters.snapshot().lifecycle.unwrap();
+        assert_eq!(lifecycle.name_overflow, 3);
+        assert_eq!(lifecycle.incomplete_window, 1);
+        assert_eq!(lifecycle.snapshot_failed, 0);
     }
 }
 

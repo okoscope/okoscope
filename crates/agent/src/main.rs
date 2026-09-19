@@ -23,6 +23,7 @@ mod handshake {
         let mut capabilities = config.observation.capabilities();
         if process_exit_ready {
             capabilities.push(protocol::PROCESS_EXIT_CAPABILITY.into());
+            capabilities.push(protocol::TASK_LIFECYCLE_CAPABILITY.into());
         }
         if container_lifecycle_ready {
             capabilities.push(protocol::CONTAINER_LIFECYCLE_CAPABILITY.into());
@@ -133,6 +134,7 @@ mod linux {
         process_runtime::ProcessGenerationStore,
         resource::ResourceSampler,
         syscall::{self, Architecture},
+        task_lifecycle::TaskLifecycleStore,
     };
     use agent_ebpf_common::KernelEvent;
     use anyhow::{Context, Result};
@@ -221,6 +223,7 @@ mod linux {
         let mut dns_processor = DnsProcessor::new(&config.observation.network.dns);
         let mut file_aggregator = FileModifyAggregator::default();
         let mut process_generations = ProcessGenerationStore::new(8192);
+        let mut task_lifecycle = TaskLifecycleStore::new(8192);
         let hello = hello(
             &config,
             &counters.snapshot(),
@@ -351,12 +354,12 @@ mod linux {
                         }
                     }
                     while let Some(kernel) = observer.next_event()? {
-                        let Some(event) = runtime_event(&kernel, architecture, &mut cgroup_resolver, &cache, &counters, &config, &mut dns_processor) else { continue };
-                        if let EventPayload::ProcessExec(exec) = &event.payload {
-                            process_generations.observe_exec(
-                                kernel.pid_tgid, kernel.cgroup_id, kernel.timestamp_ns,
+                        let Some(mut event) = runtime_event(&kernel, architecture, &mut cgroup_resolver, &cache, &counters, &config, &mut dns_processor) else { continue };
+                        if let EventPayload::ProcessExec(exec) = &mut event.payload {
+                            exec.generation = Some(process_generations.observe_exec(
+                                kernel.cgroup_id, event.process.tgid, kernel.timestamp_ns,
                                 event.id, exec.executable.clone(),
-                            );
+                            ));
                         }
                         if rate_limiter.allow() {
                             streams.route(event);
@@ -365,12 +368,47 @@ mod linux {
                             counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    while let Some(decoded) = observer.next_task_creation() {
+                        let Ok(decoded) = decoded else {
+                            counters.decode_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
+                        observe_task_creation(
+                            decoded, &mut task_lifecycle, &mut cgroup_resolver, &cache,
+                            &counters, &config, &streams, &mut rate_limiter,
+                            &mut process_generations,
+                        );
+                    }
+                    while let Some(decoded) = observer.next_task_rename() {
+                        let Ok(decoded) = decoded else {
+                            counters.decode_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
+                        task_lifecycle.observe_rename(
+                            decoded.kernel.tgid,
+                            decoded.kernel.pid,
+                            decoded.kernel.timestamp_ns,
+                            decoded.command,
+                        );
+                    }
                     while let Some(decoded) = observer.next_exit_event() {
                         let Ok(decoded) = decoded else {
                             counters.decode_failed.fetch_add(1, Ordering::Relaxed);
                             counters.exit_decode_failed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
+                        let pid = u32::try_from(decoded.kernel.pid_tgid & u64::from(u32::MAX)).unwrap_or(0);
+                        let tgid = u32::try_from(decoded.kernel.pid_tgid >> 32).unwrap_or(0);
+                        if pid != tgid {
+                            task_lifecycle.observe_thread_exit(
+                                decoded.kernel.cgroup_id,
+                                tgid,
+                                pid,
+                                decoded.kernel.timestamp_ns,
+                            );
+                            continue;
+                        }
+                        task_lifecycle.observe_process_exit(decoded.kernel.cgroup_id, tgid);
                         let Some(event) = runtime_exit_event(
                             decoded, &mut process_generations, &mut cgroup_resolver,
                             &cache, &counters, &config,
@@ -390,6 +428,10 @@ mod linux {
                     counters.update_dns_kernel(observer.dns_kernel_counters()?);
                     counters.update_file_kernel(observer.file_kernel_counters()?);
                     counters.update_exit_kernel(observer.exit_kernel_counters()?);
+                    for event in task_lifecycle.flush_due(Utc::now()) {
+                        if rate_limiter.allow() { streams.route(event); }
+                        else { counters.capacity_dropped.fetch_add(1, Ordering::Relaxed); }
+                    }
                     let snapshot = counters.snapshot();
                     tracing::info!(?snapshot, "agent status");
                 }
@@ -522,6 +564,7 @@ mod linux {
             EventPayload::ProcessExec(ProcessExec {
                 executable,
                 parent_command: None,
+                generation: None,
             })
         } else if kernel.event_kind == agent_ebpf_common::EVENT_KIND_SYSCALL {
             let Some(name) = syscall::name_for_number(kernel.syscall_id, architecture) else {
@@ -555,6 +598,86 @@ mod linux {
             },
             payload,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_task_creation(
+        decoded: agent::kernel_event::DecodedTaskCreation,
+        task_lifecycle: &mut TaskLifecycleStore,
+        cgroup_resolver: &mut cgroup::CgroupResolver,
+        cache: &AttributionCache,
+        counters: &Counters,
+        config: &AgentConfig,
+        streams: &ApplicationStreams,
+        rate_limiter: &mut EventRateLimiter,
+        process_generations: &mut ProcessGenerationStore,
+    ) {
+        let kernel = decoded.kernel;
+        let container = cgroup_resolver
+            .resolve(kernel.child_pid, kernel.cgroup_id)
+            .ok();
+        let Some(attribution) = resolve_and_count(
+            cache,
+            counters,
+            container.as_deref(),
+            &config.identity.node_name,
+            &config.scope.workloads,
+        ) else {
+            return;
+        };
+        let child_command = decoded.child_command;
+        let process = ProcessIdentity {
+            cgroup_id: kernel.cgroup_id,
+            pid: kernel.child_pid,
+            tgid: kernel.child_tgid,
+            command: child_command.clone(),
+        };
+        let observed_at = Utc::now();
+        if kernel.child_pid == kernel.child_tgid {
+            let generation = process_generations.observe_start(
+                kernel.cgroup_id,
+                kernel.child_tgid,
+                kernel.timestamp_ns,
+            );
+            let start = event_model::ProcessStart {
+                generation,
+                parent_pid: kernel.parent_pid,
+                parent_tgid: kernel.parent_tgid,
+                parent_command: decoded.parent_command,
+            };
+            if let Some(event) =
+                task_lifecycle.observe_process_start(observed_at, attribution, process, start)
+            {
+                if rate_limiter.allow() {
+                    streams.route(event);
+                } else {
+                    counters.capacity_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        } else {
+            let generation = process_generations.ensure_generation(
+                kernel.cgroup_id,
+                kernel.child_tgid,
+                kernel.timestamp_ns,
+            );
+            task_lifecycle.bootstrap_process(
+                observed_at,
+                attribution.clone(),
+                &process,
+                generation.clone(),
+            );
+            task_lifecycle.observe_thread_start(
+                observed_at,
+                attribution,
+                process,
+                generation,
+                task_lifecycle::TaskStart {
+                    tid: kernel.child_pid,
+                    observed_at_ns: kernel.timestamp_ns,
+                    name: child_command,
+                },
+            );
+        }
     }
 
     fn runtime_inbound_event(
@@ -690,11 +813,9 @@ mod linux {
                 .fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        let correlation = process_generations.consume_exit(
-            kernel.pid_tgid,
-            kernel.cgroup_id,
-            kernel.timestamp_ns,
-        );
+        let consumed =
+            process_generations.consume_exit(kernel.cgroup_id, tgid, kernel.timestamp_ns);
+        let correlation = consumed.correlation;
         if let GenerationCorrelation::Unresolved { reason } = &correlation {
             match reason {
                 UnresolvedGenerationReason::BeforeObservation => counters
@@ -711,6 +832,14 @@ mod linux {
                     .fetch_add(1, Ordering::Relaxed),
             };
         }
+        let mut exit = ProcessExit::classified_leader(
+            kernel.raw_wait_status,
+            decoded.termination,
+            correlation,
+        );
+        if let Some(generation) = consumed.identity {
+            exit = exit.with_generation(generation);
+        }
         Some(RuntimeEvent {
             id: Uuid::new_v4(),
             observed_at: Utc::now(),
@@ -722,11 +851,7 @@ mod linux {
                 tgid,
                 command: command(&kernel.command),
             },
-            payload: EventPayload::ProcessExit(ProcessExit::new(
-                kernel.raw_wait_status,
-                decoded.termination,
-                correlation,
-            )),
+            payload: EventPayload::ProcessExit(exit),
         })
     }
 

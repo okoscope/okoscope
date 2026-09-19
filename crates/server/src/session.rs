@@ -52,8 +52,42 @@ fn agent_capabilities(hello: &AgentHello) -> AgentCapabilities {
         mask: u8::from(has(protocol::FILE_ACTIVITY_CAPABILITY))
             | u8::from(has(protocol::KUBERNETES_RELEASE_DISCOVERY_CAPABILITY)) << 1
             | u8::from(has(protocol::ONBOARDING_STATUS_CAPABILITY)) << 2
-            | u8::from(has(protocol::RESOURCE_UTILIZATION_CAPABILITY)) << 3,
+            | u8::from(has(protocol::RESOURCE_UTILIZATION_CAPABILITY)) << 3
+            | u8::from(has(protocol::TASK_LIFECYCLE_CAPABILITY)) << 4,
     }
+}
+
+fn validate_event_capabilities(
+    capabilities: AgentCapabilities,
+    events: &[event_model::RuntimeEvent],
+) -> Result<(), Status> {
+    let requires_files = events.iter().any(|event| {
+        matches!(
+            event.payload,
+            event_model::EventPayload::FileCreate(_)
+                | event_model::EventPayload::FileModify(_)
+                | event_model::EventPayload::FileDelete(_)
+                | event_model::EventPayload::FileRename(_)
+        )
+    });
+    if !capabilities.has(1) && requires_files {
+        return Err(Status::failed_precondition(
+            "file activity event requires file.activity.syscall-path/v1 capability",
+        ));
+    }
+    let requires_lifecycle = events.iter().any(|event| {
+        matches!(
+            event.payload,
+            event_model::EventPayload::ProcessStart(_)
+                | event_model::EventPayload::ThreadActivityWindow(_)
+        )
+    });
+    if !capabilities.has(1 << 4) && requires_lifecycle {
+        return Err(Status::failed_precondition(
+            "task lifecycle evidence requires task.lifecycle/v1 capability",
+        ));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -104,13 +138,7 @@ impl AgentService for AgentSessionService {
                     match message.message {
                         Some(agent_message::Message::EventBatch(batch)) => {
                             let mut events = batch.events.into_iter().map(event_model::RuntimeEvent::try_from).collect::<Result<Vec<_>, _>>().map_err(|error| Status::invalid_argument(error.to_string()))?;
-                            if !capabilities.has(1) && events.iter().any(|event| matches!(event.payload,
-                                event_model::EventPayload::FileCreate(_)
-                                | event_model::EventPayload::FileModify(_)
-                                | event_model::EventPayload::FileDelete(_)
-                                | event_model::EventPayload::FileRename(_))) {
-                                return Err(Status::failed_precondition("file activity event requires file.activity.syscall-path/v1 capability"));
-                            }
+                            validate_event_capabilities(capabilities, &events)?;
                             let (accepted, retention_expired_events) = persist_application_batch_outcome(&pool, scope, application_scope, agent_id, &mut events).await.map_err(|error| match error {
                                 crate::ingestion::IngestionError::RevokedCredential => Status::unauthenticated("application credential was revoked"),
                                 other => internal(other),

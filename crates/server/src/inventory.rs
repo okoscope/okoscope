@@ -85,6 +85,8 @@ pub enum InventoryFingerprintError {
     InvalidIdentityVersion,
     #[error("inventory fingerprint field {0} must not be empty")]
     EmptyField(&'static str),
+    #[error("event kind is not eligible for inventory identity")]
+    UnsupportedEventKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +289,24 @@ fn fingerprint_with_version(
     encoder.field(scope.application_id.as_bytes());
 
     let (kind, semantic_summary) = match &event.payload {
+        EventPayload::ThreadActivityWindow(_) => {
+            return Err(InventoryFingerprintError::UnsupportedEventKind);
+        }
+        EventPayload::ProcessStart(start) => {
+            let command = required("process_command", &event.process.command)?;
+            encoder.field(InventoryKind::Lifecycle.as_str().as_bytes());
+            encoder.field(b"process.start");
+            encoder.field(command.as_bytes());
+            (
+                InventoryKind::Lifecycle,
+                json!({
+                    "event_kind": "process.start",
+                    "process_command": command,
+                    "source": "kernel",
+                    "start_observed": start.generation.start_observed
+                }),
+            )
+        }
         EventPayload::ProcessExec(process) => {
             let executable = required("executable", &process.executable)?;
             encoder.field(InventoryKind::Process.as_str().as_bytes());
@@ -406,7 +426,7 @@ fn fingerprint_with_version(
             };
             (
                 InventoryKind::Lifecycle,
-                json!({"event_kind":"process.exit","identity":identity,"termination":termination,"evidence_source":value.source}),
+                json!({"event_kind":"process.exit","identity":identity,"termination":termination,"evidence_source":value.source,"classification":value.classification}),
             )
         }
         EventPayload::ContainerTermination(value) => {
@@ -620,6 +640,7 @@ mod tests {
         let first = event(EventPayload::ProcessExec(ProcessExec {
             executable: "/app/payments".into(),
             parent_command: None,
+            generation: None,
         }));
         let mut rolled = first.clone();
         rolled.attribution.namespace = "payments-canary".into();
