@@ -133,9 +133,9 @@ int okoscope_task_create(struct bpf_raw_tracepoint_args *ctx)
     record.parent_pid = __builtin_preserve_access_index(parent->pid);
     record.parent_tgid = __builtin_preserve_access_index(parent->tgid);
     bpf_probe_read_kernel(record.child_command, sizeof(record.child_command),
-                          __builtin_preserve_access_index(child->comm));
+                          __builtin_preserve_access_index(&child->comm));
     bpf_probe_read_kernel(record.parent_command, sizeof(record.parent_command),
-                          __builtin_preserve_access_index(parent->comm));
+                          __builtin_preserve_access_index(&parent->comm));
     if (bpf_ringbuf_output(&TASK_CREATION_EVENTS, &record, sizeof(record), 0))
         count_lost(0);
     return 0;
