@@ -2,7 +2,7 @@ use std::{fs::File, path::Path};
 
 use anyhow::{Context, Result};
 use aya::{
-    Ebpf, EbpfLoader,
+    Btf, Ebpf, EbpfLoader,
     maps::{HashMap, PerCpuArray, RingBuf},
     programs::{
         BtfTracePoint, CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, KProbe, TracePoint,
@@ -234,8 +234,14 @@ impl Observer {
             "sched",
             "sched_process_exit",
         )?;
-        attach_btf_tracepoint(&mut ebpf, "okoscope_task_create", "sched_process_fork")?;
-        attach_btf_tracepoint(&mut ebpf, "okoscope_task_rename", "task_rename")?;
+        let btf = Btf::from_sys_fs().context("load kernel BTF from sysfs")?;
+        attach_btf_tracepoint(
+            &mut ebpf,
+            &btf,
+            "okoscope_task_create",
+            "sched_process_fork",
+        )?;
+        attach_btf_tracepoint(&mut ebpf, &btf, "okoscope_task_rename", "task_rename")?;
         let events = RingBuf::try_from(
             ebpf.take_map("EXIT_EVENTS")
                 .context("missing EXIT_EVENTS ring buffer")?,
@@ -449,16 +455,21 @@ fn attach(ebpf: &mut Ebpf, program_name: &str, category: &str, event: &str) -> R
     Ok(())
 }
 
-fn attach_btf_tracepoint(ebpf: &mut Ebpf, program_name: &str, event: &str) -> Result<()> {
+fn attach_btf_tracepoint(
+    ebpf: &mut Ebpf,
+    btf: &Btf,
+    program_name: &str,
+    event: &str,
+) -> Result<()> {
     let program: &mut BtfTracePoint = ebpf
         .program_mut(program_name)
         .with_context(|| format!("missing {program_name} program"))?
         .try_into()?;
     program
-        .load()
+        .load(event, btf)
         .with_context(|| format!("load {program_name}"))?;
     program
-        .attach(event)
+        .attach()
         .with_context(|| format!("attach {program_name} to BTF tracepoint {event}"))?;
     Ok(())
 }
