@@ -30,7 +30,9 @@ deduplicated into at most 64 normal buckets; additional unseen names use the
 closed `other` bucket and increment an overflow counter. A rename moves a live
 task between current-name buckets without changing the process-level active
 total. Names and counters do not create Runtime Groups, policies, suppressions,
-or executable inventory identities.
+or executable inventory identities. When a process leader exits, the agent
+retains its final aggregate until the fixed window closes, delivers it once,
+and then releases the process state.
 
 The agent advertises `task.lifecycle/v1` only after its task-creation, rename,
 and exit CO-RE programs all load and attach. If the verifier or attachment

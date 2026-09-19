@@ -40,6 +40,9 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - Thread lifecycle windows now identify their owning thread-group leader as
   the process, so valid non-leader activity passes server validation instead of
   being retried with a thread ID in the process identity.
+- A leader exit now retains its final bounded thread window until the fixed
+  window boundary, preventing short-lived process thread activity from being
+  discarded before delivery.
 
 ### Upgrade notes
 
