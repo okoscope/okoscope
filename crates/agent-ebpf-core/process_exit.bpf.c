@@ -117,11 +117,11 @@ static void count_lost(__u32 index)
         __sync_fetch_and_add(lost, 1);
 }
 
-SEC("tp_btf/sched_process_fork")
+SEC("tp_btf/task_newtask")
 int okoscope_task_create(struct bpf_raw_tracepoint_args *ctx)
 {
-    struct task_struct *parent = (struct task_struct *)ctx->args[0];
-    struct task_struct *child = (struct task_struct *)ctx->args[1];
+    struct task_struct *child = (struct task_struct *)ctx->args[0];
+    struct task_struct *parent = bpf_get_current_task_btf();
     struct task_creation_event record = {};
 
     if (!parent || !child)

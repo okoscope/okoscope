@@ -200,7 +200,10 @@ mod linux {
             match observer.enable_process_exit(&args.process_exit_ebpf_object) {
                 Ok(()) => true,
                 Err(error) => {
-                    tracing::warn!(%error, "process exit observation unavailable; capability withheld");
+                    tracing::warn!(
+                        ?error,
+                        "process exit observation unavailable; capability withheld"
+                    );
                     counters.unsupported.fetch_add(1, Ordering::Relaxed);
                     false
                 }

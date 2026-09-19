@@ -10,6 +10,9 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Added
 
+- Process and thread creation uses the broadly available `task_newtask` BTF
+  tracepoint on the supported kernel matrix, and degraded-capability logs retain
+  the complete loader error chain.
 - Agents can independently advertise `task.lifecycle/v1` and report process
   creation separately from executable replacement and leader termination.
   Non-leader task activity is retained as bounded, replay-safe 60-second
