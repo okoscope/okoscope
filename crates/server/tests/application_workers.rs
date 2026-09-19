@@ -64,6 +64,7 @@ fn event(project_id: Uuid, application_id: Uuid, node_name: &str, offset: i64) -
         payload: EventPayload::ProcessExec(ProcessExec {
             executable: "/app".into(),
             parent_command: None,
+            generation: None,
         }),
     }
 }

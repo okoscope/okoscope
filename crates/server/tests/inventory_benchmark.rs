@@ -102,6 +102,7 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
             payload: EventPayload::ProcessExec(ProcessExec {
                 executable: format!("/app/bin/{}", index % ITEM_COUNT),
                 parent_command: None,
+                generation: None,
             }),
         })
         .collect();

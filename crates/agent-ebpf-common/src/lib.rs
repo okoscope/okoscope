@@ -65,6 +65,9 @@ pub const FILE_COUNTER_KERNEL_LOST: u32 = 8;
 pub const FILE_COUNTER_COUNT: u32 = 9;
 pub const EXIT_COUNTER_RING_LOST: u32 = 0;
 pub const EXIT_COUNTER_COUNT: u32 = 1;
+pub const TASK_COUNTER_CREATION_RING_LOST: u32 = 0;
+pub const TASK_COUNTER_RENAME_RING_LOST: u32 = 1;
+pub const TASK_COUNTER_COUNT: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +104,38 @@ pub struct ExitKernelEvent {
 }
 
 impl ExitKernelEvent {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Fixed kernel/userspace ABI emitted when the kernel creates a Linux task.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskCreationEvent {
+    pub timestamp_ns: u64,
+    pub cgroup_id: u64,
+    pub child_pid: u32,
+    pub child_tgid: u32,
+    pub parent_pid: u32,
+    pub parent_tgid: u32,
+    pub child_command: [u8; COMMAND_LEN],
+    pub parent_command: [u8; COMMAND_LEN],
+}
+
+impl TaskCreationEvent {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Fixed kernel/userspace ABI emitted when a Linux task changes its comm.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskRenameEvent {
+    pub timestamp_ns: u64,
+    pub pid: u32,
+    pub tgid: u32,
+    pub command: [u8; COMMAND_LEN],
+}
+
+impl TaskRenameEvent {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
@@ -279,6 +314,13 @@ const _: [(); 48] = [(); core::mem::size_of::<ExitKernelEvent>()];
 const _: [(); 8] = [(); core::mem::align_of::<ExitKernelEvent>()];
 const _: [(); 24] = [(); core::mem::offset_of!(ExitKernelEvent, raw_wait_status)];
 const _: [(); 32] = [(); core::mem::offset_of!(ExitKernelEvent, command)];
+const _: [(); 64] = [(); core::mem::size_of::<TaskCreationEvent>()];
+const _: [(); 8] = [(); core::mem::align_of::<TaskCreationEvent>()];
+const _: [(); 16] = [(); core::mem::offset_of!(TaskCreationEvent, child_pid)];
+const _: [(); 32] = [(); core::mem::offset_of!(TaskCreationEvent, child_command)];
+const _: [(); 32] = [(); core::mem::size_of::<TaskRenameEvent>()];
+const _: [(); 8] = [(); core::mem::align_of::<TaskRenameEvent>()];
+const _: [(); 16] = [(); core::mem::offset_of!(TaskRenameEvent, command)];
 const _: [(); 64] = [(); core::mem::size_of::<PendingConnect>()];
 const _: [(); 48] = [(); core::mem::size_of::<InboundEndpoints>()];
 const _: [(); 80] = [(); core::mem::size_of::<InboundKernelEvent>()];

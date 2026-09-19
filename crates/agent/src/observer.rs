@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use aya::{
     Ebpf, EbpfLoader,
     maps::{HashMap, PerCpuArray, RingBuf},
-    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, KProbe, TracePoint},
+    programs::{
+        BtfTracePoint, CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, KProbe, TracePoint,
+    },
 };
 
 use crate::{
@@ -33,6 +35,9 @@ struct ExitObserver {
     _ebpf: Ebpf,
     events: RingBuf<aya::maps::MapData>,
     counters: PerCpuArray<aya::maps::MapData, u64>,
+    creation_events: RingBuf<aya::maps::MapData>,
+    rename_events: RingBuf<aya::maps::MapData>,
+    lifecycle_counters: PerCpuArray<aya::maps::MapData, u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +234,8 @@ impl Observer {
             "sched",
             "sched_process_exit",
         )?;
+        attach_btf_tracepoint(&mut ebpf, "okoscope_task_create", "sched_process_fork")?;
+        attach_btf_tracepoint(&mut ebpf, "okoscope_task_rename", "task_rename")?;
         let events = RingBuf::try_from(
             ebpf.take_map("EXIT_EVENTS")
                 .context("missing EXIT_EVENTS ring buffer")?,
@@ -237,10 +244,25 @@ impl Observer {
             ebpf.take_map("EXIT_COUNTERS")
                 .context("missing EXIT_COUNTERS map")?,
         )?;
+        let creation_events = RingBuf::try_from(
+            ebpf.take_map("TASK_CREATION_EVENTS")
+                .context("missing TASK_CREATION_EVENTS ring buffer")?,
+        )?;
+        let rename_events = RingBuf::try_from(
+            ebpf.take_map("TASK_RENAME_EVENTS")
+                .context("missing TASK_RENAME_EVENTS ring buffer")?,
+        )?;
+        let lifecycle_counters = PerCpuArray::try_from(
+            ebpf.take_map("TASK_LIFECYCLE_COUNTERS")
+                .context("missing TASK_LIFECYCLE_COUNTERS map")?,
+        )?;
         self.exit = Some(ExitObserver {
             _ebpf: ebpf,
             events,
             counters,
+            creation_events,
+            rename_events,
+            lifecycle_counters,
         });
         Ok(())
     }
@@ -257,6 +279,42 @@ impl Observer {
             .as_mut()
             .and_then(|exit| exit.events.next())
             .map(|item| kernel_event::decode_exit(&item))
+    }
+
+    pub fn next_task_creation(
+        &mut self,
+    ) -> Option<Result<kernel_event::DecodedTaskCreation, kernel_event::TaskDecodeError>> {
+        self.exit
+            .as_mut()
+            .and_then(|lifecycle| lifecycle.creation_events.next())
+            .map(|item| kernel_event::decode_task_creation(&item))
+    }
+
+    pub fn next_task_rename(
+        &mut self,
+    ) -> Option<Result<kernel_event::DecodedTaskRename, kernel_event::TaskDecodeError>> {
+        self.exit
+            .as_mut()
+            .and_then(|lifecycle| lifecycle.rename_events.next())
+            .map(|item| kernel_event::decode_task_rename(&item))
+    }
+
+    pub fn task_lifecycle_kernel_counters(&self) -> Result<(u64, u64)> {
+        let Some(lifecycle) = &self.exit else {
+            return Ok((0, 0));
+        };
+        let total = |index: u32| -> Result<u64> {
+            Ok(lifecycle
+                .lifecycle_counters
+                .get(&index, 0)?
+                .iter()
+                .copied()
+                .sum())
+        };
+        Ok((
+            total(agent_ebpf_common::TASK_COUNTER_CREATION_RING_LOST)?,
+            total(agent_ebpf_common::TASK_COUNTER_RENAME_RING_LOST)?,
+        ))
     }
 
     pub fn exit_kernel_counters(&self) -> Result<ExitKernelCounters> {
@@ -388,6 +446,20 @@ fn attach(ebpf: &mut Ebpf, program_name: &str, category: &str, event: &str) -> R
     program
         .attach(category, event)
         .with_context(|| format!("attach {program_name} to {category}/{event}"))?;
+    Ok(())
+}
+
+fn attach_btf_tracepoint(ebpf: &mut Ebpf, program_name: &str, event: &str) -> Result<()> {
+    let program: &mut BtfTracePoint = ebpf
+        .program_mut(program_name)
+        .with_context(|| format!("missing {program_name} program"))?
+        .try_into()?;
+    program
+        .load()
+        .with_context(|| format!("load {program_name}"))?;
+    program
+        .attach(event)
+        .with_context(|| format!("attach {program_name} to BTF tracepoint {event}"))?;
     Ok(())
 }
 

@@ -126,6 +126,14 @@ const LIVE_OPERATIONS: &[(&str, &str)] = &[
         "get",
     ),
     (
+        "/api/v1/projects/{project_id}/applications/{application_id}/thread-activity",
+        "get",
+    ),
+    (
+        "/api/v1/projects/{project_id}/applications/{application_id}/thread-activity/summary",
+        "get",
+    ),
+    (
         "/api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/dns-groups",
         "get",
     ),
@@ -1165,9 +1173,14 @@ fn assert_inventory_lifecycle_contract(schemas: &serde_json::Value) {
             .as_array()
             .unwrap()
             .len(),
-        4
+        5
     );
     for (schema, event_kind, identity_fields) in [
+        (
+            "ProcessStartSemanticSummary",
+            "process.start",
+            &["process_command", "start_observed"][..],
+        ),
         (
             "ProcessExitSemanticSummary",
             "process.exit",
