@@ -184,6 +184,7 @@ mod tests {
             payload: EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/sh".into(),
                 parent_command: None,
+                generation: None,
             }),
         }
     }

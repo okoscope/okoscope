@@ -71,6 +71,8 @@ pub struct EventFingerprint {
 pub enum FingerprintError {
     #[error("fingerprint field {0} must not be empty")]
     EmptyField(&'static str),
+    #[error("event kind is not eligible for Runtime Group identity")]
+    UnsupportedEventKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +265,18 @@ pub fn fingerprint_v1(
     encoder.field(event_kind.as_bytes());
 
     let semantic = match &event.payload {
+        EventPayload::ThreadActivityWindow(_) => {
+            return Err(FingerprintError::UnsupportedEventKind);
+        }
+        EventPayload::ProcessStart(start) => {
+            let command = required("process_command", &event.process.command)?;
+            encoder.field(command.as_bytes());
+            json!({
+                "process_command": command,
+                "source": "kernel",
+                "start_observed": start.generation.start_observed
+            })
+        }
         EventPayload::ProcessExec(process) => {
             let executable = required("executable", &process.executable)?;
             encoder.field(executable.as_bytes());
@@ -588,6 +602,7 @@ mod tests {
         let first = event(EventPayload::ProcessExec(ProcessExec {
             executable: "/bin/sh".into(),
             parent_command: None,
+            generation: None,
         }));
         let mut rolled = first.clone();
         rolled.id = Uuid::from_u128(51);
@@ -627,10 +642,12 @@ mod tests {
         let spaced = event(EventPayload::ProcessExec(ProcessExec {
             executable: "  /bin/sh\0 ".into(),
             parent_command: None,
+            generation: None,
         }));
         let clean = event(EventPayload::ProcessExec(ProcessExec {
             executable: "/bin/sh".into(),
             parent_command: None,
+            generation: None,
         }));
         assert_eq!(
             fingerprint_v1(&scope(&spaced), &spaced).unwrap().digest,

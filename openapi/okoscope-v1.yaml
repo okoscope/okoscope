@@ -830,6 +830,50 @@ paths:
           '401': { $ref: '#/components/responses/Error' },
           '404': { $ref: '#/components/responses/Error' },
         }
+  /api/v1/projects/{project_id}/applications/{application_id}/thread-activity:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ApplicationId' }
+    get:
+      operationId: listApplicationThreadActivityWindows
+      description: Returns bounded named-thread aggregate windows. Responses are never cached.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: process_generation, in: query, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: observation_epoch, in: query, schema: { type: string, format: uuid } }
+        - { name: cursor, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: Thread activity windows, newest first.
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ThreadActivityWindowPage' } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/v1/projects/{project_id}/applications/{application_id}/thread-activity/summary:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ApplicationId' }
+    get:
+      operationId: getApplicationThreadActivitySummary
+      description: Returns reconciled process-level thread totals and the latest current-name distribution.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: process_generation, in: query, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: observation_epoch, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Reconciled thread activity summary.
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: '#/components/schemas/ThreadActivitySummary' } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/applications/{application_id}/runtime-inventory/summary:
     parameters:
       [
@@ -4600,6 +4644,7 @@ components:
         payload: { $ref: '#/components/schemas/RuntimeEventPayload' }
     RuntimeEventSemanticSummary:
       oneOf:
+        - { $ref: '#/components/schemas/ProcessStartSemanticSummary' }
         - { $ref: '#/components/schemas/ProcessExecSemanticSummary' }
         - { $ref: '#/components/schemas/SyscallSemanticSummary' }
         - { $ref: '#/components/schemas/NetworkConnectSemanticSummary' }
@@ -4617,6 +4662,15 @@ components:
       required: [executable]
       properties:
         executable: { type: string, minLength: 1 }
+    ProcessStartSemanticSummary:
+      type: object
+      additionalProperties: false
+      required: [event_kind, process_command, source, start_observed]
+      properties:
+        event_kind: { type: string, const: process.start }
+        process_command: { type: string, minLength: 1, maxLength: 15 }
+        source: { type: string, const: kernel }
+        start_observed: { type: boolean, const: true }
     SyscallSemanticSummary:
       type: object
       additionalProperties: false
@@ -4689,6 +4743,7 @@ components:
       type: string
       enum:
         [
+          process.start,
           process.exec,
           syscall,
           network.connect,
@@ -4705,6 +4760,69 @@ components:
           container.restart,
           container.restart_loop,
         ]
+    BaselineProvenance: { type: string, enum: [observed, snapshot, unavailable] }
+    ThreadGapReason:
+      type: string
+      enum: [kernel_loss, decode_failure, attribution_failure, state_capacity, snapshot_race, snapshot_permission, snapshot_truncated, delivery_gap]
+    ThreadNameAggregate:
+      type: object
+      additionalProperties: false
+      required: [name, created, exited, active]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 15 }
+        created: { type: integer, format: int64, minimum: 0 }
+        exited: { type: integer, format: int64, minimum: 0 }
+        active: { type: integer, format: int64, minimum: 0 }
+    ThreadActivityWindow:
+      type: object
+      additionalProperties: false
+      required: [id, process_cgroup_id, process_pid, process_tgid, process_command, process_generation, observation_epoch, start_observed, window_started_at, window_ended_at, created_count, exited_count, active_at_start, active_at_end, peak_active, baseline_provenance, baseline_complete, name_overflow, names, gaps]
+      properties:
+        id: { $ref: '#/components/schemas/Uuid' }
+        process_cgroup_id: { type: integer, format: int64, minimum: 0 }
+        process_pid: { type: integer, format: int64, minimum: 1 }
+        process_tgid: { type: integer, format: int64, minimum: 1 }
+        process_command: { type: string, minLength: 1, maxLength: 15 }
+        process_generation: { type: integer, format: int64, minimum: 1 }
+        observation_epoch: { $ref: '#/components/schemas/Uuid' }
+        start_observed: { type: boolean }
+        window_started_at: { $ref: '#/components/schemas/Timestamp' }
+        window_ended_at: { $ref: '#/components/schemas/Timestamp' }
+        created_count: { type: integer, format: int64, minimum: 0 }
+        exited_count: { type: integer, format: int64, minimum: 0 }
+        active_at_start: { type: integer, format: int64, minimum: 0 }
+        active_at_end: { type: integer, format: int64, minimum: 0 }
+        peak_active: { type: integer, format: int64, minimum: 0 }
+        baseline_provenance: { $ref: '#/components/schemas/BaselineProvenance' }
+        baseline_complete: { type: boolean }
+        name_overflow: { type: integer, format: int64, minimum: 0 }
+        names: { type: array, maxItems: 66, items: { $ref: '#/components/schemas/ThreadNameAggregate' } }
+        gaps: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/ThreadGapReason' } }
+    ThreadActivityWindowPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, maxItems: 200, items: { $ref: '#/components/schemas/ThreadActivityWindow' } }
+        next_cursor: { $ref: '#/components/schemas/NullableUuid' }
+    ThreadActivitySummary:
+      type: object
+      additionalProperties: false
+      required: [from, to, window_count, truncated, created, exited, active, peak_active, baseline_complete, baseline_provenance, name_overflow, names, gaps]
+      properties:
+        from: { $ref: '#/components/schemas/Timestamp' }
+        to: { $ref: '#/components/schemas/Timestamp' }
+        window_count: { type: integer, format: int64, minimum: 0 }
+        truncated: { type: boolean, description: True when the bounded summary omitted windows and totals are lower bounds. }
+        created: { type: integer, format: int64, minimum: 0 }
+        exited: { type: integer, format: int64, minimum: 0 }
+        active: { type: [integer, 'null'], format: int64, minimum: 0 }
+        peak_active: { type: [integer, 'null'], format: int64, minimum: 0 }
+        baseline_complete: { type: boolean }
+        baseline_provenance: { oneOf: [{ $ref: '#/components/schemas/BaselineProvenance' }, { type: 'null' }] }
+        name_overflow: { type: integer, format: int64, minimum: 0 }
+        names: { type: array, maxItems: 66, items: { $ref: '#/components/schemas/ThreadNameAggregate' } }
+        gaps: { type: array, uniqueItems: true, items: { $ref: '#/components/schemas/ThreadGapReason' } }
     EvidenceSource: { type: string, enum: [kernel, kubernetes, derived] }
     EventCorrelation:
       type: object
@@ -4774,16 +4892,17 @@ components:
     ProcessExitSemanticSummary:
       type: object
       additionalProperties: true
-      required: [evidence_source, identity, termination]
+      required: [event_kind, evidence_source, classification, identity, termination]
       properties:
         event_kind: { type: string, const: process.exit }
         evidence_source: { type: string, const: kernel }
+        classification: { type: string, enum: [leader, legacy_unclassified] }
         identity: { type: string, minLength: 1 }
         termination: { $ref: '#/components/schemas/ProcessTermination' }
     ContainerTerminationSemanticSummary:
       type: object
       additionalProperties: true
-      required: [evidence_source, container_name, reason, exit_code]
+      required: [event_kind, evidence_source, container_name, reason, exit_code]
       properties:
         event_kind: { type: string, const: container.terminated }
         evidence_source: { type: string, const: kubernetes }
@@ -4793,7 +4912,7 @@ components:
     ContainerRestartSemanticSummary:
       type: object
       additionalProperties: true
-      required: [evidence_source, container_name]
+      required: [event_kind, evidence_source, container_name]
       properties:
         event_kind: { type: string, const: container.restart }
         evidence_source: { type: string, const: kubernetes }
@@ -4804,6 +4923,7 @@ components:
       required:
         [
           evidence_source,
+          event_kind,
           projection_version,
           threshold,
           window_started_at,
@@ -4855,12 +4975,17 @@ components:
         data:
           type: object
           additionalProperties: false
-          required: [source, raw_wait_status, termination, correlation]
+          required: [source, classification, raw_wait_status, termination, correlation]
           properties:
             source: { type: string, const: kernel }
+            classification: { type: string, enum: [leader, legacy_unclassified] }
             raw_wait_status: { type: integer, format: int32 }
             termination: { $ref: '#/components/schemas/ProcessTermination' }
             correlation: { $ref: '#/components/schemas/GenerationCorrelation' }
+            generation:
+              anyOf:
+                - { $ref: '#/components/schemas/ProcessGenerationIdentity' }
+                - { type: 'null' }
     ContainerTerminationPayload:
       type: object
       additionalProperties: false
@@ -4899,6 +5024,18 @@ components:
           properties:
             executable: { type: string, minLength: 1 }
             parent_command: { type: [string, 'null'] }
+            generation:
+              anyOf:
+                - { $ref: '#/components/schemas/ProcessGenerationIdentity' }
+                - { type: 'null' }
+    ProcessGenerationIdentity:
+      type: object
+      additionalProperties: false
+      required: [generation, observation_epoch, start_observed]
+      properties:
+        generation: { type: integer, format: uint64, minimum: 1 }
+        observation_epoch: { $ref: '#/components/schemas/Uuid' }
+        start_observed: { type: boolean }
     SyscallPayload:
       type: object
       additionalProperties: false
@@ -5807,22 +5944,11 @@ components:
     InventoryLifecycleSemanticSummary:
       description: User-visible lifecycle identity and termination context; identity_token remains an opaque filtering mechanism.
       oneOf:
-        - allOf:
-            - { $ref: '#/components/schemas/ProcessExitSemanticSummary' }
-            - type: object
-              required: [event_kind]
-        - allOf:
-            - { $ref: '#/components/schemas/ContainerTerminationSemanticSummary' }
-            - type: object
-              required: [event_kind]
-        - allOf:
-            - { $ref: '#/components/schemas/ContainerRestartSemanticSummary' }
-            - type: object
-              required: [event_kind]
-        - allOf:
-            - { $ref: '#/components/schemas/RestartLoopSemanticSummary' }
-            - type: object
-              required: [event_kind]
+        - { $ref: '#/components/schemas/ProcessStartSemanticSummary' }
+        - { $ref: '#/components/schemas/ProcessExitSemanticSummary' }
+        - { $ref: '#/components/schemas/ContainerTerminationSemanticSummary' }
+        - { $ref: '#/components/schemas/ContainerRestartSemanticSummary' }
+        - { $ref: '#/components/schemas/RestartLoopSemanticSummary' }
     InventoryProcessIdentity:
       type: object
       additionalProperties: false
@@ -5949,6 +6075,7 @@ components:
           first_seen_at,
           last_seen_at,
           kinds,
+          process_lifecycle,
         ]
       example:
         coverage: { closed_before: null, history_expired_before: null, detail_scope: raw }
@@ -5957,6 +6084,7 @@ components:
         occurrence_count: 4
         first_seen_at: '2026-08-18T09:00:00Z'
         last_seen_at: '2026-08-18T10:00:00Z'
+        process_lifecycle: { created: 0, executed: 4, terminated: 0 }
         kinds:
           - { kind: process, item_count: 1, occurrence_count: 4 }
       properties:
@@ -5968,6 +6096,16 @@ components:
         last_seen_at: { $ref: '#/components/schemas/NullableTimestamp' }
         kinds:
           { type: array, maxItems: 7, items: { $ref: '#/components/schemas/InventoryKindCount' } }
+        process_lifecycle:
+          $ref: '#/components/schemas/ProcessLifecycleCounts'
+    ProcessLifecycleCounts:
+      type: object
+      additionalProperties: false
+      required: [created, executed, terminated]
+      properties:
+        created: { type: integer, format: int64, minimum: 0 }
+        executed: { type: integer, format: int64, minimum: 0 }
+        terminated: { type: integer, format: int64, minimum: 0 }
     InventoryDistributionEntry:
       type: object
       additionalProperties: false

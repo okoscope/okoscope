@@ -8,6 +8,42 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Process and thread creation uses the broadly available `task_newtask` BTF
+  tracepoint on the supported kernel matrix, and degraded-capability logs retain
+  the complete loader error chain.
+- Agents can independently advertise `task.lifecycle/v1` and report process
+  creation separately from executable replacement and leader termination.
+  Non-leader task activity is retained as bounded, replay-safe 60-second
+  aggregates by current task name rather than as process-exit evidence.
+- Authenticated Application APIs expose paginated thread-activity windows and
+  scoped summaries with baseline provenance, completeness, overflow, and gap
+  evidence.
+- Runtime inventory summaries expose separate process-created, executable-loaded,
+  and process-terminated occurrence totals, and process-exit evidence is typed
+  as classified leader or legacy/unclassified.
+- Process start, repeated exec, thread windows, and leader exit share an
+  additive PID-reuse-safe generation; historical payloads remain nullable and
+  are never joined or backfilled by bare PID.
+- Task creation and rename use capability-gated BTF tracepoints; failure to
+  verify or attach either hook withholds thread lifecycle observation without
+  disabling existing observers.
+- Lifecycle heartbeat counters include only failures with trusted Application
+  attribution; pre-route kernel, decode, and attribution failures remain
+  node-local diagnostics instead of being assigned to a tenant.
+- Per-process thread state assigns an independent task generation and rejects
+  stale rename or exit transitions after numeric TID reuse.
+
+### Upgrade notes
+
+- Database migration 31 is required. It adds idempotent, tenant-scoped thread
+  activity windows; existing runtime events and historical mixed process-exit
+  rows are preserved.
+- `task.lifecycle/v1` is advertised only when all required CO-RE creation,
+  rename, and exit programs load successfully. Existing process-exec and other
+  observers continue when the capability is unavailable.
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

@@ -9,15 +9,16 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::{DateTime, Utc};
 use event_model::{
-    ContainerCategory, ContainerImageIdentity, ContainerRestart, ContainerTermination,
-    DnsAddressAnswer, DnsCname, DnsContext, DnsDirection, DnsName, DnsQueryType, DnsResponseCode,
-    DnsTransport, EVENT_SCHEMA_VERSION, EventPayload, EvidenceSource, FileActivityPath, FileCreate,
-    FileDelete, FileModify, FileRename, GenerationCorrelation, KubernetesAttribution,
-    NetworkAccept, NetworkAddressFamily, NetworkConnect, NetworkConnectOutcome, NetworkDnsQuery,
-    NetworkDnsResponse, NetworkListen, PROTOCOL_VERSION, ProcessExec, ProcessExit, ProcessIdentity,
-    ProcessTermination, ReleaseIdentity, ResourceAggregate, ResourceValues,
-    RevisionReadinessSnapshot, RuntimeEvent, SyscallEvent, UnresolvedGenerationReason,
-    WorkloadRevisionEvidence,
+    BaselineProvenance, ContainerCategory, ContainerImageIdentity, ContainerRestart,
+    ContainerTermination, DnsAddressAnswer, DnsCname, DnsContext, DnsDirection, DnsName,
+    DnsQueryType, DnsResponseCode, DnsTransport, EVENT_SCHEMA_VERSION, EventPayload,
+    EvidenceSource, FileActivityPath, FileCreate, FileDelete, FileModify, FileRename,
+    GenerationCorrelation, KubernetesAttribution, NetworkAccept, NetworkAddressFamily,
+    NetworkConnect, NetworkConnectOutcome, NetworkDnsQuery, NetworkDnsResponse, NetworkListen,
+    PROTOCOL_VERSION, ProcessExec, ProcessExit, ProcessGenerationIdentity, ProcessIdentity,
+    ProcessStart, ProcessTermination, ReleaseIdentity, ResourceAggregate, ResourceValues,
+    RevisionReadinessSnapshot, RuntimeEvent, SyscallEvent, ThreadActivityWindow, ThreadGapReason,
+    ThreadNameAggregate, UnresolvedGenerationReason, WorkloadRevisionEvidence,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -29,6 +30,7 @@ pub const NETWORK_DNS_UDP_CAPABILITY: &str = "network.dns.udp/v1";
 pub const NETWORK_DNS_TCP_CAPABILITY: &str = "network.dns.tcp/v1";
 pub const FILE_ACTIVITY_CAPABILITY: &str = "file.activity.syscall-path/v1";
 pub const PROCESS_EXIT_CAPABILITY: &str = "process.exit/v1";
+pub const TASK_LIFECYCLE_CAPABILITY: &str = "task.lifecycle/v1";
 pub const CONTAINER_LIFECYCLE_CAPABILITY: &str = "container.lifecycle/v1";
 pub const KUBERNETES_RELEASE_DISCOVERY_CAPABILITY: &str = "kubernetes.release-discovery/v1";
 pub const ONBOARDING_STATUS_CAPABILITY: &str = "onboarding.status/v1";
@@ -417,10 +419,26 @@ impl From<RuntimeEvent> for v1::RuntimeEvent {
 
 fn encode_payload(payload: EventPayload) -> v1::runtime_event::Payload {
     match payload {
+        EventPayload::ProcessStart(value) => {
+            v1::runtime_event::Payload::ProcessStart(v1::ProcessStart {
+                generation: Some(v1::ProcessGenerationIdentity {
+                    generation: value.generation.generation,
+                    observation_epoch: value.generation.observation_epoch.to_string(),
+                    start_observed: value.generation.start_observed,
+                }),
+                parent_pid: value.parent_pid,
+                parent_tgid: value.parent_tgid,
+                parent_command: value.parent_command,
+            })
+        }
+        EventPayload::ThreadActivityWindow(value) => {
+            v1::runtime_event::Payload::ThreadActivityWindow(encode_thread_window(value))
+        }
         EventPayload::ProcessExec(exec) => {
             v1::runtime_event::Payload::ProcessExec(v1::ProcessExec {
                 executable: exec.executable,
                 parent_command: exec.parent_command.unwrap_or_default(),
+                generation: exec.generation.as_ref().map(encode_generation),
             })
         }
         EventPayload::Syscall(syscall) => {
@@ -505,6 +523,138 @@ fn encode_source(source: EvidenceSource) -> i32 {
     }
 }
 
+fn encode_thread_window(value: ThreadActivityWindow) -> v1::ThreadActivityWindow {
+    v1::ThreadActivityWindow {
+        window_id: value.id.to_string(),
+        generation: Some(v1::ProcessGenerationIdentity {
+            generation: value.generation.generation,
+            observation_epoch: value.generation.observation_epoch.to_string(),
+            start_observed: value.generation.start_observed,
+        }),
+        window_started_at_unix_nanos: value
+            .window_started_at
+            .timestamp_nanos_opt()
+            .unwrap_or_default(),
+        window_ended_at_unix_nanos: value
+            .window_ended_at
+            .timestamp_nanos_opt()
+            .unwrap_or_default(),
+        created: value.created,
+        exited: value.exited,
+        active_at_start: value.active_at_start,
+        active_at_end: value.active_at_end,
+        peak_active: value.peak_active,
+        names: value
+            .names
+            .into_iter()
+            .map(|entry| v1::ThreadNameAggregate {
+                name: entry.name,
+                created: entry.created,
+                exited: entry.exited,
+                active: entry.active,
+            })
+            .collect(),
+        baseline_provenance: match value.baseline_provenance {
+            BaselineProvenance::Observed => v1::BaselineProvenance::Observed.into(),
+            BaselineProvenance::Snapshot => v1::BaselineProvenance::Snapshot.into(),
+            BaselineProvenance::Unavailable => v1::BaselineProvenance::Unavailable.into(),
+        },
+        baseline_complete: value.baseline_complete,
+        name_overflow: value.name_overflow,
+        gaps: value
+            .gaps
+            .into_iter()
+            .map(|gap| match gap {
+                ThreadGapReason::KernelLoss => v1::ThreadGapReason::KernelLoss.into(),
+                ThreadGapReason::DecodeFailure => v1::ThreadGapReason::DecodeFailure.into(),
+                ThreadGapReason::AttributionFailure => {
+                    v1::ThreadGapReason::AttributionFailure.into()
+                }
+                ThreadGapReason::StateCapacity => v1::ThreadGapReason::StateCapacity.into(),
+                ThreadGapReason::SnapshotRace => v1::ThreadGapReason::SnapshotRace.into(),
+                ThreadGapReason::SnapshotPermission => {
+                    v1::ThreadGapReason::SnapshotPermission.into()
+                }
+                ThreadGapReason::SnapshotTruncated => v1::ThreadGapReason::SnapshotTruncated.into(),
+                ThreadGapReason::DeliveryGap => v1::ThreadGapReason::DeliveryGap.into(),
+            })
+            .collect(),
+    }
+}
+
+fn decode_thread_window(
+    value: v1::ThreadActivityWindow,
+    process: ProcessIdentity,
+) -> Result<ThreadActivityWindow, ProtocolError> {
+    let generation = value
+        .generation
+        .ok_or(ProtocolError::Missing("thread_window.generation"))?;
+    let baseline_provenance = match v1::BaselineProvenance::try_from(value.baseline_provenance).ok()
+    {
+        Some(v1::BaselineProvenance::Observed) => BaselineProvenance::Observed,
+        Some(v1::BaselineProvenance::Snapshot) => BaselineProvenance::Snapshot,
+        Some(v1::BaselineProvenance::Unavailable) => BaselineProvenance::Unavailable,
+        _ => {
+            return Err(ProtocolError::InvalidTermination(
+                "thread_window.baseline_provenance",
+            ));
+        }
+    };
+    let gaps = value
+        .gaps
+        .into_iter()
+        .map(|gap| match v1::ThreadGapReason::try_from(gap).ok() {
+            Some(v1::ThreadGapReason::KernelLoss) => Ok(ThreadGapReason::KernelLoss),
+            Some(v1::ThreadGapReason::DecodeFailure) => Ok(ThreadGapReason::DecodeFailure),
+            Some(v1::ThreadGapReason::AttributionFailure) => {
+                Ok(ThreadGapReason::AttributionFailure)
+            }
+            Some(v1::ThreadGapReason::StateCapacity) => Ok(ThreadGapReason::StateCapacity),
+            Some(v1::ThreadGapReason::SnapshotRace) => Ok(ThreadGapReason::SnapshotRace),
+            Some(v1::ThreadGapReason::SnapshotPermission) => {
+                Ok(ThreadGapReason::SnapshotPermission)
+            }
+            Some(v1::ThreadGapReason::SnapshotTruncated) => Ok(ThreadGapReason::SnapshotTruncated),
+            Some(v1::ThreadGapReason::DeliveryGap) => Ok(ThreadGapReason::DeliveryGap),
+            _ => Err(ProtocolError::InvalidTermination("thread_window.gap")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let window = ThreadActivityWindow {
+        id: parse_uuid("window_id", &value.window_id)?,
+        process,
+        generation: ProcessGenerationIdentity {
+            generation: generation.generation,
+            observation_epoch: parse_uuid("observation_epoch", &generation.observation_epoch)?,
+            start_observed: generation.start_observed,
+        },
+        window_started_at: timestamp(value.window_started_at_unix_nanos)?,
+        window_ended_at: timestamp(value.window_ended_at_unix_nanos)?,
+        created: value.created,
+        exited: value.exited,
+        active_at_start: value.active_at_start,
+        active_at_end: value.active_at_end,
+        peak_active: value.peak_active,
+        names: value
+            .names
+            .into_iter()
+            .map(|entry| ThreadNameAggregate {
+                name: entry.name,
+                created: entry.created,
+                exited: entry.exited,
+                active: entry.active,
+            })
+            .collect(),
+        baseline_provenance,
+        baseline_complete: value.baseline_complete,
+        name_overflow: value.name_overflow,
+        gaps,
+    };
+    window
+        .validate()
+        .map_err(|_| ProtocolError::InvalidTermination("thread_window"))?;
+    Ok(window)
+}
+
 fn decode_source(source: i32) -> Result<EvidenceSource, ProtocolError> {
     match v1::EvidenceSource::try_from(source).ok() {
         Some(v1::EvidenceSource::Kernel) => Ok(EvidenceSource::Kernel),
@@ -566,6 +716,15 @@ fn encode_process_exit(value: ProcessExit) -> v1::ProcessExit {
         correlation: Some(v1::GenerationCorrelation {
             result: Some(result),
         }),
+        classification: match value.classification {
+            event_model::ProcessExitClassification::LegacyUnclassified => {
+                v1::ProcessExitClassification::LegacyUnclassified.into()
+            }
+            event_model::ProcessExitClassification::Leader => {
+                v1::ProcessExitClassification::Leader.into()
+            }
+        },
+        generation: value.generation.as_ref().map(encode_generation),
     }
 }
 
@@ -628,11 +787,60 @@ fn decode_process_exit(value: v1::ProcessExit) -> Result<ProcessExit, ProtocolEr
             .correlation
             .ok_or(ProtocolError::Missing("process_exit.correlation"))?,
     )?;
-    Ok(ProcessExit::new(
-        value.raw_wait_status,
-        termination,
-        correlation,
-    ))
+    let classification = match v1::ProcessExitClassification::try_from(value.classification).ok() {
+        Some(v1::ProcessExitClassification::LegacyUnclassified) => {
+            event_model::ProcessExitClassification::LegacyUnclassified
+        }
+        Some(v1::ProcessExitClassification::Leader) => {
+            event_model::ProcessExitClassification::Leader
+        }
+        None => {
+            return Err(ProtocolError::InvalidTermination(
+                "process_exit.classification",
+            ));
+        }
+    };
+    let mut decoded = ProcessExit::new(value.raw_wait_status, termination, correlation);
+    decoded.classification = classification;
+    decoded.generation = value
+        .generation
+        .as_ref()
+        .map(decode_generation)
+        .transpose()?;
+    if let (
+        Some(generation),
+        GenerationCorrelation::Observed {
+            generation: correlated,
+            ..
+        },
+    ) = (&decoded.generation, &decoded.correlation)
+        && generation.generation != *correlated
+    {
+        return Err(ProtocolError::InvalidTermination("process_exit.generation"));
+    }
+    Ok(decoded)
+}
+
+fn encode_generation(value: &ProcessGenerationIdentity) -> v1::ProcessGenerationIdentity {
+    v1::ProcessGenerationIdentity {
+        generation: value.generation,
+        observation_epoch: value.observation_epoch.to_string(),
+        start_observed: value.start_observed,
+    }
+}
+
+fn decode_generation(
+    value: &v1::ProcessGenerationIdentity,
+) -> Result<ProcessGenerationIdentity, ProtocolError> {
+    let identity = ProcessGenerationIdentity {
+        generation: value.generation,
+        observation_epoch: parse_uuid("observation_epoch", &value.observation_epoch)?,
+        start_observed: value.start_observed,
+    };
+    identity
+        .validate()
+        .map_err(|_| ProtocolError::InvalidTermination("process_generation"))?;
+    Ok(identity)
 }
 
 fn decode_generation_correlation(
@@ -742,89 +950,16 @@ impl TryFrom<v1::RuntimeEvent> for RuntimeEvent {
             .map_err(|_| ProtocolError::InvalidTimestamp)?;
         let observed_at =
             DateTime::<Utc>::from_timestamp(secs, nanos).ok_or(ProtocolError::InvalidTimestamp)?;
-        let a = event
-            .attribution
-            .ok_or(ProtocolError::Missing("attribution"))?;
-        require("node_name", &a.node_name)?;
-        require("namespace", &a.namespace)?;
-        require("pod_uid", &a.pod_uid)?;
-        require("container_id", &a.container_id)?;
-        require("workload_uid", &a.workload_uid)?;
-        let attribution = KubernetesAttribution {
-            project_id: Uuid::nil(),
-            application_id: Uuid::nil(),
-            node_name: a.node_name,
-            namespace: a.namespace,
-            pod_uid: a.pod_uid,
-            pod_name: a.pod_name,
-            container_id: a.container_id,
-            container_name: a.container_name,
-            workload_uid: a.workload_uid,
-            workload_kind: a.workload_kind,
-            workload_name: a.workload_name,
-            release: a.release.and_then(|value| {
-                let value = value.trim().to_owned();
-                (!value.is_empty() && value.len() <= 200).then_some(value)
-            }),
-            release_identity: a
-                .release_identity
-                .map(decode_release_identity)
-                .transpose()?,
-        };
-        let p = event.process.ok_or(ProtocolError::Missing("process"))?;
-        let process = ProcessIdentity {
-            cgroup_id: p.cgroup_id,
-            pid: p.pid,
-            tgid: p.tgid,
-            command: p.command,
-        };
-        let payload = match event.payload.ok_or(ProtocolError::Missing("payload"))? {
-            v1::runtime_event::Payload::ProcessExec(exec) => {
-                require("executable", &exec.executable)?;
-                EventPayload::ProcessExec(ProcessExec {
-                    executable: exec.executable,
-                    parent_command: (!exec.parent_command.is_empty())
-                        .then_some(exec.parent_command),
-                })
-            }
-            v1::runtime_event::Payload::Syscall(syscall) => {
-                require("syscall.name", &syscall.name)?;
-                EventPayload::Syscall(SyscallEvent { name: syscall.name })
-            }
-            v1::runtime_event::Payload::NetworkConnect(network) => decode_network(&network)?,
-            v1::runtime_event::Payload::NetworkListen(network) => decode_listen(&network)?,
-            v1::runtime_event::Payload::NetworkAccept(network) => decode_accept(&network)?,
-            v1::runtime_event::Payload::NetworkDnsQuery(query) => decode_dns_query(&query)?,
-            v1::runtime_event::Payload::NetworkDnsResponse(response) => {
-                decode_dns_response(&response)?
-            }
-            v1::runtime_event::Payload::FileCreate(value) => EventPayload::FileCreate(FileCreate {
-                path: decode_file_path(value.path, "path")?,
-            }),
-            v1::runtime_event::Payload::FileModify(value) => EventPayload::FileModify(FileModify {
-                path: decode_file_path(value.path, "path")?,
-            }),
-            v1::runtime_event::Payload::FileDelete(value) => EventPayload::FileDelete(FileDelete {
-                path: decode_file_path(value.path, "path")?,
-            }),
-            v1::runtime_event::Payload::FileRename(value) => EventPayload::FileRename(
-                FileRename::new(
-                    decode_file_path(value.old_path, "old_path")?,
-                    decode_file_path(value.new_path, "new_path")?,
-                    value.replaced,
-                )
-                .map_err(|_| ProtocolError::InvalidFile("rename"))?,
-            ),
-            v1::runtime_event::Payload::ProcessExit(value) => {
-                EventPayload::ProcessExit(decode_process_exit(value)?)
-            }
-            v1::runtime_event::Payload::ContainerTermination(value) => {
-                EventPayload::ContainerTermination(decode_container_termination(value)?)
-            }
-            v1::runtime_event::Payload::ContainerRestart(value) => {
-                EventPayload::ContainerRestart(decode_container_restart(value)?)
-            }
-        };
+        let attribution = decode_attribution(
+            event
+                .attribution
+                .ok_or(ProtocolError::Missing("attribution"))?,
+        )?;
+        let process = decode_process(event.process.ok_or(ProtocolError::Missing("process"))?);
+        let payload = decode_payload(
+            event.payload.ok_or(ProtocolError::Missing("payload"))?,
+            &process,
+        )?;
         Ok(Self {
             id,
             observed_at,
@@ -834,6 +969,126 @@ impl TryFrom<v1::RuntimeEvent> for RuntimeEvent {
             payload,
         })
     }
+}
+
+fn decode_attribution(
+    a: v1::KubernetesAttribution,
+) -> Result<KubernetesAttribution, ProtocolError> {
+    require("node_name", &a.node_name)?;
+    require("namespace", &a.namespace)?;
+    require("pod_uid", &a.pod_uid)?;
+    require("container_id", &a.container_id)?;
+    require("workload_uid", &a.workload_uid)?;
+    Ok(KubernetesAttribution {
+        project_id: Uuid::nil(),
+        application_id: Uuid::nil(),
+        node_name: a.node_name,
+        namespace: a.namespace,
+        pod_uid: a.pod_uid,
+        pod_name: a.pod_name,
+        container_id: a.container_id,
+        container_name: a.container_name,
+        workload_uid: a.workload_uid,
+        workload_kind: a.workload_kind,
+        workload_name: a.workload_name,
+        release: a.release.and_then(|value| {
+            let value = value.trim().to_owned();
+            (!value.is_empty() && value.len() <= 200).then_some(value)
+        }),
+        release_identity: a
+            .release_identity
+            .map(decode_release_identity)
+            .transpose()?,
+    })
+}
+
+fn decode_process(p: v1::ProcessIdentity) -> ProcessIdentity {
+    ProcessIdentity {
+        cgroup_id: p.cgroup_id,
+        pid: p.pid,
+        tgid: p.tgid,
+        command: p.command,
+    }
+}
+
+fn decode_payload(
+    payload: v1::runtime_event::Payload,
+    process: &ProcessIdentity,
+) -> Result<EventPayload, ProtocolError> {
+    Ok(match payload {
+        v1::runtime_event::Payload::ProcessStart(value) => {
+            let generation = value
+                .generation
+                .ok_or(ProtocolError::Missing("process_start.generation"))?;
+            let start = ProcessStart {
+                generation: ProcessGenerationIdentity {
+                    generation: generation.generation,
+                    observation_epoch: parse_uuid(
+                        "observation_epoch",
+                        &generation.observation_epoch,
+                    )?,
+                    start_observed: generation.start_observed,
+                },
+                parent_pid: value.parent_pid,
+                parent_tgid: value.parent_tgid,
+                parent_command: value.parent_command,
+            };
+            start
+                .validate()
+                .map_err(|_| ProtocolError::InvalidTermination("process_start"))?;
+            EventPayload::ProcessStart(start)
+        }
+        v1::runtime_event::Payload::ThreadActivityWindow(value) => {
+            EventPayload::ThreadActivityWindow(decode_thread_window(value, process.clone())?)
+        }
+        v1::runtime_event::Payload::ProcessExec(exec) => {
+            require("executable", &exec.executable)?;
+            EventPayload::ProcessExec(ProcessExec {
+                executable: exec.executable,
+                parent_command: (!exec.parent_command.is_empty()).then_some(exec.parent_command),
+                generation: exec
+                    .generation
+                    .as_ref()
+                    .map(decode_generation)
+                    .transpose()?,
+            })
+        }
+        v1::runtime_event::Payload::Syscall(syscall) => {
+            require("syscall.name", &syscall.name)?;
+            EventPayload::Syscall(SyscallEvent { name: syscall.name })
+        }
+        v1::runtime_event::Payload::NetworkConnect(network) => decode_network(&network)?,
+        v1::runtime_event::Payload::NetworkListen(network) => decode_listen(&network)?,
+        v1::runtime_event::Payload::NetworkAccept(network) => decode_accept(&network)?,
+        v1::runtime_event::Payload::NetworkDnsQuery(query) => decode_dns_query(&query)?,
+        v1::runtime_event::Payload::NetworkDnsResponse(response) => decode_dns_response(&response)?,
+        v1::runtime_event::Payload::FileCreate(value) => EventPayload::FileCreate(FileCreate {
+            path: decode_file_path(value.path, "path")?,
+        }),
+        v1::runtime_event::Payload::FileModify(value) => EventPayload::FileModify(FileModify {
+            path: decode_file_path(value.path, "path")?,
+        }),
+        v1::runtime_event::Payload::FileDelete(value) => EventPayload::FileDelete(FileDelete {
+            path: decode_file_path(value.path, "path")?,
+        }),
+        v1::runtime_event::Payload::FileRename(value) => EventPayload::FileRename(
+            FileRename::new(
+                decode_file_path(value.old_path, "old_path")?,
+                decode_file_path(value.new_path, "new_path")?,
+                value.replaced,
+            )
+            .map_err(|_| ProtocolError::InvalidFile("rename"))?,
+        ),
+        v1::runtime_event::Payload::ProcessExit(value) => {
+            EventPayload::ProcessExit(decode_process_exit(value)?)
+        }
+        v1::runtime_event::Payload::ContainerTermination(value) => {
+            EventPayload::ContainerTermination(decode_container_termination(value)?)
+        }
+        v1::runtime_event::Payload::ContainerRestart(value) => {
+            EventPayload::ContainerRestart(decode_container_restart(value)?)
+        }
+    })
 }
 
 fn decode_file_path(value: String, field: &'static str) -> Result<FileActivityPath, ProtocolError> {
@@ -1246,6 +1501,7 @@ mod tests {
             payload: EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/sh".into(),
                 parent_command: Some("payment-api".into()),
+                generation: None,
             }),
         }
     }
@@ -1700,15 +1956,28 @@ mod tests {
     #[test]
     fn termination_and_lifecycle_payloads_round_trip() {
         let now = Utc::now();
+        let generation = ProcessGenerationIdentity {
+            generation: 7,
+            observation_epoch: Uuid::new_v4(),
+            start_observed: true,
+        };
         let termination =
             ContainerTermination::new("containerd://abc", "OOMKilled", 137, Some(now), Some(now))
                 .unwrap();
         let payloads = [
-            EventPayload::ProcessExit(ProcessExit::new(
-                0x8b,
-                ProcessTermination::signaled(11, "SIGSEGV", true).unwrap(),
-                GenerationCorrelation::observed(7, Uuid::new_v4(), "/app/worker").unwrap(),
-            )),
+            EventPayload::ProcessExit(
+                ProcessExit::new(
+                    0x8b,
+                    ProcessTermination::signaled(11, "SIGSEGV", true).unwrap(),
+                    GenerationCorrelation::observed(7, Uuid::new_v4(), "/app/worker").unwrap(),
+                )
+                .with_generation(generation.clone()),
+            ),
+            EventPayload::ProcessExec(ProcessExec {
+                executable: "/app/worker-v2".into(),
+                parent_command: None,
+                generation: Some(generation),
+            }),
             EventPayload::ProcessExit(ProcessExit::new(
                 7 << 8,
                 ProcessTermination::exited(7),
@@ -1754,6 +2023,8 @@ mod tests {
                     },
                 )),
             }),
+            classification: v1::ProcessExitClassification::LegacyUnclassified.into(),
+            generation: None,
         }));
         assert!(matches!(
             RuntimeEvent::try_from(wire),
@@ -1778,6 +2049,8 @@ mod tests {
                     },
                 )),
             }),
+            classification: v1::ProcessExitClassification::LegacyUnclassified.into(),
+            generation: None,
         }));
         assert!(matches!(
             RuntimeEvent::try_from(wire),
