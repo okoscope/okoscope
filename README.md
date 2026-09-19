@@ -46,7 +46,7 @@ Lifecycle-capable evidence uses one PID-reuse-safe generation across creation,
 repeated exec, thread activity, and leader exit. Older evidence remains readable
 without an inferred generation or synthetic start.
 Task lifecycle specifically uses the BTF tracepoints
-`sched_process_fork` and `task_rename`; inability to load either hook withholds
+`task_newtask` and `task_rename`; inability to load either hook withholds
 that capability without disabling existing exec, network, DNS, file, resource,
 or Kubernetes lifecycle observation. The production `union` canary matrix is
 Ubuntu 22.04 Linux 5.15.0-138/139-generic and Ubuntu 24.04 Linux

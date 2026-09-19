@@ -40,7 +40,7 @@ The production `union` canary matrix is Ubuntu 22.04 Linux
 5.15.0-138/139-generic and Ubuntu 24.04 Linux 6.8.0-137-generic. Every exact
 kernel must pass verifier loading during the production canary.
 
-The implementation spike selected `tp_btf/sched_process_fork` for creation and
+The implementation uses `tp_btf/task_newtask` for creation and
 `tp_btf/task_rename` for rename, with fixed CO-RE records and bounded ring-buffer
 loss counters. The programs built and the verifier accepted and attached both
 hooks on the local LinuxKit 7.0.12 development kernel; successful load produced

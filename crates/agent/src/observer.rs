@@ -235,12 +235,7 @@ impl Observer {
             "sched_process_exit",
         )?;
         let btf = Btf::from_sys_fs().context("load kernel BTF from sysfs")?;
-        attach_btf_tracepoint(
-            &mut ebpf,
-            &btf,
-            "okoscope_task_create",
-            "sched_process_fork",
-        )?;
+        attach_btf_tracepoint(&mut ebpf, &btf, "okoscope_task_create", "task_newtask")?;
         attach_btf_tracepoint(&mut ebpf, &btf, "okoscope_task_rename", "task_rename")?;
         let events = RingBuf::try_from(
             ebpf.take_map("EXIT_EVENTS")
