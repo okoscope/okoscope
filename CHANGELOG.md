@@ -37,6 +37,9 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Fixed
 
+- Logical DNS group pages and distributions now normalize Kubernetes search
+  expansions with set-based joins, avoiding repeated scans of the same retained
+  observations when both views load concurrently.
 - Thread lifecycle windows now identify their owning thread-group leader as
   the process, so valid non-leader activity passes server validation instead of
   being retried with a thread ID in the process identity.

@@ -18,10 +18,19 @@ Initial acceptance limits for a development PostgreSQL instance are:
 | Item evidence count | 10 memberships for one item | 2 seconds |
 | Scoped summary | 1,000 items, 200 Pods, release and deployment filters | 2 seconds |
 | One facet page | up to 1,000 distinct values, maximum 200 returned options | 2 seconds |
+| Concurrent logical DNS group page and distribution | 2,000 observations, 200 Pods, four corroborated names | 500 milliseconds |
 
 These are regression ceilings, not production SLOs. Production sizing must additionally test expected retention, concurrent agents, release cardinality, distinct Pods, filters, and pagination using sanitized synthetic data. API pages remain capped at 200 regardless of database size.
 
 The benchmark prints measured projection, list, and detail durations. Record results with the server revision, PostgreSQL version, machine resources, and database settings when changing projection tables or indexes.
+
+The logical DNS acceptance probe issues the bounded group page and top-five
+distribution concurrently because the Application domain view requests both.
+Its fixture retains exact names plus namespace-, service-, and cluster-suffix
+questions in the same resolver contexts. This specifically guards against
+correlated rescans during Kubernetes search-expansion normalization; changing
+the grouping SQL must preserve both the latency ceiling and the functional DNS
+grouping test in `crates/server/tests/inventory_api.rs`.
 
 Facet acceptance data must include all five dimensions and record item, release, Pod, and distinct-value cardinalities. The first development profile assumes at most 100 clusters, 1,000 namespaces, 10 workload kinds, 10,000 workload names, and 10,000 container names per Application. These are test-shaping assumptions rather than API limits; every returned page remains capped at 200. Capture `EXPLAIN (ANALYZE, BUFFERS)` for scoped summary and each facet, including the first and cursor-bearing pages, before adding an index. Retain the plan output with the benchmark date and revision.
 
