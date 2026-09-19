@@ -7,8 +7,8 @@ still stabilizing.
 ## Cadence and support
 
 Releases are feature- and readiness-driven; there is currently no fixed
-schedule. The latest `0.1.x` minor line receives security support as described in
-[SECURITY.md](SECURITY.md). Long-term-support releases are not currently
+schedule. The latest released minor line receives security support as described
+in [SECURITY.md](SECURITY.md). Long-term-support releases are not currently
 offered.
 
 ## Versioning and branches
