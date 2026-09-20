@@ -55,11 +55,11 @@ Application heartbeats expose only lifecycle diagnostics that already have a
 trusted Application route. Pre-route kernel loss, decode failure, and
 attribution failure remain node-local metrics/readiness/log evidence and are
 never guessed onto a tenant Application.
-The Application domain view can additionally present logical DNS destinations:
-A/AAAA questions and Kubernetes `cluster.local` search expansions corroborated
-by an exact base question or multiple search suffixes in one resolver context
-are grouped for display, while their exact resolver questions remain available
-for policy evaluation, history, and audit.
+The Application domain view presents every exact DNS inventory identity directly,
+including its observed question name and A/AAAA type. Each identity remains
+independently available for filtering, pagination, policy evaluation, history,
+and audit. The server's logical DNS grouping endpoints remain available to API
+clients but are not the web application's primary domain inventory view.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for
