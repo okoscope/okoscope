@@ -58,8 +58,10 @@ never guessed onto a tenant Application.
 The Application domain view presents every exact DNS inventory identity directly,
 including its observed question name and A/AAAA type. Each identity remains
 independently available for filtering, pagination, policy evaluation, history,
-and audit. The server's logical DNS grouping endpoints remain available to API
-clients but are not the web application's primary domain inventory view.
+and audit. The web application's non-interactive top-five overview uses the
+server's logical DNS grouping endpoint so Kubernetes resolver variants do not
+crowd other frequently observed destinations out of the summary. The exact
+inventory list remains the primary domain view and overview groups do not filter it.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for

@@ -26,12 +26,13 @@ The benchmark prints measured projection, list, and detail durations. Record res
 
 The logical DNS acceptance probe issues the bounded group page and top-five
 distribution concurrently to retain the API's bounded concurrent-query contract.
-The web Application domain view currently presents exact DNS inventory identities
-through the general inventory list and distribution instead. The benchmark fixture
-retains exact names plus namespace-, service-, and cluster-suffix questions in the
-same resolver contexts. This specifically guards against correlated rescans during
-Kubernetes search-expansion normalization; changing the grouping SQL must preserve
-both the latency ceiling and the functional DNS grouping test in
+The web Application domain view uses the grouped top-five distribution as a
+non-interactive overview and presents exact DNS inventory identities through the
+general inventory list. The benchmark fixture retains exact names plus namespace-,
+service-, and cluster-suffix questions in the same resolver contexts. This
+specifically guards against correlated rescans during Kubernetes search-expansion
+normalization; changing the grouping SQL must preserve both the latency ceiling and
+the functional DNS grouping test in
 `crates/server/tests/inventory_api.rs`.
 
 Facet acceptance data must include all five dimensions and record item, release, Pod, and distinct-value cardinalities. The first development profile assumes at most 100 clusters, 1,000 namespaces, 10 workload kinds, 10,000 workload names, and 10,000 container names per Application. These are test-shaping assumptions rather than API limits; every returned page remains capped at 200. Capture `EXPLAIN (ANALYZE, BUFFERS)` for scoped summary and each facet, including the first and cursor-bearing pages, before adding an index. Retain the plan output with the benchmark date and revision.
