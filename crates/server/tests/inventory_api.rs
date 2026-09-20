@@ -249,6 +249,7 @@ async fn inventory_api_covers_kinds_filters_evidence_pagination_and_tenant_isola
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/app/server".into(),
                 parent_command: None,
+                generation: None,
             }),
             Some("v1"),
         ),
@@ -344,6 +345,7 @@ async fn inventory_api_covers_kinds_filters_evidence_pagination_and_tenant_isola
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/app/worker".into(),
                 parent_command: None,
+                generation: None,
             }),
             Some("v1"),
         ),
@@ -352,6 +354,7 @@ async fn inventory_api_covers_kinds_filters_evidence_pagination_and_tenant_isola
             EventPayload::ProcessExec(ProcessExec {
                 executable: "<script>alert(1)</script>".into(),
                 parent_command: None,
+                generation: None,
             }),
             Some("v1"),
         ),

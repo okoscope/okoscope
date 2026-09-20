@@ -1,10 +1,11 @@
 use chrono::{Duration, Utc};
 use event_model::{
-    ContainerCategory, DnsAddressAnswer, DnsContext, DnsDirection, DnsName, DnsQueryType,
-    DnsResponseCode, DnsTransport, EVENT_SCHEMA_VERSION, EventPayload, FileActivityPath,
-    FileModify, KubernetesAttribution, NetworkAccept, NetworkAddressFamily, NetworkConnect,
-    NetworkConnectOutcome, NetworkDnsResponse, NetworkListen, ProcessExec, ProcessIdentity,
-    ReleaseIdentity, RuntimeEvent, SyscallEvent,
+    BaselineProvenance, ContainerCategory, DnsAddressAnswer, DnsContext, DnsDirection, DnsName,
+    DnsQueryType, DnsResponseCode, DnsTransport, EVENT_SCHEMA_VERSION, EventPayload,
+    FileActivityPath, FileModify, KubernetesAttribution, NetworkAccept, NetworkAddressFamily,
+    NetworkConnect, NetworkConnectOutcome, NetworkDnsResponse, NetworkListen, ProcessExec,
+    ProcessGenerationIdentity, ProcessIdentity, ReleaseIdentity, RuntimeEvent, SyscallEvent,
+    ThreadActivityWindow, ThreadNameAggregate,
 };
 use server::{
     application_credentials::{issue, revoke},
@@ -118,6 +119,216 @@ async fn application_stream_scope_overrides_wire_destination_and_honors_revocati
     ));
 }
 
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn thread_windows_are_replay_safe_epoch_separated_and_tenant_scoped(pool: sqlx::PgPool) {
+    let owned = bootstrap(&pool, &config("thread-window-owned"))
+        .await
+        .unwrap();
+    let foreign = bootstrap(&pool, &config("thread-window-foreign"))
+        .await
+        .unwrap();
+    let agent_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'thread-node','test')")
+        .bind(agent_id).bind(owned.organization_id).bind(owned.cluster_id).execute(&pool).await.unwrap();
+    let scope = SessionScope {
+        organization_id: owned.organization_id,
+        cluster_id: owned.cluster_id,
+    };
+    let mut credential_tx = pool.begin().await.unwrap();
+    let issued = issue(
+        &mut credential_tx,
+        owned.organization_id,
+        owned.project_id,
+        owned.application_id,
+        "thread-window",
+    )
+    .await
+    .unwrap();
+    credential_tx.commit().await.unwrap();
+    let application = server::application_credentials::authenticate(&pool, issued.token())
+        .await
+        .unwrap()
+        .unwrap();
+    let start = Utc::now() - Duration::minutes(1);
+    let epoch = Uuid::new_v4();
+    let mut first = thread_window_event(foreign.project_id, foreign.application_id, start, epoch);
+    let mut replay = first.clone();
+    assert_eq!(
+        persist_application_batch(
+            &pool,
+            scope,
+            application,
+            agent_id,
+            std::slice::from_mut(&mut first)
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let mut malformed = thread_window_event(
+        foreign.project_id,
+        foreign.application_id,
+        start + Duration::minutes(2),
+        Uuid::new_v4(),
+    );
+    if let EventPayload::ThreadActivityWindow(window) = &mut malformed.payload {
+        window.active_at_end = window.active_at_end.saturating_add(1);
+    }
+    assert!(matches!(
+        persist_application_batch(
+            &pool,
+            scope,
+            application,
+            agent_id,
+            std::slice::from_mut(&mut malformed)
+        )
+        .await,
+        Err(server::ingestion::IngestionError::InvalidTermination)
+    ));
+    assert_eq!(
+        persist_application_batch(
+            &pool,
+            scope,
+            application,
+            agent_id,
+            std::slice::from_mut(&mut replay)
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let mut next_epoch = thread_window_event(
+        foreign.project_id,
+        foreign.application_id,
+        start,
+        Uuid::new_v4(),
+    );
+    assert_eq!(
+        persist_application_batch(
+            &pool,
+            scope,
+            application,
+            agent_id,
+            std::slice::from_mut(&mut next_epoch)
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as("SELECT organization_id,application_id,observation_epoch FROM thread_activity_windows ORDER BY observation_epoch")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row.0 == owned.organization_id && row.1 == owned.application_id)
+    );
+    assert_ne!(rows[0].2, rows[1].2);
+    let derived_rows: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM runtime_events),(SELECT count(*) FROM runtime_event_groups),(SELECT count(*) FROM outbox_messages)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(derived_rows, (0, 0, 0));
+}
+
+fn thread_window_event(
+    project_id: Uuid,
+    application_id: Uuid,
+    start: chrono::DateTime<Utc>,
+    epoch: Uuid,
+) -> RuntimeEvent {
+    let process = ProcessIdentity {
+        cgroup_id: 7,
+        pid: 10,
+        tgid: 10,
+        command: "app".into(),
+    };
+    let generation = ProcessGenerationIdentity {
+        generation: 1,
+        observation_epoch: epoch,
+        start_observed: true,
+    };
+    let id = Uuid::new_v4();
+    RuntimeEvent {
+        id,
+        observed_at: start + Duration::seconds(60),
+        schema_version: EVENT_SCHEMA_VERSION,
+        attribution: KubernetesAttribution {
+            project_id,
+            application_id,
+            node_name: "node".into(),
+            namespace: "default".into(),
+            pod_uid: "pod".into(),
+            pod_name: "pod".into(),
+            container_id: "container".into(),
+            container_name: "app".into(),
+            workload_uid: "workload".into(),
+            workload_kind: "Deployment".into(),
+            workload_name: "app".into(),
+            release: None,
+            release_identity: None,
+        },
+        process: process.clone(),
+        payload: EventPayload::ThreadActivityWindow(ThreadActivityWindow {
+            id,
+            process,
+            generation,
+            window_started_at: start,
+            window_ended_at: start + Duration::seconds(60),
+            created: 1,
+            exited: 0,
+            active_at_start: 0,
+            active_at_end: 1,
+            peak_active: 1,
+            names: vec![ThreadNameAggregate {
+                name: "worker".into(),
+                created: 1,
+                exited: 0,
+                active: 1,
+            }],
+            baseline_provenance: BaselineProvenance::Observed,
+            baseline_complete: true,
+            name_overflow: 0,
+            gaps: vec![],
+        }),
+    }
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "manual thread-window storage/query benchmark"]
+async fn thread_window_storage_and_scoped_query_benchmark(pool: sqlx::PgPool) {
+    let ids = bootstrap(&pool, &config("thread-window-benchmark"))
+        .await
+        .unwrap();
+    let agent_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','test')")
+        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    let epoch = Uuid::new_v4();
+    let started = std::time::Instant::now();
+    sqlx::query("INSERT INTO thread_activity_windows(id,organization_id,project_id,application_id,cluster_id,agent_id,observed_at,process_cgroup_id,process_pid,process_tgid,process_command,process_generation,observation_epoch,start_observed,window_started_at,window_ended_at,created_count,exited_count,active_at_start,active_at_end,peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps) SELECT md5(g::text)::uuid,$1,$2,$3,$4,$5,now(),7,10,10,'app',1,$6,true,now()-((10001-g)*interval '1 minute'),now()-((10000-g)*interval '1 minute'),64,64,64,64,128,'observed',true,0,(SELECT jsonb_agg(jsonb_build_object('name','worker-'||n,'created',1,'exited',1,'active',1)) FROM generate_series(1,64) n),'[]'::jsonb FROM generate_series(1,10000) g")
+        .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
+        .bind(ids.cluster_id).bind(agent_id).bind(epoch).execute(&pool).await.unwrap();
+    let insert_elapsed = started.elapsed();
+    let query_started = std::time::Instant::now();
+    let queries = (0..8).map(|_| sqlx::query_scalar::<_, Uuid>("SELECT id FROM thread_activity_windows WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 ORDER BY window_started_at DESC,id DESC LIMIT 200")
+        .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).fetch_all(&pool));
+    let results = futures::future::join_all(queries).await;
+    let query_elapsed = query_started.elapsed();
+    let bytes: i64 = sqlx::query_scalar("SELECT pg_total_relation_size('thread_activity_windows')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    eprintln!(
+        "thread-window benchmark rows=10000 names=64 concurrent_queries=8 relation_bytes={bytes} insert_ms={} query_us={}",
+        insert_elapsed.as_millis(),
+        query_elapsed.as_micros()
+    );
+    assert!(results.into_iter().all(|rows| rows.unwrap().len() == 200));
+    assert!(query_elapsed < std::time::Duration::from_secs(1));
+}
+
 fn event(project_id: Uuid, application_id: Uuid) -> RuntimeEvent {
     RuntimeEvent {
         id: Uuid::new_v4(),
@@ -147,6 +358,7 @@ fn event(project_id: Uuid, application_id: Uuid) -> RuntimeEvent {
         payload: EventPayload::ProcessExec(ProcessExec {
             executable: "/bin/sh".into(),
             parent_command: None,
+            generation: None,
         }),
     }
 }

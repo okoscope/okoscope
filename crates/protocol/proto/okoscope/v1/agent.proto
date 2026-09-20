@@ -95,6 +95,18 @@ message ApplicationDiagnosticSnapshot {
   uint64 correlation = 7;
   uint64 delivery_retry = 8;
   uint64 unsupported = 9;
+  LifecycleDiagnosticSnapshot lifecycle = 10;
+}
+
+message LifecycleDiagnosticSnapshot {
+  uint64 output_dropped = 1;
+  uint64 generation_miss = 2;
+  uint64 snapshot_failed = 3;
+  uint64 snapshot_truncated = 4;
+  uint64 rename_miss = 5;
+  uint64 name_overflow = 6;
+  uint64 incomplete_window = 7;
+  uint64 delivery_gap = 8;
 }
 
 message ResourceCounters {
@@ -211,6 +223,8 @@ message RuntimeEvent {
     ProcessExit process_exit = 21;
     ContainerTermination container_termination = 22;
     ContainerRestart container_restart = 23;
+    ProcessStart process_start = 24;
+    ThreadActivityWindow thread_activity_window = 25;
   }
 }
 
@@ -281,6 +295,63 @@ message ProcessIdentity {
 message ProcessExec {
   string executable = 1;
   string parent_command = 2;
+  ProcessGenerationIdentity generation = 3;
+}
+
+message ProcessGenerationIdentity {
+  uint64 generation = 1;
+  string observation_epoch = 2;
+  bool start_observed = 3;
+}
+
+message ProcessStart {
+  ProcessGenerationIdentity generation = 1;
+  uint32 parent_pid = 2;
+  uint32 parent_tgid = 3;
+  string parent_command = 4;
+}
+
+enum BaselineProvenance {
+  BASELINE_PROVENANCE_UNSPECIFIED = 0;
+  BASELINE_PROVENANCE_OBSERVED = 1;
+  BASELINE_PROVENANCE_SNAPSHOT = 2;
+  BASELINE_PROVENANCE_UNAVAILABLE = 3;
+}
+
+enum ThreadGapReason {
+  THREAD_GAP_REASON_UNSPECIFIED = 0;
+  THREAD_GAP_REASON_KERNEL_LOSS = 1;
+  THREAD_GAP_REASON_DECODE_FAILURE = 2;
+  THREAD_GAP_REASON_ATTRIBUTION_FAILURE = 3;
+  THREAD_GAP_REASON_STATE_CAPACITY = 4;
+  THREAD_GAP_REASON_SNAPSHOT_RACE = 5;
+  THREAD_GAP_REASON_SNAPSHOT_PERMISSION = 6;
+  THREAD_GAP_REASON_SNAPSHOT_TRUNCATED = 7;
+  THREAD_GAP_REASON_DELIVERY_GAP = 8;
+}
+
+message ThreadNameAggregate {
+  string name = 1;
+  uint64 created = 2;
+  uint64 exited = 3;
+  uint64 active = 4;
+}
+
+message ThreadActivityWindow {
+  string window_id = 1;
+  ProcessGenerationIdentity generation = 2;
+  int64 window_started_at_unix_nanos = 3;
+  int64 window_ended_at_unix_nanos = 4;
+  uint64 created = 5;
+  uint64 exited = 6;
+  uint64 active_at_start = 7;
+  uint64 active_at_end = 8;
+  uint64 peak_active = 9;
+  repeated ThreadNameAggregate names = 10;
+  BaselineProvenance baseline_provenance = 11;
+  bool baseline_complete = 12;
+  uint64 name_overflow = 13;
+  repeated ThreadGapReason gaps = 14;
 }
 
 message ProcessExit {
@@ -291,6 +362,13 @@ message ProcessExit {
     ProcessSignaled signaled = 11;
   }
   GenerationCorrelation correlation = 12;
+  ProcessExitClassification classification = 13;
+  ProcessGenerationIdentity generation = 14;
+}
+
+enum ProcessExitClassification {
+  PROCESS_EXIT_CLASSIFICATION_LEGACY_UNCLASSIFIED = 0;
+  PROCESS_EXIT_CLASSIFICATION_LEADER = 1;
 }
 
 message ProcessExited { uint32 status = 1; }

@@ -1,9 +1,11 @@
 //! Transport-independent runtime event domain model.
 
+mod lifecycle;
 mod release;
 mod resource;
 mod termination;
 
+pub use lifecycle::*;
 pub use release::*;
 pub use resource::*;
 pub use termination::*;
@@ -39,6 +41,8 @@ impl RuntimeEvent {
     pub fn kind(&self) -> &'static str {
         match self.payload {
             EventPayload::ProcessExec(_) => "process.exec",
+            EventPayload::ProcessStart(_) => "process.start",
+            EventPayload::ThreadActivityWindow(_) => "thread.activity.window",
             EventPayload::Syscall(_) => "syscall",
             EventPayload::NetworkConnect(_) => "network.connect",
             EventPayload::NetworkListen(_) => "network.listen",
@@ -86,6 +90,8 @@ pub struct ProcessIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum EventPayload {
+    ProcessStart(ProcessStart),
+    ThreadActivityWindow(ThreadActivityWindow),
     ProcessExec(ProcessExec),
     Syscall(SyscallEvent),
     NetworkConnect(NetworkConnect),
@@ -106,6 +112,8 @@ pub enum EventPayload {
 pub struct ProcessExec {
     pub executable: String,
     pub parent_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<ProcessGenerationIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

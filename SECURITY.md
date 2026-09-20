@@ -10,8 +10,8 @@ source snapshots are supported on a best-effort basis.
 
 | Version | Supported |
 | --- | --- |
-| Latest `0.2.x` release | Yes |
-| `< 0.2` | No |
+| Latest `0.3.x` release | Yes |
+| `< 0.3` | No |
 
 This table will be updated when the support policy changes.
 
