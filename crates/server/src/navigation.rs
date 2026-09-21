@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+use crate::repository::ApplicationRepository;
 use crate::{
     access_control::ProjectRole,
     auth::{UserPrincipal, UserSessionAuthenticator},
@@ -427,13 +428,14 @@ async fn application_workers(
     Query(query): Query<WorkerPageQuery>,
 ) -> Result<Json<WorkerPage>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3)")
-        .bind(principal.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?;
+    let owned = ApplicationRepository::exists(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?;
     if !owned {
         return Err(NavigationError::not_found(&request_id));
     }

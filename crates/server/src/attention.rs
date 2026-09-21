@@ -13,6 +13,7 @@ use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::ProjectRepository;
 use crate::{
     access_control::resolve_project_access,
     auth::{IdentityPrincipal, OrganizationRole, UserSessionAuthenticator},
@@ -640,12 +641,9 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, AttentionError> {
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or(AttentionError::NotFound)?;
+    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+        .await?
+        .ok_or(AttentionError::NotFound)?;
     resolve_project_access(&state.pool, principal, organization_id, project_id)
         .await?
         .ok_or(AttentionError::NotFound)?;

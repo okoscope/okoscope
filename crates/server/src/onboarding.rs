@@ -19,6 +19,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::repository::ApplicationRepository;
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     application_credentials,
@@ -458,7 +459,14 @@ async fn owned_application(
     project_id: Uuid,
     application_id: Uuid,
 ) -> Result<(), ApiError> {
-    let found: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3)").bind(principal.organization_id).bind(project_id).bind(application_id).fetch_one(&state.pool).await.map_err(ApiError::database)?;
+    let found = ApplicationRepository::exists(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
     if found {
         Ok(())
     } else {

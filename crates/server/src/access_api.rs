@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::ProjectRepository;
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     access_control::{
@@ -1378,20 +1379,17 @@ async fn project_actor(
     request_id: &RequestId,
 ) -> Result<(IdentityPrincipal, Uuid, ProjectRole), AccessError> {
     let principal = identity(state, headers, request_id).await?;
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|error| AccessError::database(&error, request_id))?
-            .ok_or_else(|| {
-                AccessError::new(
-                    StatusCode::NOT_FOUND,
-                    "project_not_found",
-                    "resource not found",
-                    request_id,
-                )
-            })?;
+    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+        .await
+        .map_err(|error| AccessError::database(&error, request_id))?
+        .ok_or_else(|| {
+            AccessError::new(
+                StatusCode::NOT_FOUND,
+                "project_not_found",
+                "resource not found",
+                request_id,
+            )
+        })?;
     let access = resolve_project_access(&state.pool, principal, organization_id, project_id)
         .await
         .map_err(|error| AccessError::database(&error, request_id))?
