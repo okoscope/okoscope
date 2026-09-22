@@ -43,5 +43,15 @@ zeroize.workspace = true
 [dev-dependencies]
 serde_yaml.workspace = true
 
+# The inventory benchmark asserts wall-clock budgets against a live database.
+# Those budgets describe production hardware, so a shared CI runner fails them
+# for reasons unrelated to the change under test. It is excluded from the
+# default `cargo test` sweep and run explicitly:
+#   cargo test --release -p server --test inventory_benchmark -- --ignored
+[[test]]
+name = "inventory_benchmark"
+path = "tests/inventory_benchmark.rs"
+test = false
+
 [lints]
 workspace = true

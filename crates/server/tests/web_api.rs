@@ -3,6 +3,7 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use server::{
+    auth::{SESSION_COOKIE, SessionToken, hash_password},
     bootstrap::{BootstrapConfig, bootstrap},
     health,
     notification::NotificationService,
@@ -31,12 +32,47 @@ fn config(name: &str) -> BootstrapConfig {
     }
 }
 
-fn request(uri: &str, credential: Option<&str>) -> Request<Body> {
+fn request(uri: &str, session: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder().uri(uri);
-    if let Some(value) = credential {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {value}"));
+    if let Some(token) = session {
+        builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={token}"));
     }
     builder.body(Body::empty()).unwrap()
+}
+
+/// Creates a user in the organization and returns an active session token.
+///
+/// The browser-facing API authenticates a session cookie rather than the
+/// application credential used for ingestion, so these tests need a real
+/// session row.
+async fn session(pool: &sqlx::PgPool, organization_id: Uuid, role: &str) -> String {
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
+        .bind(user_id)
+        .bind(format!("{user_id}@example.test"))
+        .bind(hash_password("web api test password").unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
+    )
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(role)
+    .execute(pool)
+    .await
+    .unwrap();
+    let token = SessionToken::generate();
+    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(organization_id)
+        .bind(token.digest().to_vec())
+        .execute(pool)
+        .await
+        .unwrap();
+    token.expose().to_owned()
 }
 
 fn notifications(pool: sqlx::PgPool, enabled: bool) -> NotificationService {
@@ -90,6 +126,8 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
     let first = bootstrap(&pool, &first_config).await.unwrap();
     let second_config = config("web-second");
     let second = bootstrap(&pool, &second_config).await.unwrap();
+    let first_session = session(&pool, first.organization_id, "owner").await;
+    let second_session = session(&pool, second.organization_id, "owner").await;
     sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'1.0.0',now())")
         .bind(Uuid::new_v4()).bind(first.organization_id).bind(first.project_id).bind(first.application_id).execute(&pool).await.unwrap();
     let app = health::router(
@@ -126,10 +164,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
                     "/api/v1/projects/{}/notification-health",
                     first.project_id
                 ))
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", first_config.api_credential),
-                )
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={first_session}"))
                 .header("x-request-id", "notification-health-1")
                 .body(Body::empty())
                 .unwrap(),
@@ -166,10 +201,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
 
     let organization = app
         .clone()
-        .oneshot(request(
-            "/api/v1/organization",
-            Some(&first_config.api_credential),
-        ))
+        .oneshot(request("/api/v1/organization", Some(&first_session)))
         .await
         .unwrap();
     assert_eq!(organization.status(), StatusCode::OK);
@@ -180,10 +212,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
 
     let projects = app
         .clone()
-        .oneshot(request(
-            "/api/v1/projects?limit=1",
-            Some(&first_config.api_credential),
-        ))
+        .oneshot(request("/api/v1/projects?limit=1", Some(&first_session)))
         .await
         .unwrap();
     assert_eq!(projects.status(), StatusCode::OK);
@@ -197,7 +226,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
                 "/api/v1/projects/{}/applications/{}",
                 first.project_id, first.application_id
             ),
-            Some(&first_config.api_credential),
+            Some(&first_session),
         ))
         .await
         .unwrap();
@@ -208,7 +237,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
         .clone()
         .oneshot(request(
             &format!("/api/v1/projects/{}", first.project_id),
-            Some(&second_config.api_credential),
+            Some(&second_session),
         ))
         .await
         .unwrap();
@@ -236,11 +265,11 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
         preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
         "https://ui.example.com"
     );
-    assert!(
-        preflight
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
-            .is_none()
+    // The browser API authenticates a session cookie, so the preflight must
+    // grant credentials; the allowed origin list is what keeps that safe.
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
+        "true"
     );
 
     let denied = app
@@ -272,10 +301,7 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
                     "/api/v1/projects/{}/notification-health",
                     first.project_id
                 ))
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", first_config.api_credential),
-                )
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={first_session}"))
                 .header("x-request-id", "notification-health-db-failure")
                 .body(Body::empty())
                 .unwrap(),
@@ -296,6 +322,8 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
     let owner = bootstrap(&pool, &owner_config).await.unwrap();
     let empty_config = config("navigation-empty");
     let empty = bootstrap(&pool, &empty_config).await.unwrap();
+    let owner_session = session(&pool, owner.organization_id, "owner").await;
+    let empty_session = session(&pool, empty.organization_id, "owner").await;
     sqlx::query("DELETE FROM projects WHERE organization_id=$1")
         .bind(empty.organization_id)
         .execute(&pool)
@@ -317,10 +345,7 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
 
     let empty_page = json(
         app.clone()
-            .oneshot(request(
-                "/api/v1/projects",
-                Some(&empty_config.api_credential),
-            ))
+            .oneshot(request("/api/v1/projects", Some(&empty_session)))
             .await
             .unwrap(),
     )
@@ -329,10 +354,7 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
 
     let first_page = json(
         app.clone()
-            .oneshot(request(
-                "/api/v1/projects?limit=1",
-                Some(&owner_config.api_credential),
-            ))
+            .oneshot(request("/api/v1/projects?limit=1", Some(&owner_session)))
             .await
             .unwrap(),
     )
@@ -342,7 +364,7 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
         app.clone()
             .oneshot(request(
                 &format!("/api/v1/projects?limit=1&cursor={cursor}"),
-                Some(&owner_config.api_credential),
+                Some(&owner_session),
             ))
             .await
             .unwrap(),
@@ -354,7 +376,7 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
         .clone()
         .oneshot(request(
             &format!("/api/v1/projects?cursor={}", empty.project_id),
-            Some(&owner_config.api_credential),
+            Some(&owner_session),
         ))
         .await
         .unwrap();
@@ -367,7 +389,7 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
                 "/api/v1/projects/{}/applications/{}",
                 project_ids[0], owner.application_id
             ),
-            Some(&owner_config.api_credential),
+            Some(&owner_session),
         ))
         .await
         .unwrap();
@@ -380,7 +402,9 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
     let owner_config = config("recovery-api-owner");
     let owner = bootstrap(&pool, &owner_config).await.unwrap();
     let foreign_config = config("recovery-api-foreign");
-    bootstrap(&pool, &foreign_config).await.unwrap();
+    let foreign = bootstrap(&pool, &foreign_config).await.unwrap();
+    let owner_session = session(&pool, owner.organization_id, "owner").await;
+    let foreign_session = session(&pool, foreign.organization_id, "owner").await;
     let destination_id = Uuid::new_v4();
     let delivery_id = Uuid::new_v4();
     sqlx::query("INSERT INTO webhook_destinations(id,organization_id,project_id,name,url,encrypted_secret,secret_nonce) VALUES($1,$2,$3,'receiver','https://receiver.example/hook',$4,$5)")
@@ -393,7 +417,7 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
         pool,
         true,
         Some(notification_service),
-        &WebApiConfig::default(),
+        &WebApiConfig::new(vec!["https://ui.example.com".into()]).unwrap(),
     );
 
     let uri = format!(
@@ -405,11 +429,9 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(header::ORIGIN, "https://ui.example.com")
                 .uri(&uri)
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", owner_config.api_credential),
-                )
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={owner_session}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -422,11 +444,9 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(header::ORIGIN, "https://ui.example.com")
                 .uri(&uri)
-                .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", owner_config.api_credential),
-                )
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={owner_session}"))
                 .header("idempotency-key", "short")
                 .header("x-request-id", "recovery-invalid-key")
                 .body(Body::empty())
@@ -440,29 +460,28 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
         "recovery-invalid-key"
     );
 
-    let invalid_bearer = app
+    let invalid_session = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(header::ORIGIN, "https://ui.example.com")
                 .uri(&uri)
-                .header(header::AUTHORIZATION, "Bearer invalid")
-                .header("idempotency-key", "recovery-api-invalid-bearer")
+                .header(header::COOKIE, format!("{SESSION_COOKIE}=invalid"))
+                .header("idempotency-key", "recovery-api-invalid-session")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(invalid_bearer.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(invalid_session.status(), StatusCode::UNAUTHORIZED);
 
     let command = || {
         Request::builder()
             .method("POST")
+            .header(header::ORIGIN, "https://ui.example.com")
             .uri(&uri)
-            .header(
-                header::AUTHORIZATION,
-                format!("Bearer {}", owner_config.api_credential),
-            )
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={owner_session}"))
             .header("idempotency-key", "recovery-api-command-0001")
             .header("x-request-id", "recovery-api-request-1")
             .body(Body::empty())
@@ -482,10 +501,11 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
         .oneshot(
             Request::builder()
                 .method("POST")
+                .header(header::ORIGIN, "https://ui.example.com")
                 .uri(&uri)
                 .header(
-                    header::AUTHORIZATION,
-                    format!("Bearer {}", foreign_config.api_credential),
+                    header::COOKIE,
+                    format!("{SESSION_COOKIE}={foreign_session}"),
                 )
                 .header("idempotency-key", "recovery-api-command-0002")
                 .body(Body::empty())
@@ -500,7 +520,7 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
                 "/api/v1/projects/{}/notification-recovery-operations?limit=1",
                 owner.project_id
             ),
-            Some(&owner_config.api_credential),
+            Some(&owner_session),
         ))
         .await
         .unwrap();

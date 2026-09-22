@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
 
 concurrency:
   group: backend-ci-${{ github.ref }}
@@ -65,11 +68,11 @@ jobs:
         run: cargo clippy --workspace --exclude agent-ebpf --all-targets -- -D warnings
       - name: Test userspace
         run: cargo test --workspace --exclude agent-ebpf
-      - name: Test PostgreSQL migrations and notifications
-        run: |
-          cargo test -p server --test migrations -- --ignored --test-threads=1
-          cargo test -p server --test notification -- --ignored --test-threads=1
-          cargo test -p server --test policy_api -- --ignored --test-threads=1
+      - name: Test against PostgreSQL
+        # Covers every database-backed test, which carries #[ignore] so that a
+        # contributor without a database still gets a green `cargo test`. Naming
+        # individual targets here once let new test files go unrun for weeks.
+        run: cargo test -p server -- --ignored --test-threads=1
       - name: Build production manifests with Kustomize
         run: |
           kustomize build "$PRODUCTION_KUSTOMIZATION" > /tmp/okoscope-production.yaml
@@ -96,6 +99,35 @@ jobs:
         run: deploy/helm/test-onboarding-contract.sh
       - name: Validate installation documentation
         run: deploy/helm/test-docs.sh
+
+  inventory-benchmark:
+    # Wall-clock acceptance budgets, so this runs on a schedule and on demand
+    # rather than gating every pull request on shared-runner timing.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: okoscope_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/okoscope_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure inventory projection and read budgets
+        run: cargo test --release -p server --test inventory_benchmark -- --ignored --test-threads=1
 
   publish-server:
     if: github.event_name != 'pull_request'
