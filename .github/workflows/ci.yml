@@ -102,9 +102,15 @@ jobs:
 
   ebpf:
     # The kernel-side crate cannot join the `verify` job: it targets
-    # bpfel-unknown-none, needs a nightly toolchain to build core, and links
-    # through bpf-linker. Leaving it out of CI entirely left the most
-    # dangerous code in the tree unchecked, so it gets its own job.
+    # bpfel-unknown-none and needs a nightly toolchain to build core. Leaving
+    # it out of CI entirely left the most dangerous code in the tree unchecked.
+    #
+    # This job lints and type-checks the program for its real target, which is
+    # everything short of the final link. Linking needs bpf-linker, which in
+    # turn needs an LLVM newer than any Ubuntu runner image ships; pinning that
+    # toolchain here would trade a checked crate for a brittle job. Producing
+    # the object file stays a local step, `make build-ebpf`, and a change that
+    # only the linker would reject is not caught here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -113,12 +119,10 @@ jobs:
           toolchain: nightly-2026-09-21
           components: rust-src, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install bpf-linker
-        run: cargo install bpf-linker --locked --version 0.11.1
       - name: Lint kernel program
         run: cargo clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
-      - name: Build kernel program
-        run: cargo build -p agent-ebpf --target bpfel-unknown-none -Z build-std=core
+      - name: Lint shared kernel types
+        run: cargo clippy -p agent-ebpf-common --target bpfel-unknown-none -Z build-std=core -- -D warnings
       - name: Build C kernel program
         run: make -C crates/agent-ebpf-core
 
