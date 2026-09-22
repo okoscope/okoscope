@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -8,6 +9,7 @@ use axum::{
     routing::get,
 };
 use serde::Serialize;
+
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use url::Url;
 use uuid::Uuid;
@@ -180,16 +182,27 @@ impl WebApiConfig {
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
+/// The error body every endpoint returns, matching the `Error` schema.
+///
+/// `request_id` is filled in here, but `correlate_error` overwrites it on the
+/// way out with the id the middleware minted for the request. A handler that
+/// cannot reach a `RequestId` therefore still produces a correlated body; the
+/// field is not a handler's last word on it.
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope {
-    pub error: &'static str,
+    pub error: ErrorCode,
     pub message: String,
     pub request_id: String,
 }
 
+/// Builds the one error body shape the contract describes.
+///
+/// Taking [`ErrorCode`] rather than a string is the point: a code that is not
+/// in the published enum cannot be named here without adding it to both the
+/// constant list and the `OpenAPI` document, which the contract test checks.
 pub fn error_response(
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: impl Into<String>,
     request_id: &RequestId,
 ) -> Response {
@@ -199,6 +212,33 @@ pub fn error_response(
             error: code,
             message: message.into(),
             request_id: request_id.0.clone(),
+        }),
+    )
+        .into_response()
+}
+
+/// The same body for a handler that cannot reach a [`RequestId`].
+///
+/// `correlate_error` fills `request_id` in on the way out, so the response a
+/// client receives is complete either way. This exists so that such a handler
+/// says so plainly, instead of inventing a placeholder id that the middleware
+/// then overwrites — a literal that reads like a real correlation id in the
+/// source and never appears in one on the wire.
+pub fn uncorrelated_error_response(
+    status: StatusCode,
+    code: ErrorCode,
+    message: impl Into<String>,
+) -> Response {
+    #[derive(Serialize)]
+    struct Body {
+        error: ErrorCode,
+        message: String,
+    }
+    (
+        status,
+        Json(Body {
+            error: code,
+            message: message.into(),
         }),
     )
         .into_response()
@@ -260,7 +300,7 @@ async fn conventions(
     let mut response = if session_authenticated_mutation && !trusted_origin {
         error_response(
             StatusCode::FORBIDDEN,
-            "untrusted_origin",
+            ErrorCode::UNTRUSTED_ORIGIN,
             "state-changing session request requires a trusted Origin",
             &RequestId(request_id.clone()),
         )
@@ -416,7 +456,7 @@ mod tests {
         let request_id = RequestId("test-1".into());
         let response = error_response(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
+            ErrorCode::INVALID_REQUEST,
             "bad",
             &request_id,
         );

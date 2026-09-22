@@ -1396,3 +1396,61 @@ fn resolve_component<'a>(
         component_kind,
     )
 }
+
+/// The `error` field is a closed enum, and until this test existed nothing
+/// compared it against what the server actually emits. They had drifted badly:
+/// twenty-eight codes reached clients that the document never listed.
+///
+/// `ErrorCode` is now the only way to name a code in Rust, so this comparison
+/// covers every code the server can produce. It fails in both directions — an
+/// undocumented code and a documented one nothing emits are both drift.
+#[test]
+fn error_codes_match_the_openapi_contract() {
+    let document: serde_json::Value =
+        serde_yaml::from_str(&std::fs::read_to_string("../../openapi/okoscope-v1.yaml").unwrap())
+            .unwrap();
+    let documented: std::collections::BTreeSet<String> = document["components"]["schemas"]["Error"]
+        ["properties"]["error"]["enum"]
+        .as_array()
+        .expect("Error.error must declare an enum")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    let emitted: std::collections::BTreeSet<String> = server::error_code::ErrorCode::ALL
+        .iter()
+        .map(|code| code.as_str().to_owned())
+        .collect();
+
+    let undocumented: Vec<_> = emitted.difference(&documented).collect();
+    assert!(
+        undocumented.is_empty(),
+        "these codes are emitted but absent from the Error enum in openapi/okoscope-v1.yaml: {undocumented:?}"
+    );
+    let unemitted: Vec<_> = documented.difference(&emitted).collect();
+    assert!(
+        unemitted.is_empty(),
+        "these codes are documented but no longer emitted; remove them from the Error enum or add an ErrorCode constant: {unemitted:?}"
+    );
+}
+
+/// Every constant must be reachable through `ALL`, or the contract test above
+/// silently stops covering it.
+#[test]
+fn every_error_code_constant_is_listed_in_all() {
+    let listed = server::error_code::ErrorCode::ALL.len();
+    let unique: std::collections::BTreeSet<_> = server::error_code::ErrorCode::ALL
+        .iter()
+        .map(|code| code.as_str())
+        .collect();
+    assert_eq!(
+        listed,
+        unique.len(),
+        "ALL contains a duplicate; each code must appear once"
+    );
+    let source = std::fs::read_to_string("../server/src/error_code.rs").unwrap();
+    let declared = source.matches(": Self = Self(").count();
+    assert_eq!(
+        declared, listed,
+        "error_code.rs declares {declared} constants but ALL lists {listed}"
+    );
+}

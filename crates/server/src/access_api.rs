@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -149,13 +150,13 @@ async fn authentication_policy(State(state): State<AccessState>) -> Json<Authent
 #[derive(Debug)]
 struct AccessError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
     request_id: RequestId,
 }
 
 impl AccessError {
-    fn new(status: StatusCode, code: &'static str, message: &'static str, id: &RequestId) -> Self {
+    fn new(status: StatusCode, code: ErrorCode, message: &'static str, id: &RequestId) -> Self {
         Self {
             status,
             code,
@@ -168,13 +169,13 @@ impl AccessError {
         tracing::error!(request_id=%request_id.0, "access control database operation failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             request_id,
         )
     }
 
-    fn conflict(code: &'static str, request_id: &RequestId) -> Self {
+    fn conflict(code: ErrorCode, request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::CONFLICT,
             code,
@@ -188,7 +189,7 @@ impl IntoResponse for AccessError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
         struct Body {
-            error: &'static str,
+            error: ErrorCode,
             message: &'static str,
             request_id: String,
         }
@@ -196,7 +197,7 @@ impl IntoResponse for AccessError {
             crate::metrics::record_access_denial();
             tracing::warn!(
                 status = self.status.as_u16(),
-                error = self.code,
+                error = %self.code,
                 "access denied"
             );
         }
@@ -225,7 +226,7 @@ async fn identity(
         .ok_or_else(|| {
             AccessError::new(
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "authentication required",
                 request_id,
             )
@@ -242,7 +243,7 @@ async fn platform(
     if !principal.is_super_admin {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "super administrator role is required",
             request_id,
         ));
@@ -250,7 +251,7 @@ async fn platform(
     if privileged && !principal.has_recent_privilege() {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "privilege_confirmation_required",
+            ErrorCode::PRIVILEGE_CONFIRMATION_REQUIRED,
             "recent password confirmation is required",
             request_id,
         ));
@@ -271,7 +272,7 @@ async fn organization_admin(
     if principal.active_organization_id != Some(organization_id) {
         return Err(AccessError::new(
             StatusCode::NOT_FOUND,
-            "organization_not_found",
+            ErrorCode::ORGANIZATION_NOT_FOUND,
             "resource not found",
             request_id,
         ));
@@ -282,7 +283,7 @@ async fn organization_admin(
     {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "Organization administration is required",
             request_id,
         ));
@@ -315,7 +316,7 @@ async fn select_organization(
     let role: OrganizationRole = role.and_then(|value| value.parse().ok()).ok_or_else(|| {
         AccessError::new(
             StatusCode::NOT_FOUND,
-            "organization_not_found",
+            ErrorCode::ORGANIZATION_NOT_FOUND,
             "resource not found",
             &request_id,
         )
@@ -377,7 +378,7 @@ async fn confirm_privilege(
     if !crate::auth::verify_password(&input.current_password, &password_hash) {
         return Err(AccessError::new(
             StatusCode::BAD_REQUEST,
-            "current_password_invalid",
+            ErrorCode::CURRENT_PASSWORD_INVALID,
             "current password is incorrect",
             &request_id,
         ));
@@ -563,7 +564,7 @@ async fn platform_organization_by_id(
     .ok_or_else(|| {
         AccessError::new(
             StatusCode::NOT_FOUND,
-            "organization_not_found",
+            ErrorCode::ORGANIZATION_NOT_FOUND,
             "resource not found",
             request_id,
         )
@@ -654,7 +655,7 @@ async fn validate_platform_organization(
     if !crate::user_auth::valid_slug(&input.slug) || !crate::user_auth::valid_name(&input.name) {
         return Err(AccessError::new(
             StatusCode::BAD_REQUEST,
-            "validation_failed",
+            ErrorCode::VALIDATION_FAILED,
             "organization is invalid",
             request_id,
         ));
@@ -666,7 +667,7 @@ async fn validate_platform_organization(
             .map_err(|error| AccessError::database(&error, request_id))?;
         if exists {
             return Err(AccessError::conflict(
-                "organization_limit_reached",
+                ErrorCode::ORGANIZATION_LIMIT_REACHED,
                 request_id,
             ));
         }
@@ -690,7 +691,7 @@ async fn delete_platform_organization(
         .bind(organization_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
     if deleted.rows_affected() == 0 {
         return Err(AccessError::conflict(
-            "organization_not_deletable",
+            ErrorCode::ORGANIZATION_NOT_DELETABLE,
             &request_id,
         ));
     }
@@ -794,7 +795,7 @@ async fn create_platform_project(
     let mut project: PlatformProject = sqlx::query_as("INSERT INTO projects(id,organization_id,slug,name) SELECT $1,id,$3,$4 FROM organizations WHERE id=$2 RETURNING id,slug,name,created_at,archived_at,0::bigint application_count,0::bigint runtime_group_count")
         .bind(Uuid::new_v4()).bind(organization_id).bind(input.slug).bind(input.name)
         .fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, "organization_not_found", "resource not found", &request_id))?;
+        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::ORGANIZATION_NOT_FOUND, "resource not found", &request_id))?;
     project.effective_project_role = Some(ProjectRole::Admin);
     project.effective_access_source = Some(EffectiveAccessSource::Platform);
     project.capabilities = platform_capabilities();
@@ -905,7 +906,7 @@ async fn create_platform_application(
     let application: ProvisionedApplication = sqlx::query_as("INSERT INTO applications(id,organization_id,project_id,slug,name) SELECT $1,organization_id,id,$3,$4 FROM projects WHERE id=$2 RETURNING id,organization_id,project_id,slug,name,created_at")
         .bind(Uuid::new_v4()).bind(project_id).bind(input.slug).bind(input.name)
         .fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, "project_not_found", "resource not found", &request_id))?;
+        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::PROJECT_NOT_FOUND, "resource not found", &request_id))?;
     let issued = issue_application_credential(
         &mut tx,
         application.organization_id,
@@ -958,7 +959,7 @@ fn validate_named_resource(
     } else {
         Err(AccessError::new(
             StatusCode::BAD_REQUEST,
-            "validation_failed",
+            ErrorCode::VALIDATION_FAILED,
             "resource is invalid",
             request_id,
         ))
@@ -995,7 +996,7 @@ async fn set_user_status(
     lock_authority(&mut tx, &request_id).await?;
     let item: UserSummary = sqlx::query_as("UPDATE users SET disabled_at=CASE WHEN $2 THEN coalesce(disabled_at,now()) ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING id,email,display_name,(email_verified_at IS NOT NULL) email_verified,(disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=users.id AND p.revoked_at IS NULL) is_super_admin,created_at")
         .bind(user_id).bind(disabled).fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, "user_not_found", "resource not found", &request_id))?;
+        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", &request_id))?;
     sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1")
         .bind(user_id)
         .execute(&mut *tx)
@@ -1034,7 +1035,7 @@ async fn grant_super_admin(
     if actor.user_id == user_id {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "self_promotion_forbidden",
+            ErrorCode::SELF_PROMOTION_FORBIDDEN,
             "self promotion is forbidden",
             &request_id,
         ));
@@ -1050,7 +1051,7 @@ async fn grant_super_admin(
     if !eligible {
         return Err(AccessError::new(
             StatusCode::CONFLICT,
-            "user_not_eligible",
+            ErrorCode::USER_NOT_ELIGIBLE,
             "user is not eligible",
             &request_id,
         ));
@@ -1097,7 +1098,7 @@ async fn revoke_super_admin(
             .is_some_and(|item| item.code().as_deref() == Some("23514"))
         {
             Err(AccessError::conflict(
-                "last_super_admin_required",
+                ErrorCode::LAST_SUPER_ADMIN_REQUIRED,
                 &request_id,
             ))
         } else {
@@ -1229,7 +1230,7 @@ async fn update_organization_member(
     {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "role transition is forbidden",
             &request_id,
         ));
@@ -1237,7 +1238,7 @@ async fn update_organization_member(
     if actor.user_id == user_id && role_promotes(current.role, input.role) {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "self_promotion_forbidden",
+            ErrorCode::SELF_PROMOTION_FORBIDDEN,
             "self promotion is forbidden",
             &request_id,
         ));
@@ -1256,7 +1257,11 @@ async fn update_organization_member(
     .bind(role_name(input.role))
     .execute(&mut *tx)
     .await;
-    map_authority_result(result, "last_organization_owner_required", &request_id)?;
+    map_authority_result(
+        result,
+        ErrorCode::LAST_ORGANIZATION_OWNER_REQUIRED,
+        &request_id,
+    )?;
     audit(
         &mut tx,
         actor.user_id,
@@ -1296,7 +1301,7 @@ async fn remove_organization_member(
     {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "membership removal is forbidden",
             &request_id,
         ));
@@ -1313,7 +1318,11 @@ async fn remove_organization_member(
             .bind(user_id)
             .execute(&mut *tx)
             .await;
-    map_authority_result(result, "last_organization_owner_required", &request_id)?;
+    map_authority_result(
+        result,
+        ErrorCode::LAST_ORGANIZATION_OWNER_REQUIRED,
+        &request_id,
+    )?;
     sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND organization_id=$2")
         .bind(user_id).bind(organization_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
@@ -1344,11 +1353,11 @@ async fn organization_member_by_id(
     let row = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2")
         .bind(organization_id).bind(user_id).fetch_optional(pool).await
         .map_err(|error| AccessError::database(&error, request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, "user_not_found", "resource not found", request_id))?;
+        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", request_id))?;
     organization_member(row).ok_or_else(|| {
         AccessError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             request_id,
         )
@@ -1386,7 +1395,7 @@ async fn project_actor(
         .ok_or_else(|| {
             AccessError::new(
                 StatusCode::NOT_FOUND,
-                "project_not_found",
+                ErrorCode::PROJECT_NOT_FOUND,
                 "resource not found",
                 request_id,
             )
@@ -1397,7 +1406,7 @@ async fn project_actor(
         .ok_or_else(|| {
             AccessError::new(
                 StatusCode::NOT_FOUND,
-                "project_not_found",
+                ErrorCode::PROJECT_NOT_FOUND,
                 "resource not found",
                 request_id,
             )
@@ -1405,7 +1414,7 @@ async fn project_actor(
     if !access.can_manage_members() {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "Project administration is required",
             request_id,
         ));
@@ -1502,7 +1511,7 @@ async fn add_project_member(
     ) {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "Project role grant is forbidden",
             &request_id,
         ));
@@ -1519,7 +1528,7 @@ async fn add_project_member(
             .as_database_error()
             .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
         {
-            AccessError::conflict("membership_exists", &request_id)
+            AccessError::conflict(ErrorCode::MEMBERSHIP_EXISTS, &request_id)
         } else {
             AccessError::database(&error, &request_id)
         }
@@ -1562,7 +1571,7 @@ async fn update_project_member(
     ) {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "Project role transition is forbidden",
             &request_id,
         ));
@@ -1613,7 +1622,7 @@ async fn remove_project_member(
     ) {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "Project membership removal is forbidden",
             &request_id,
         ));
@@ -1656,11 +1665,11 @@ async fn project_member_by_id(
 ) -> Result<ProjectMember, AccessError> {
     let row = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,m.created_at FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 AND m.user_id=$2")
         .bind(project_id).bind(user_id).fetch_optional(pool).await.map_err(|error| AccessError::database(&error, request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, "user_not_found", "resource not found", request_id))?;
+        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", request_id))?;
     project_member(row).ok_or_else(|| {
         AccessError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             request_id,
         )
@@ -1705,7 +1714,7 @@ fn role_promotes(current: OrganizationRole, next: OrganizationRole) -> bool {
 
 fn map_authority_result(
     result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
-    code: &'static str,
+    code: ErrorCode,
     request_id: &RequestId,
 ) -> Result<(), AccessError> {
     result.map(|_| ()).map_err(|error| {
@@ -1765,7 +1774,7 @@ async fn list_audit(
     if !actor.is_super_admin && actor.organization_role != Some(OrganizationRole::Owner) {
         return Err(AccessError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "owner role is required",
             &request_id,
         ));

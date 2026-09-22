@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -118,28 +119,30 @@ impl IntoResponse for ApiError {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential".into(),
             ),
-            Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Self::Invalid(message) => {
+                (StatusCode::BAD_REQUEST, ErrorCode::INVALID_REQUEST, message)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "destination not found".into(),
             ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
-                "revision_conflict",
+                ErrorCode::REVISION_CONFLICT,
                 "destination revision conflict".into(),
             ),
             Self::RecoveryConflict(conflict) => (
                 StatusCode::CONFLICT,
                 match conflict {
-                    RecoveryConflictCode::InvalidState => "delivery_invalid_state",
-                    RecoveryConflictCode::ActiveLease => "delivery_active_lease",
-                    RecoveryConflictCode::DestinationDisabled => "destination_disabled",
-                    RecoveryConflictCode::IdempotencyKeyReused => "idempotency_key_reused",
-                    RecoveryConflictCode::BulkLimitExceeded => "bulk_limit_exceeded",
+                    RecoveryConflictCode::InvalidState => ErrorCode::DELIVERY_INVALID_STATE,
+                    RecoveryConflictCode::ActiveLease => ErrorCode::DELIVERY_ACTIVE_LEASE,
+                    RecoveryConflictCode::DestinationDisabled => ErrorCode::DESTINATION_DISABLED,
+                    RecoveryConflictCode::IdempotencyKeyReused => ErrorCode::IDEMPOTENCY_KEY_REUSED,
+                    RecoveryConflictCode::BulkLimitExceeded => ErrorCode::BULK_LIMIT_EXCEEDED,
                 },
                 "notification recovery command conflicts with current state".into(),
             ),
@@ -147,19 +150,12 @@ impl IntoResponse for ApiError {
                 tracing::error!(error=%error, "notification API database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error".into(),
                 )
             }
         };
-        (
-            status,
-            Json(ErrorBody {
-                error: code,
-                message,
-            }),
-        )
-            .into_response()
+        crate::web_api::uncorrelated_error_response(status, code, message)
     }
 }
 
@@ -197,12 +193,6 @@ impl From<RecoveryError> for ApiError {
             RecoveryError::Database(error) => Self::Database(error),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    error: &'static str,
-    message: String,
 }
 
 #[derive(Debug, Deserialize)]

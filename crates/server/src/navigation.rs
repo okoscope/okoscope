@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -59,7 +60,7 @@ async fn track_navigation(request: axum::extract::Request, next: Next) -> Respon
 #[derive(Debug)]
 struct NavigationError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: String,
     request_id: RequestId,
 }
@@ -68,7 +69,7 @@ impl NavigationError {
     fn unauthorized(request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
+            code: ErrorCode::UNAUTHORIZED,
             message: "invalid or missing bearer credential".into(),
             request_id: request_id.clone(),
         }
@@ -76,7 +77,7 @@ impl NavigationError {
     fn invalid(message: impl Into<String>, request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "invalid_request",
+            code: ErrorCode::INVALID_REQUEST,
             message: message.into(),
             request_id: request_id.clone(),
         }
@@ -84,7 +85,7 @@ impl NavigationError {
     fn not_found(request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "not_found",
+            code: ErrorCode::NOT_FOUND,
             message: "resource not found".into(),
             request_id: request_id.clone(),
         }
@@ -93,7 +94,7 @@ impl NavigationError {
         tracing::error!(request_id=%request_id.0, "navigation API database error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal_error",
+            code: ErrorCode::INTERNAL_ERROR,
             message: "internal server error".into(),
             request_id: request_id.clone(),
         }

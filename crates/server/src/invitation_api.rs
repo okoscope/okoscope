@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use std::{fmt, str::FromStr};
 
 use axum::{
@@ -149,7 +150,7 @@ fn invitation_digest(token: &str) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub(crate) struct InvitationError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
     request_id: RequestId,
 }
@@ -157,7 +158,7 @@ pub(crate) struct InvitationError {
 impl InvitationError {
     fn new(
         status: StatusCode,
-        code: &'static str,
+        code: ErrorCode,
         message: &'static str,
         request_id: &RequestId,
     ) -> Self {
@@ -173,7 +174,7 @@ impl InvitationError {
         tracing::error!(request_id=%request_id.0, "invitation database operation failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             request_id,
         )
@@ -182,7 +183,7 @@ impl InvitationError {
     fn unusable(request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::GONE,
-            "invitation_unusable",
+            ErrorCode::INVITATION_UNUSABLE,
             "invitation is unavailable",
             request_id,
         )
@@ -193,14 +194,14 @@ impl IntoResponse for InvitationError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
         struct Body {
-            error: &'static str,
+            error: ErrorCode,
             message: &'static str,
             request_id: String,
         }
         crate::metrics::record_invitation_lifecycle(false);
         tracing::warn!(
             status = self.status.as_u16(),
-            error = self.code,
+            error = %self.code,
             "invitation operation rejected"
         );
         let mut response = (
@@ -358,7 +359,7 @@ async fn identity(
         .ok_or_else(|| {
             InvitationError::new(
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "authentication required",
                 request_id,
             )
@@ -376,7 +377,7 @@ async fn platform_identity(
     } else {
         Err(InvitationError::new(
             StatusCode::FORBIDDEN,
-            "forbidden",
+            ErrorCode::FORBIDDEN,
             "super administrator role is required",
             request_id,
         ))
@@ -394,7 +395,7 @@ async fn organization_actor(
         return Ok(principal);
     }
     if principal.active_organization_id != Some(organization_id) {
-        return Err(not_found("organization_not_found", request_id));
+        return Err(not_found(ErrorCode::ORGANIZATION_NOT_FOUND, request_id));
     }
     if matches!(
         principal.organization_role,
@@ -423,11 +424,11 @@ async fn project_actor(
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?;
     let organization_id =
-        organization_id.ok_or_else(|| not_found("project_not_found", request_id))?;
+        organization_id.ok_or_else(|| not_found(ErrorCode::PROJECT_NOT_FOUND, request_id))?;
     let access = resolve_project_access(&state.pool, principal, organization_id, project_id)
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?
-        .ok_or_else(|| not_found("project_not_found", request_id))?;
+        .ok_or_else(|| not_found(ErrorCode::PROJECT_NOT_FOUND, request_id))?;
     if !access.can_manage_members() {
         return Err(forbidden(request_id));
     }
@@ -438,7 +439,7 @@ async fn project_actor(
     })
 }
 
-fn not_found(code: &'static str, request_id: &RequestId) -> InvitationError {
+fn not_found(code: ErrorCode, request_id: &RequestId) -> InvitationError {
     InvitationError::new(
         StatusCode::NOT_FOUND,
         code,
@@ -450,7 +451,7 @@ fn not_found(code: &'static str, request_id: &RequestId) -> InvitationError {
 fn forbidden(request_id: &RequestId) -> InvitationError {
     InvitationError::new(
         StatusCode::FORBIDDEN,
-        "forbidden",
+        ErrorCode::FORBIDDEN,
         "insufficient permission",
         request_id,
     )
@@ -459,13 +460,13 @@ fn forbidden(request_id: &RequestId) -> InvitationError {
 fn invalid(message: &'static str, request_id: &RequestId) -> InvitationError {
     InvitationError::new(
         StatusCode::BAD_REQUEST,
-        "validation_failed",
+        ErrorCode::VALIDATION_FAILED,
         message,
         request_id,
     )
 }
 
-fn conflict(code: &'static str, request_id: &RequestId) -> InvitationError {
+fn conflict(code: ErrorCode, request_id: &RequestId) -> InvitationError {
     InvitationError::new(
         StatusCode::CONFLICT,
         code,
@@ -753,7 +754,7 @@ fn require_mail(state: &InvitationState, request_id: &RequestId) -> Result<(), I
     } else {
         Err(InvitationError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "mail_unavailable",
+            ErrorCode::MAIL_UNAVAILABLE,
             "invitation mail is unavailable",
             request_id,
         ))
@@ -848,7 +849,7 @@ pub(crate) async fn issue_organization_invitation(
     if !config.mail.enabled {
         return Err(InvitationError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "mail_unavailable",
+            ErrorCode::MAIL_UNAVAILABLE,
             "invitation mail is unavailable",
             request_id,
         ));
@@ -896,7 +897,7 @@ async fn validate_issue_target(
     }
     .map_err(|error| InvitationError::database(&error, request_id))?;
     if !target_exists {
-        return Err(not_found("invitation_scope_not_found", request_id));
+        return Err(not_found(ErrorCode::INVITATION_SCOPE_NOT_FOUND, request_id));
     }
     let membership_exists: bool = if let Some(project_id) = request.scope.project_id {
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u JOIN project_memberships m ON m.user_id=u.id WHERE u.email=$1 AND m.project_id=$2)")
@@ -906,7 +907,7 @@ async fn validate_issue_target(
             .bind(&request.recipient_email).bind(request.scope.organization_id).fetch_one(&mut **tx).await
     }.map_err(|error| InvitationError::database(&error, request_id))?;
     if membership_exists {
-        return Err(conflict("membership_exists", request_id));
+        return Err(conflict(ErrorCode::MEMBERSHIP_EXISTS, request_id));
     }
     Ok(())
 }
@@ -927,7 +928,7 @@ async fn enforce_create_rate(
     if count >= i64::from(config.create_limit_per_hour) {
         Err(InvitationError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
+            ErrorCode::RATE_LIMITED,
             "invitation rate limit exceeded",
             request_id,
         ))
@@ -952,7 +953,7 @@ async fn reserve_expired_equivalent(
     .map_err(|error| InvitationError::database(&error, request_id))?;
     if let Some((id, expires_at)) = existing {
         if expires_at > Utc::now() {
-            return Err(conflict("invitation_exists", request_id));
+            return Err(conflict(ErrorCode::INVITATION_EXISTS, request_id));
         }
         sqlx::query("UPDATE invitations SET revoked_at=now() WHERE id=$1")
             .bind(id)
@@ -1035,7 +1036,7 @@ fn mail_error(_error: &MailError, request_id: &RequestId) -> InvitationError {
     tracing::error!(request_id=%request_id.0, "invitation mail intent failed");
     InvitationError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        "mail_unavailable",
+        ErrorCode::MAIL_UNAVAILABLE,
         "invitation mail is unavailable",
         request_id,
     )
@@ -1087,7 +1088,7 @@ fn map_issue_error(error: &sqlx::Error, request_id: &RequestId) -> InvitationErr
         .and_then(sqlx::error::DatabaseError::code)
         .is_some_and(|code| code == "23505")
     {
-        conflict("invitation_exists", request_id)
+        conflict(ErrorCode::INVITATION_EXISTS, request_id)
     } else {
         InvitationError::database(error, request_id)
     }
@@ -1130,7 +1131,7 @@ async fn authorize_organization_invitation(
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?
         .filter(|row| row.organization_id == organization_id && row.project_id.is_none())
-        .ok_or_else(|| not_found("invitation_not_found", request_id))?;
+        .ok_or_else(|| not_found(ErrorCode::INVITATION_NOT_FOUND, request_id))?;
     if row.role == "owner"
         && !principal.is_super_admin
         && principal.organization_role != Some(OrganizationRole::Owner)
@@ -1152,7 +1153,7 @@ async fn authorize_project_invitation(
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?
         .filter(|row| row.project_id == Some(project_id))
-        .ok_or_else(|| not_found("invitation_not_found", request_id))?;
+        .ok_or_else(|| not_found(ErrorCode::INVITATION_NOT_FOUND, request_id))?;
     let role = ProjectRole::from_str(&row.role)
         .map_err(|()| InvitationError::database(&sqlx::Error::RowNotFound, request_id))?;
     if !can_manage_project_role(
@@ -1233,9 +1234,9 @@ async fn resend(
     let locked = load_invitation_by_id_for_update(&mut tx, row.id)
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?
-        .ok_or_else(|| not_found("invitation_not_found", request_id))?;
+        .ok_or_else(|| not_found(ErrorCode::INVITATION_NOT_FOUND, request_id))?;
     if locked.accepted_at.is_some() || locked.revoked_at.is_some() || locked.replaced_at.is_some() {
-        return Err(conflict("invitation_not_pending", request_id));
+        return Err(conflict(ErrorCode::INVITATION_NOT_PENDING, request_id));
     }
     enforce_resend_rate(&mut tx, state, principal.user_id, request_id).await?;
     let replacement_id = Uuid::new_v4();
@@ -1326,7 +1327,7 @@ async fn enforce_resend_rate(
     if count >= i64::from(state.invitations.resend_limit_per_hour) {
         return Err(InvitationError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            "rate_limited",
+            ErrorCode::RATE_LIMITED,
             "invitation rate limit exceeded",
             request_id,
         ));
@@ -1410,9 +1411,9 @@ async fn revoke(
     let locked = load_invitation_by_id_for_update(&mut tx, row.id)
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?
-        .ok_or_else(|| not_found("invitation_not_found", request_id))?;
+        .ok_or_else(|| not_found(ErrorCode::INVITATION_NOT_FOUND, request_id))?;
     if locked.accepted_at.is_some() || locked.replaced_at.is_some() {
-        return Err(conflict("invitation_not_pending", request_id));
+        return Err(conflict(ErrorCode::INVITATION_NOT_PENDING, request_id));
     }
     if locked.revoked_at.is_none() {
         sqlx::query("UPDATE invitations SET revoked_at=now() WHERE id=$1")
@@ -1530,7 +1531,7 @@ async fn accept_new_user(
         tracing::error!(request_id=%request_id.0, "invitation password hashing failed");
         InvitationError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             &request_id,
         )
@@ -1551,7 +1552,10 @@ async fn accept_new_user(
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?;
     if user_exists {
-        return Err(conflict("invitation_requires_sign_in", &request_id));
+        return Err(conflict(
+            ErrorCode::INVITATION_REQUIRES_SIGN_IN,
+            &request_id,
+        ));
     }
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale,display_name) VALUES($1,$2,$3,now(),$4,$5)")
@@ -1620,7 +1624,10 @@ async fn accept_existing_user(
     let matches = identity
         .is_some_and(|(email, verified)| verified.is_some() && email == row.recipient_email);
     if !matches {
-        return Err(conflict("invitation_account_mismatch", &request_id));
+        return Err(conflict(
+            ErrorCode::INVITATION_ACCOUNT_MISMATCH,
+            &request_id,
+        ));
     }
     grant_and_consume(&mut tx, &row, principal.user_id, &request_id).await?;
     tx.commit()
@@ -1688,7 +1695,7 @@ fn map_accept_error(error: &sqlx::Error, request_id: &RequestId) -> InvitationEr
         .and_then(sqlx::error::DatabaseError::code)
         .is_some_and(|code| code == "23505")
     {
-        conflict("invitation_identity_conflict", request_id)
+        conflict(ErrorCode::INVITATION_IDENTITY_CONFLICT, request_id)
     } else {
         InvitationError::database(error, request_id)
     }

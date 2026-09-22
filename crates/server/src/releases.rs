@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -76,44 +77,33 @@ impl IntoResponse for ReleaseError {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential".to_owned(),
             ),
-            Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Self::Invalid(message) => {
+                (StatusCode::BAD_REQUEST, ErrorCode::INVALID_REQUEST, message)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "release or application not found".to_owned(),
             ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
-                "release_exists",
+                ErrorCode::RELEASE_EXISTS,
                 "release version already exists".to_owned(),
             ),
             Self::Database(error) => {
                 tracing::error!(error=%error, "release API database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error".to_owned(),
                 )
             }
         };
-        (
-            status,
-            Json(ErrorBody {
-                error: code,
-                message,
-            }),
-        )
-            .into_response()
+        crate::web_api::uncorrelated_error_response(status, code, message)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    error: &'static str,
-    message: String,
 }
 
 #[derive(Clone, Debug, FromRow, Serialize)]

@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -181,7 +182,7 @@ fn validate_setup(
         || !expected.is_some_and(|digest| bool::from(digest.ct_eq(&candidate)))
     {
         return Err(ApiError::unauthorized(
-            "invalid_setup_token",
+            ErrorCode::INVALID_SETUP_TOKEN,
             "setup authorization is invalid",
         ));
     }
@@ -194,10 +195,9 @@ async fn complete_setup(
     Json(input): Json<SetupRequest>,
 ) -> Result<Response, ApiError> {
     enforce_setup_rate(&state).await?;
-    let _permit = state
-        .setup_attempts
-        .try_acquire()
-        .map_err(|_| ApiError::unavailable("setup_rate_limited", "too many setup attempts"))?;
+    let _permit = state.setup_attempts.try_acquire().map_err(|_| {
+        ApiError::unavailable(ErrorCode::SETUP_RATE_LIMITED, "too many setup attempts")
+    })?;
     let email = validate_setup(&input, state.setup_digest, state.setup_expires_at)?;
     let password_hash = hash_password(&input.password).map_err(|_| ApiError::internal())?;
     let mut tx = state.pool.begin().await.map_err(ApiError::database)?;
@@ -213,7 +213,7 @@ async fn complete_setup(
     .map_err(ApiError::database)?;
     if has_super_admin {
         return Err(ApiError::conflict(
-            "setup_already_completed",
+            ErrorCode::SETUP_ALREADY_COMPLETED,
             "setup is already complete",
         ));
     }
@@ -268,7 +268,7 @@ async fn enforce_setup_rate(state: &OnboardingState) -> Result<(), ApiError> {
     }
     if attempts.len() >= MAX_ATTEMPTS {
         return Err(ApiError::unavailable(
-            "setup_rate_limited",
+            ErrorCode::SETUP_RATE_LIMITED,
             "too many setup attempts",
         ));
     }
@@ -328,7 +328,9 @@ async fn principal(
         .authenticate_headers(headers)
         .await
         .map_err(ApiError::database)?
-        .ok_or_else(|| ApiError::unauthorized("invalid_credential", "authentication required"))
+        .ok_or_else(|| {
+            ApiError::unauthorized(ErrorCode::INVALID_CREDENTIAL, "authentication required")
+        })
 }
 
 async fn installation_metadata(
@@ -338,13 +340,13 @@ async fn installation_metadata(
     principal(&headers, &state).await?;
     let metadata = state.metadata.ok_or_else(|| {
         ApiError::unavailable(
-            "installation_metadata_unavailable",
+            ErrorCode::INSTALLATION_METADATA_UNAVAILABLE,
             "agent installation metadata is unavailable",
         )
     })?;
-    metadata
-        .validate()
-        .map_err(|message| ApiError::unavailable("installation_metadata_unavailable", message))?;
+    metadata.validate().map_err(|message| {
+        ApiError::unavailable(ErrorCode::INSTALLATION_METADATA_UNAVAILABLE, message)
+    })?;
     Ok(Json(metadata))
 }
 
@@ -493,13 +495,13 @@ async fn create_installation(
         .ok_or_else(|| ApiError::validation("a bounded Idempotency-Key header is required"))?;
     let metadata = state.metadata.clone().ok_or_else(|| {
         ApiError::unavailable(
-            "installation_metadata_unavailable",
+            ErrorCode::INSTALLATION_METADATA_UNAVAILABLE,
             "agent installation metadata is unavailable",
         )
     })?;
     metadata
         .validate()
-        .map_err(|m| ApiError::unavailable("installation_metadata_unavailable", m))?;
+        .map_err(|m| ApiError::unavailable(ErrorCode::INSTALLATION_METADATA_UNAVAILABLE, m))?;
     let hash: [u8; 32] =
         Sha256::digest(serde_json::to_vec(&input).map_err(|_| ApiError::internal())?).into();
     if let Some(existing) = find_idempotent(&state.pool, user.organization_id, key).await? {
@@ -507,7 +509,7 @@ async fn create_installation(
             return Ok((StatusCode::OK, Json(existing_response(&existing.0))).into_response());
         }
         return Err(ApiError::conflict(
-            "idempotency_key_reused",
+            ErrorCode::IDEMPOTENCY_KEY_REUSED,
             "idempotency key was used for another request",
         ));
     }
@@ -835,11 +837,11 @@ fn derive_readiness(
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
 }
 impl ApiError {
-    fn unauthorized(code: &'static str, message: &'static str) -> Self {
+    fn unauthorized(code: ErrorCode, message: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code,
@@ -849,18 +851,18 @@ impl ApiError {
     fn validation(message: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "validation_failed",
+            code: ErrorCode::VALIDATION_FAILED,
             message,
         }
     }
-    fn conflict(code: &'static str, message: &'static str) -> Self {
+    fn conflict(code: ErrorCode, message: &'static str) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code,
             message,
         }
     }
-    fn unavailable(code: &'static str, message: &'static str) -> Self {
+    fn unavailable(code: ErrorCode, message: &'static str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code,
@@ -870,14 +872,14 @@ impl ApiError {
     fn not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            code: "not_found",
+            code: ErrorCode::NOT_FOUND,
             message: "resource not found",
         }
     }
     fn internal() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal_error",
+            code: ErrorCode::INTERNAL_ERROR,
             message: "internal server error",
         }
     }

@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -35,34 +36,34 @@ impl IntoResponse for ApiError {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "user session required",
             ),
-            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "owner role is required"),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                ErrorCode::FORBIDDEN,
+                "owner role is required",
+            ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "retention settings not found",
             ),
             Self::Invalid => (
                 StatusCode::BAD_REQUEST,
-                "invalid_request",
+                ErrorCode::INVALID_REQUEST,
                 "raw_days must be between 1 and 3650; history_days must be null or between raw_days and 3650",
             ),
             Self::Database(error) => {
                 tracing::error!(%error, "retention settings database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error",
                 )
             }
         };
-        (
-            status,
-            Json(serde_json::json!({"error": code, "message": message})),
-        )
-            .into_response()
+        crate::web_api::uncorrelated_error_response(status, code, message)
     }
 }
 
@@ -405,7 +406,7 @@ mod tests {
             ] {
                 let response = call(&app, &owner, "PUT", target, invalid).await;
                 assert_eq!(response.0, StatusCode::BAD_REQUEST);
-                assert_eq!(response.1["error"], "invalid_request");
+                assert_eq!(response.1["error"], ErrorCode::INVALID_REQUEST.as_str());
             }
         }
         assert_eq!(
