@@ -54,14 +54,24 @@ pub struct GroupKey<'a> {
 ///
 /// # Two definitions of the same number
 ///
-/// Retention purges raw events and leaves the group row behind at
-/// `occurrence_count = 0`, which split every aggregate here in two: over all
-/// groups, or only over groups that still have evidence. The endpoints do not
-/// agree on which one they mean — `runtime_group_count` is counted one way for
-/// a project and another for its applications, so an organization with
-/// retention enabled cannot sum one into the other. Both readings are spelled
-/// out and named rather than reconciled, because picking one changes a number
-/// an API already returns.
+/// Retention can leave a group row behind at `occurrence_count = 0`, which
+/// splits every aggregate here in two: over all groups, or only over groups
+/// that still have evidence.
+///
+/// That count is not "raw events" — it sums raw events and history snapshots,
+/// so a compacted group keeps its count. It reaches zero only after the
+/// snapshots expire too, leaving a group with no surviving record of any kind,
+/// held in place by a policy revision, a suppression or an unprocessed outbox
+/// message. Anything else at zero is deleted, and `runtime_history_snapshots`
+/// cascades with it — so counting over all groups yields neither a live total
+/// nor a historical one, but live groups plus whatever residue policy happens
+/// to pin. A genuine historical total belongs to `runtime_history_snapshots`.
+///
+/// The endpoints do not agree on which reading they mean: `runtime_group_count`
+/// is counted one way for a project and another for its applications, so one
+/// cannot be summed into the other. Both readings are spelled out and named
+/// rather than reconciled, because picking one changes a number an API already
+/// returns.
 pub mod aggregates {
     /// Counts every group of a project, evidence or not.
     /// Expects `projects` aliased as `p`.
@@ -217,12 +227,20 @@ impl EventGroupRepository {
 
     /// Folds one further observation into an existing group.
     ///
-    /// The `occurrence_count = 0` branches are not defensive padding. Retention
-    /// purges raw events and decrements the count to zero while leaving the
-    /// group row in place, so a group can be observed again after its window
-    /// has been emptied. Extending the old window with `LEAST`/`GREATEST` would
-    /// then report a first sighting whose evidence no longer exists, so a group
-    /// at zero restarts its window at the new observation instead.
+    /// The `occurrence_count = 0` branches are not defensive padding, and the
+    /// state they guard is narrower than "retention ran". `recount_groups` in
+    /// [`crate::runtime_retention::worker`] sums raw events and history
+    /// snapshots together, so compacting a group's raw events into a snapshot
+    /// leaves the count intact — the snapshot carries it. The count reaches
+    /// zero only once the snapshots have expired in turn, at which point the
+    /// group has no surviving record of any kind, raw or summarised, and
+    /// survives deletion only because a policy revision, a suppression or an
+    /// unprocessed outbox message still points at it.
+    ///
+    /// Such a group can still be observed again. Extending its old window with
+    /// `LEAST`/`GREATEST` would report a first sighting that nothing at all
+    /// substantiates, so a group at zero restarts its window at the new
+    /// observation instead.
     pub async fn record_occurrence<'e, E>(
         executor: E,
         group_id: Uuid,
@@ -627,9 +645,11 @@ mod tests {
         assert_eq!((first_seen, last_seen, count), (at(5), at(20), 3));
     }
 
-    /// Retention empties a group without deleting it. The next observation must
-    /// restart the window instead of extending one whose evidence is gone —
-    /// otherwise the group reports a first sighting nothing can substantiate.
+    /// A group whose raw events and history snapshots have both expired sits at
+    /// zero without being deleted, because something outside retention's reach
+    /// still references it. The next observation must restart the window rather
+    /// than extend one whose evidence is wholly gone — otherwise the group
+    /// reports a first sighting that nothing can substantiate.
     #[sqlx::test(migrator = "crate::database::MIGRATOR")]
     #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
     async fn restarts_the_window_of_a_group_retention_emptied(pool: PgPool) {
