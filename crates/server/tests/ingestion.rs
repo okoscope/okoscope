@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound, Utc};
 use event_model::{
     ContainerCategory, DnsAddressAnswer, DnsContext, DnsDirection, DnsName, DnsQueryType,
     DnsResponseCode, DnsTransport, EVENT_SCHEMA_VERSION, EventPayload, FileActivityPath,
@@ -118,10 +118,19 @@ async fn application_stream_scope_overrides_wire_destination_and_honors_revocati
     ));
 }
 
+/// The current time at `PostgreSQL`'s storage precision.
+///
+/// `timestamptz` keeps microseconds, so a nanosecond-precision `Utc::now()`
+/// does not survive a round trip and an equality assertion against the stored
+/// value fails on platforms whose clock has nanosecond resolution.
+fn now() -> DateTime<Utc> {
+    Utc::now().trunc_subsecs(6)
+}
+
 fn event(project_id: Uuid, application_id: Uuid) -> RuntimeEvent {
     RuntimeEvent {
         id: Uuid::new_v4(),
-        observed_at: Utc::now() - Duration::seconds(2),
+        observed_at: now() - Duration::seconds(2),
         schema_version: EVENT_SCHEMA_VERSION,
         attribution: KubernetesAttribution {
             project_id,
@@ -325,7 +334,7 @@ async fn termination_correlation_and_restart_projection_are_durable_and_replay_s
         },
         agent_id,
     };
-    let now = Utc::now();
+    let now = now();
     let mut kernel = event(ids.project_id, ids.application_id);
     kernel.observed_at = now;
     kernel.payload = EventPayload::ProcessExit(ProcessExit::new(
@@ -471,7 +480,7 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
         },
         agent_id,
     };
-    let now = Utc::now();
+    let now = now();
     let release_id = Uuid::new_v4();
     sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'inventory-v1',$5)")
         .bind(release_id)

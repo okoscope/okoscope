@@ -243,7 +243,10 @@ mod tests {
         (organization, project)
     }
 
-    async fn session(pool: &PgPool, org: Uuid, role: &str) -> String {
+    /// Creates a user with the given organization role and returns both the
+    /// user id and an active session token. The id is needed to grant project
+    /// membership, which an organization role below admin does not confer.
+    async fn session_for(pool: &PgPool, org: Uuid, role: &str) -> (Uuid, String) {
         let user = Uuid::new_v4();
         sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
             .bind(user)
@@ -264,7 +267,26 @@ mod tests {
         let token = SessionToken::generate();
         sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
         .bind(Uuid::new_v4()).bind(user).bind(org).bind(token.digest().to_vec()).execute(pool).await.unwrap();
-        token.expose().to_owned()
+        (user, token.expose().to_owned())
+    }
+
+    async fn session(pool: &PgPool, org: Uuid, role: &str) -> String {
+        session_for(pool, org, role).await.1
+    }
+
+    /// Grants the user a role on the project. An organization `member` does not
+    /// inherit project access, so a test acting as one needs this row.
+    async fn project_membership(pool: &PgPool, org: Uuid, project: Uuid, user: Uuid, role: &str) {
+        sqlx::query(
+            "INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,$4)",
+        )
+        .bind(org)
+        .bind(project)
+        .bind(user)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     fn app(pool: PgPool) -> Router {
@@ -411,25 +433,46 @@ mod tests {
         let (org, project) = tenant(&pool).await;
         let (other, other_project) = tenant(&pool).await;
         let owner = session(&pool, org, "owner").await;
-        let member = session(&pool, org, "member").await;
+        let (member_id, member) = session_for(&pool, org, "member").await;
+        project_membership(&pool, org, project, member_id, "member").await;
         let app = app(pool);
         let finite = r#"{"enabled":true,"raw_days":7,"history_days":60}"#;
         let org_path = format!("/api/v1/organizations/{org}/runtime-retention");
         let path = format!("/api/v1/projects/{project}/runtime-retention");
         for target in [&path, &org_path] {
             assert_eq!(
-                call(&app, &member, "GET", target, "").await.0,
-                StatusCode::OK
-            );
-            assert_eq!(
-                call(&app, &member, "PUT", target, finite).await.0,
-                StatusCode::FORBIDDEN
-            );
-            assert_eq!(
                 call(&app, "", "GET", target, "").await.0,
                 StatusCode::UNAUTHORIZED
             );
         }
+
+        // A project member reads its project's retention but cannot change it.
+        assert_eq!(
+            call(&app, &member, "GET", &path, "").await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&app, &member, "PUT", &path, finite).await.0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Organization retention is owner and admin territory. A member is not
+        // told it exists, so the read is a 404 rather than a 403.
+        assert_eq!(
+            call(&app, &member, "GET", &org_path, "").await.0,
+            StatusCode::NOT_FOUND
+        );
+        // The write path answers 403 where the read answers 404: put_organization
+        // checks the active organization before the owner role, so it confirms
+        // the resource exists to a member who may not read it.
+        assert_eq!(
+            call(&app, &member, "PUT", &org_path, finite).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, &owner, "GET", &org_path, "").await.0,
+            StatusCode::OK
+        );
         assert_eq!(
             call(&app, &member, "DELETE", &path, "").await.0,
             StatusCode::FORBIDDEN
