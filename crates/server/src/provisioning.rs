@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::OrganizationRepository;
 use crate::{
     admin_auth::AdminAuthenticator,
     application_credentials::{
@@ -482,9 +483,7 @@ async fn list_projects(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ProjectPage>, ProvisioningError> {
     authorize_platform_admin(&state, &headers, &request_id).await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)")
-        .bind(organization_id)
-        .fetch_one(&state.pool)
+    let exists: bool = OrganizationRepository::exists(&state.pool, organization_id)
         .await
         .map_err(|error| {
             ProvisioningError::database(&error, "project_slug_conflict", &request_id)
@@ -644,9 +643,7 @@ async fn create_project(
         .map_err(|error| ProvisioningError::database(&error, "project_slug_conflict", &request_id))?;
         return Ok((StatusCode::OK, Json(project)));
     }
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)")
-        .bind(organization_id)
-        .fetch_one(&mut *tx)
+    let exists: bool = OrganizationRepository::exists(&mut *tx, organization_id)
         .await
         .map_err(|error| {
             ProvisioningError::database(&error, "project_slug_conflict", &request_id)

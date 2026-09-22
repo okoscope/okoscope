@@ -16,6 +16,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::repository::{OrganizationRepository, ProjectRepository};
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     access_control::{ProjectRole, can_manage_project_role, resolve_project_access},
@@ -418,12 +419,9 @@ async fn project_actor(
     request_id: &RequestId,
 ) -> Result<ProjectActor, InvitationError> {
     let principal = identity(state, headers, request_id).await?;
-    let organization_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|error| InvitationError::database(&error, request_id))?;
+    let organization_id: Option<Uuid> = ProjectRepository::organization_of(&state.pool, project_id)
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
     let organization_id =
         organization_id.ok_or_else(|| not_found("project_not_found", request_id))?;
     let access = resolve_project_access(&state.pool, principal, organization_id, project_id)
@@ -894,10 +892,7 @@ async fn validate_issue_target(
         .fetch_one(&mut **tx)
         .await
     } else {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1)")
-            .bind(request.scope.organization_id)
-            .fetch_one(&mut **tx)
-            .await
+        OrganizationRepository::exists(&mut **tx, request.scope.organization_id).await
     }
     .map_err(|error| InvitationError::database(&error, request_id))?;
     if !target_exists {

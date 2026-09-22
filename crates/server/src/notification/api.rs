@@ -30,6 +30,7 @@ use super::{
         test_destination,
     },
 };
+use crate::repository::ProjectRepository;
 
 #[derive(Clone, Debug)]
 struct NotificationApiState {
@@ -263,12 +264,9 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, ApiError> {
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.service.pool)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    let organization_id: Uuid = ProjectRepository::organization_of(&state.service.pool, project_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     resolve_project_access(&state.service.pool, principal, organization_id, project_id)
         .await?
         .ok_or(ApiError::NotFound)?;

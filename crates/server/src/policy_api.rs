@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::{ApplicationRepository, ProjectRepository};
 use crate::{
     access_control::resolve_project_access,
     auth::{IdentityPrincipal, UserSessionAuthenticator},
@@ -398,13 +399,10 @@ async fn principal(
         .await
         .map_err(|error| PolicyApiError::database(&error, request_id))?
         .ok_or_else(|| PolicyApiError::unauthorized(request_id))?;
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(|error| PolicyApiError::database(&error, request_id))?
-            .ok_or_else(|| PolicyApiError::not_found(request_id))?;
+    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+        .await
+        .map_err(|error| PolicyApiError::database(&error, request_id))?
+        .ok_or_else(|| PolicyApiError::not_found(request_id))?;
     resolve_project_access(&state.pool, identity, organization_id, project_id)
         .await
         .map_err(|error| PolicyApiError::database(&error, request_id))?
@@ -451,9 +449,14 @@ async fn ensure_application(
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<(), PolicyApiError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3)")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id)
-        .fetch_one(&state.pool).await.map_err(|error| PolicyApiError::database(&error,request_id))?;
+    let exists = ApplicationRepository::exists(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?;
     if exists {
         Ok(())
     } else {

@@ -26,6 +26,27 @@ querying, and presentation.
    updates query-oriented projections.
 6. Users query tenant-scoped HTTP endpoints; the web UI renders those APIs.
 
+## Server layering
+
+The server separates request handling from persistence:
+
+| Layer | Location | Responsibility |
+| --- | --- | --- |
+| Transport | `*_api.rs`, `api.rs`, `navigation.rs` | Parse and authorize requests, map domain errors onto the HTTP error envelope, serialize responses. |
+| Persistence | `repository/` | Own SQL statement text, row types, and tenant-scoping predicates. |
+
+A shared entity queried from more than one endpoint belongs in a repository
+rather than in a handler, so that its tenant-scoping predicate is written and
+reviewed once. Repository methods are generic over `sqlx::PgExecutor`: a caller
+passes a pool for a standalone read or a transaction handle to enlist the
+statement in its own unit of work. Repositories never open or commit
+transactions, and they return `sqlx::Error` because the status code for a
+persistence failure depends on the endpoint, not on the query.
+
+Persistence rows are distinct from response bodies. A repository returns a row
+type; the endpoint projects it into the serializable shape named in the OpenAPI
+contract, so that table layout and public JSON evolve independently.
+
 ## Trust boundaries
 
 - The agent is privileged relative to observed workloads and must be deployed

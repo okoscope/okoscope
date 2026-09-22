@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::retention_settings::{self as settings, ProjectRetention, RetentionPolicy};
+use crate::repository::ProjectRepository;
 use crate::{
     access_control::{EffectiveProjectAccess, resolve_project_access},
     auth::{IdentityPrincipal, OrganizationRole, UserSessionAuthenticator},
@@ -127,12 +128,9 @@ async fn owned_project(
     user: IdentityPrincipal,
     id: Uuid,
 ) -> Result<(Uuid, EffectiveProjectAccess, ProjectRetention), ApiError> {
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    let organization_id: Uuid = ProjectRepository::organization_of(pool, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     let access = resolve_project_access(pool, user, organization_id, id)
         .await?
         .ok_or(ApiError::NotFound)?;

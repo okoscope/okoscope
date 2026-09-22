@@ -16,6 +16,7 @@ use std::{
 };
 use uuid::Uuid;
 
+use crate::repository::{ApplicationRepository, ProjectRepository};
 use crate::{
     access_control::resolve_project_access,
     application_credentials::ApplicationCredentialScope,
@@ -904,12 +905,9 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, ResourceError> {
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or(ResourceError::NotFound)?;
+    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+        .await?
+        .ok_or(ResourceError::NotFound)?;
     resolve_project_access(&state.pool, principal, organization_id, project_id)
         .await?
         .ok_or(ResourceError::NotFound)?;
@@ -922,8 +920,8 @@ async fn ensure_application(
     project_id: Uuid,
     application_id: Uuid,
 ) -> Result<(), ResourceError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3)")
-        .bind(organization_id).bind(project_id).bind(application_id).fetch_one(pool).await?;
+    let exists =
+        ApplicationRepository::exists(pool, organization_id, project_id, application_id).await?;
     if exists {
         Ok(())
     } else {
