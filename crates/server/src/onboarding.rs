@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::UserRepository;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -125,9 +126,7 @@ struct SetupStatus {
 }
 
 async fn super_admin_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL)")
-        .fetch_one(pool)
-        .await
+    UserRepository::active_super_admin_exists(pool).await
 }
 
 async fn setup_status(State(state): State<OnboardingState>) -> Result<Json<SetupStatus>, ApiError> {
@@ -205,12 +204,9 @@ async fn complete_setup(
         .execute(&mut *tx)
         .await
         .map_err(ApiError::database)?;
-    let has_super_admin: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL)",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(ApiError::database)?;
+    let has_super_admin = UserRepository::active_super_admin_exists(&mut *tx)
+        .await
+        .map_err(ApiError::database)?;
     if has_super_admin {
         return Err(ApiError::conflict(
             ErrorCode::SETUP_ALREADY_COMPLETED,
@@ -284,15 +280,14 @@ async fn insert_setup_rows(
     user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), ApiError> {
-    sqlx::query(
-        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name,preferred_locale) VALUES($1,$2,$3,now(),$4,$5)",
+    UserRepository::insert_verified(
+        &mut **tx,
+        user_id,
+        email,
+        password_hash,
+        input.locale.as_str(),
+        &input.display_name,
     )
-    .bind(user_id)
-    .bind(email)
-    .bind(password_hash)
-    .bind(&input.display_name)
-    .bind(input.locale.as_str())
-    .execute(&mut **tx)
     .await
     .map_err(ApiError::database)?;
     sqlx::query("INSERT INTO platform_role_assignments(user_id,role) VALUES($1,'super_admin')")

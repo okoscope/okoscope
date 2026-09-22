@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::UserRepository;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -762,13 +763,11 @@ async fn enqueue_application_mail(
     if !mail.enabled {
         return Ok(());
     }
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT u.email,u.preferred_locale FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.role='owner' AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL ORDER BY u.email LIMIT 101",
-    )
-    .bind(organization_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id))?;
+    let rows = UserRepository::active_organization_owners(&mut **tx, organization_id)
+        .await
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
+        })?;
     if rows.len() > crate::transactional_mail::MAX_RECIPIENTS {
         return Err(ProvisioningError::invalid(
             "owners",
