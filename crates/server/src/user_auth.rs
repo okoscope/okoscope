@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -132,7 +133,7 @@ pub async fn verify_user_access(pool: &PgPool, setup_enabled: bool) -> anyhow::R
 #[derive(Debug)]
 struct AuthError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
     request_id: RequestId,
 }
@@ -140,7 +141,7 @@ struct AuthError {
 impl AuthError {
     fn new(
         status: StatusCode,
-        code: &'static str,
+        code: ErrorCode,
         message: &'static str,
         request_id: &RequestId,
     ) -> Self {
@@ -154,7 +155,7 @@ impl AuthError {
     fn validation(message: &'static str, request_id: &RequestId) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
-            "validation_failed",
+            ErrorCode::VALIDATION_FAILED,
             message,
             request_id,
         )
@@ -163,7 +164,7 @@ impl AuthError {
         tracing::error!(request_id=%request_id.0, "user authentication operation failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             request_id,
         )
@@ -174,7 +175,7 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
         struct Body {
-            error: &'static str,
+            error: ErrorCode,
             message: &'static str,
             request_id: String,
         }
@@ -454,7 +455,7 @@ async fn register(
     if !state.public_signup_enabled || !state.mail.enabled {
         return Err(AuthError::new(
             StatusCode::NOT_FOUND,
-            "registration_disabled",
+            ErrorCode::REGISTRATION_DISABLED,
             "registration is disabled",
             &request_id,
         ));
@@ -503,7 +504,7 @@ async fn register(
         {
             return Err(AuthError::new(
                 StatusCode::CONFLICT,
-                "registration_conflict",
+                ErrorCode::REGISTRATION_CONFLICT,
                 "email or organization slug is unavailable",
                 &request_id,
             ));
@@ -589,7 +590,7 @@ async fn login(
         crate::metrics::record_authentication(false);
         return Err(AuthError::new(
             StatusCode::UNAUTHORIZED,
-            "invalid_credentials",
+            ErrorCode::INVALID_CREDENTIALS,
             "invalid email or password",
             &request_id,
         ));
@@ -597,7 +598,7 @@ async fn login(
     if user.email_verified_at.is_none() {
         return Err(AuthError::new(
             StatusCode::FORBIDDEN,
-            "email_verification_required",
+            ErrorCode::EMAIL_VERIFICATION_REQUIRED,
             "email verification is required",
             &request_id,
         ));
@@ -619,7 +620,7 @@ async fn establish_session(
         .map_err(|()| {
             AuthError::new(
                 StatusCode::UNAUTHORIZED,
-                "invalid_credentials",
+                ErrorCode::INVALID_CREDENTIALS,
                 "invalid email or password",
                 request_id,
             )
@@ -857,7 +858,7 @@ async fn confirm_verification(
 fn unusable_action(request_id: &RequestId) -> AuthError {
     AuthError::new(
         StatusCode::BAD_REQUEST,
-        "action_token_invalid",
+        ErrorCode::ACTION_TOKEN_INVALID,
         "action token is invalid or expired",
         request_id,
     )
@@ -923,7 +924,7 @@ async fn authenticate(
         .ok_or_else(|| {
             AuthError::new(
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "authentication required",
                 request_id,
             )
@@ -950,7 +951,7 @@ async fn change_password(
     if !verify_password(&input.current_password, &user.password_hash) {
         return Err(AuthError::new(
             StatusCode::BAD_REQUEST,
-            "current_password_invalid",
+            ErrorCode::CURRENT_PASSWORD_INVALID,
             "current password is incorrect",
             &request_id,
         ));
@@ -1103,7 +1104,7 @@ async fn lookup_user_by_id(
 fn unusable_session(request_id: &RequestId) -> AuthError {
     AuthError::new(
         StatusCode::UNAUTHORIZED,
-        "unauthorized",
+        ErrorCode::UNAUTHORIZED,
         "authentication required",
         request_id,
     )

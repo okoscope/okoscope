@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use std::collections::HashMap;
 
 use axum::{
@@ -18,7 +19,7 @@ use crate::{
     access_control::resolve_project_access,
     auth::{IdentityPrincipal, OrganizationRole, UserSessionAuthenticator},
     notification::health::{NotificationHealthState, NotificationQueueSnapshot, derive_state},
-    web_api::{RequestId, error_response},
+    web_api::RequestId,
 };
 
 // Authentication plus a fixed repository statement sequence; neither budget depends on tenant cardinality.
@@ -56,33 +57,28 @@ enum AttentionError {
 }
 impl IntoResponse for AttentionError {
     fn into_response(self) -> Response {
-        let request_id = RequestId("uncorrelated".into());
         match self {
-            Self::Unauthorized => error_response(
+            Self::Unauthorized => crate::web_api::uncorrelated_error_response(
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential",
-                &request_id,
             ),
-            Self::Invalid(message) => error_response(
+            Self::Invalid(message) => crate::web_api::uncorrelated_error_response(
                 StatusCode::BAD_REQUEST,
-                "invalid_request",
+                ErrorCode::INVALID_REQUEST,
                 message,
-                &request_id,
             ),
-            Self::NotFound => error_response(
+            Self::NotFound => crate::web_api::uncorrelated_error_response(
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "resource not found",
-                &request_id,
             ),
             Self::Database(error) => {
                 tracing::error!(%error, "attention API database error");
-                error_response(
+                crate::web_api::uncorrelated_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error",
-                    &request_id,
                 )
             }
         }

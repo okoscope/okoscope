@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use std::sync::{Arc, OnceLock};
 
 use axum::{
@@ -133,32 +134,28 @@ impl IntoResponse for DnsGroupError {
         let (status, error, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential".into(),
             ),
-            Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Self::Invalid(message) => {
+                (StatusCode::BAD_REQUEST, ErrorCode::INVALID_REQUEST, message)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "logical DNS group not found".into(),
             ),
             Self::Database(error) => {
                 tracing::error!(%error, "logical DNS group API database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error".into(),
                 )
             }
         };
-        (status, Json(ErrorBody { error, message })).into_response()
+        crate::web_api::uncorrelated_error_response(status, error, message)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    error: &'static str,
-    message: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

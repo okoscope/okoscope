@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
@@ -82,12 +83,12 @@ impl IdentityTokenCodec {
     }
 
     fn encode(&self, payload: &IdentityTokenPayload) -> Result<String, InventoryApiError> {
-        let encoded = hex::encode(
-            serde_json::to_vec(payload)
-                .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?,
-        );
+        let encoded =
+            hex::encode(serde_json::to_vec(payload).map_err(|_| {
+                InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN)
+            })?);
         let mut mac = HmacSha256::new_from_slice(self.key.as_ref())
-            .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?;
+            .map_err(|_| InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN))?;
         mac.update(encoded.as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
         Ok(format!(
@@ -102,32 +103,40 @@ impl IdentityTokenCodec {
         expected: (Uuid, Uuid, Uuid, Option<&str>),
     ) -> Result<IdentityTokenPayload, InventoryApiError> {
         if token.is_empty() || token.len() > 1000 {
-            return Err(InventoryApiError::IdentityToken("invalid_identity_token"));
+            return Err(InventoryApiError::IdentityToken(
+                ErrorCode::INVALID_IDENTITY_TOKEN,
+            ));
         }
         let mut parts = token.split('.');
         let digest_prefix = parts.next().unwrap_or_default();
         let encoded = parts.next().unwrap_or_default();
         let signature = parts.next().unwrap_or_default();
         if parts.next().is_some() || digest_prefix.len() != 64 {
-            return Err(InventoryApiError::IdentityToken("invalid_identity_token"));
+            return Err(InventoryApiError::IdentityToken(
+                ErrorCode::INVALID_IDENTITY_TOKEN,
+            ));
         }
         let signature = hex::decode(signature)
-            .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?;
+            .map_err(|_| InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN))?;
         let mut mac = HmacSha256::new_from_slice(self.key.as_ref())
-            .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?;
+            .map_err(|_| InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN))?;
         mac.update(encoded.as_bytes());
         mac.verify_slice(&signature)
-            .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?;
-        let payload: IdentityTokenPayload = serde_json::from_slice(
-            &hex::decode(encoded)
-                .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?,
-        )
-        .map_err(|_| InventoryApiError::IdentityToken("invalid_identity_token"))?;
+            .map_err(|_| InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN))?;
+        let payload: IdentityTokenPayload =
+            serde_json::from_slice(&hex::decode(encoded).map_err(|_| {
+                InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN)
+            })?)
+            .map_err(|_| InventoryApiError::IdentityToken(ErrorCode::INVALID_IDENTITY_TOKEN))?;
         if payload.identity_digest != digest_prefix || hex::decode(digest_prefix).is_err() {
-            return Err(InventoryApiError::IdentityToken("invalid_identity_token"));
+            return Err(InventoryApiError::IdentityToken(
+                ErrorCode::INVALID_IDENTITY_TOKEN,
+            ));
         }
         if Utc::now().timestamp() >= payload.expires_at {
-            return Err(InventoryApiError::IdentityToken("expired_identity_token"));
+            return Err(InventoryApiError::IdentityToken(
+                ErrorCode::EXPIRED_IDENTITY_TOKEN,
+            ));
         }
         if payload.format_version != 1
             || payload.identity_version != CURRENT_INVENTORY_IDENTITY_VERSION.get()
@@ -137,7 +146,7 @@ impl IdentityTokenCodec {
             || expected.3.is_some_and(|kind| payload.kind != kind)
         {
             return Err(InventoryApiError::IdentityToken(
-                "identity_token_scope_mismatch",
+                ErrorCode::IDENTITY_TOKEN_SCOPE_MISMATCH,
             ));
         }
         Ok(payload)
@@ -198,7 +207,7 @@ pub fn router(pool: PgPool) -> Router {
 enum InventoryApiError {
     Unauthorized,
     Invalid(String),
-    IdentityToken(&'static str),
+    IdentityToken(ErrorCode),
     NotFound,
     Conflict,
     Database(sqlx::Error),
@@ -215,10 +224,12 @@ impl IntoResponse for InventoryApiError {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential".to_owned(),
             ),
-            Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Self::Invalid(message) => {
+                (StatusCode::BAD_REQUEST, ErrorCode::INVALID_REQUEST, message)
+            }
             Self::IdentityToken(code) => (
                 StatusCode::BAD_REQUEST,
                 code,
@@ -226,38 +237,25 @@ impl IntoResponse for InventoryApiError {
             ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "runtime inventory resource not found".to_owned(),
             ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
-                "label_conflict",
+                ErrorCode::LABEL_CONFLICT,
                 "the runtime behavior label was changed by another request".to_owned(),
             ),
             Self::Database(error) => {
                 tracing::error!(error=%error, "runtime inventory API database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error".to_owned(),
                 )
             }
         };
-        (
-            status,
-            Json(ErrorBody {
-                error: code,
-                message,
-            }),
-        )
-            .into_response()
+        crate::web_api::uncorrelated_error_response(status, code, message)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorBody {
-    error: &'static str,
-    message: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1749,7 +1747,9 @@ mod tests {
                     Some("process")
                 )
             ),
-            Err(InventoryApiError::IdentityToken("invalid_identity_token"))
+            Err(InventoryApiError::IdentityToken(
+                ErrorCode::INVALID_IDENTITY_TOKEN
+            ))
         ));
         let token = codec.issue(token_payload()).unwrap();
         assert!(matches!(
@@ -1763,7 +1763,7 @@ mod tests {
                 )
             ),
             Err(InventoryApiError::IdentityToken(
-                "identity_token_scope_mismatch"
+                ErrorCode::IDENTITY_TOKEN_SCOPE_MISMATCH
             ))
         ));
     }
@@ -1778,7 +1778,9 @@ mod tests {
                 &"x".repeat(1001),
                 (Uuid::nil(), Uuid::nil(), Uuid::nil(), None)
             ),
-            Err(InventoryApiError::IdentityToken("invalid_identity_token"))
+            Err(InventoryApiError::IdentityToken(
+                ErrorCode::INVALID_IDENTITY_TOKEN
+            ))
         ));
         for valid in [1, 5, 10] {
             assert_eq!(aggregate_limit(Some(valid)).unwrap(), valid);
@@ -1800,7 +1802,9 @@ mod tests {
                     Some("process")
                 )
             ),
-            Err(InventoryApiError::IdentityToken("expired_identity_token"))
+            Err(InventoryApiError::IdentityToken(
+                ErrorCode::EXPIRED_IDENTITY_TOKEN
+            ))
         ));
     }
 }

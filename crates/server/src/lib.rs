@@ -11,6 +11,7 @@ pub mod backfill;
 pub mod bootstrap;
 pub mod database;
 pub mod dns_group_api;
+pub mod error_code;
 pub mod grouping;
 pub mod health;
 pub mod ingestion;

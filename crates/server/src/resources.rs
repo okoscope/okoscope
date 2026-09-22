@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -150,29 +151,27 @@ impl IntoResponse for ResourceError {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential".into(),
             ),
-            Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", message),
+            Self::Invalid(message) => {
+                (StatusCode::BAD_REQUEST, ErrorCode::INVALID_REQUEST, message)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
-                "not_found",
+                ErrorCode::NOT_FOUND,
                 "application or release not found".into(),
             ),
             Self::Database(error) => {
                 tracing::error!(%error, "resource API database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
+                    ErrorCode::INTERNAL_ERROR,
                     "internal server error".into(),
                 )
             }
         };
-        (
-            status,
-            Json(serde_json::json!({"error": code, "message": message})),
-        )
-            .into_response()
+        crate::web_api::uncorrelated_error_response(status, code, message)
     }
 }
 

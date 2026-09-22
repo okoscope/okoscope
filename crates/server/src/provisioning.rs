@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -85,7 +86,7 @@ enum ProvisioningPrincipal {
 #[derive(Debug)]
 struct ProvisioningError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: String,
     request_id: RequestId,
     fields: Option<std::collections::BTreeMap<&'static str, String>>,
@@ -95,7 +96,7 @@ impl ProvisioningError {
     fn invalid_credential(request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code: "invalid_credential",
+            code: ErrorCode::INVALID_CREDENTIAL,
             message: "invalid or missing bearer credential".into(),
             request_id: request_id.clone(),
             fields: None,
@@ -106,14 +107,14 @@ impl ProvisioningError {
         let detail = detail.into();
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "validation_failed",
+            code: ErrorCode::VALIDATION_FAILED,
             message: "the request contains invalid fields".into(),
             request_id: request_id.clone(),
             fields: Some(std::collections::BTreeMap::from([(field, detail)])),
         }
     }
 
-    fn not_found(code: &'static str, request_id: &RequestId) -> Self {
+    fn not_found(code: ErrorCode, request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code,
@@ -123,7 +124,7 @@ impl ProvisioningError {
         }
     }
 
-    fn conflict(code: &'static str, request_id: &RequestId) -> Self {
+    fn conflict(code: ErrorCode, request_id: &RequestId) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code,
@@ -133,7 +134,7 @@ impl ProvisioningError {
         }
     }
 
-    fn database(error: &sqlx::Error, conflict_code: &'static str, request_id: &RequestId) -> Self {
+    fn database(error: &sqlx::Error, conflict_code: ErrorCode, request_id: &RequestId) -> Self {
         if error
             .as_database_error()
             .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
@@ -143,7 +144,7 @@ impl ProvisioningError {
         tracing::error!(error=%error, request_id=%request_id.0, "provisioning database error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "internal_error",
+            code: ErrorCode::INTERNAL_ERROR,
             message: "internal server error".into(),
             request_id: request_id.clone(),
             fields: None,
@@ -151,11 +152,11 @@ impl ProvisioningError {
     }
 
     fn completed(request_id: &RequestId) -> Self {
-        Self::conflict("operation_already_completed", request_id)
+        Self::conflict(ErrorCode::OPERATION_ALREADY_COMPLETED, request_id)
     }
 
     fn idempotency_reused(request_id: &RequestId) -> Self {
-        Self::conflict("idempotency_key_reused", request_id)
+        Self::conflict(ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
     }
 }
 
@@ -163,7 +164,7 @@ impl IntoResponse for ProvisioningError {
     fn into_response(self) -> Response {
         #[derive(Serialize)]
         struct Body {
-            error: &'static str,
+            error: ErrorCode,
             message: String,
             request_id: String,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -269,7 +270,9 @@ async fn resolve_principal(
         .tenant
         .authenticate_identity(presented)
         .await
-        .map_err(|error| ProvisioningError::database(&error, "credential_conflict", request_id))?
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::CREDENTIAL_CONFLICT, request_id)
+        })?
         .ok_or_else(|| ProvisioningError::invalid_credential(request_id))?;
     if principal.is_super_admin {
         Ok(ProvisioningPrincipal::PlatformSuperAdmin)
@@ -290,7 +293,7 @@ async fn authorize_platform_admin(
         ProvisioningPrincipal::PlatformSuperAdmin => Ok(()),
         ProvisioningPrincipal::Tenant(_) => Err(ProvisioningError {
             status: StatusCode::FORBIDDEN,
-            code: "forbidden",
+            code: ErrorCode::FORBIDDEN,
             message: "super administrator role is required".into(),
             request_id: request_id.clone(),
             fields: None,
@@ -301,7 +304,7 @@ async fn authorize_platform_admin(
 fn authorize_organization(
     principal: ProvisioningPrincipal,
     organization_id: Uuid,
-    not_found_code: &'static str,
+    not_found_code: ErrorCode,
     request_id: &RequestId,
 ) -> Result<(), ProvisioningError> {
     match principal {
@@ -314,7 +317,7 @@ fn authorize_organization(
         ProvisioningPrincipal::Tenant(tenant) if tenant.organization_id == organization_id => {
             Err(ProvisioningError {
                 status: StatusCode::FORBIDDEN,
-                code: "forbidden",
+                code: ErrorCode::FORBIDDEN,
                 message: "owner role is required".into(),
                 request_id: request_id.clone(),
                 fields: None,
@@ -419,7 +422,7 @@ async fn reserve_idempotency(
     .bind(fingerprint.as_slice())
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, "idempotency_key_reused", request_id))?;
+    .map_err(|error| ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id))?;
     if inserted.is_some() {
         return Ok(Idempotency::Fresh(reservation_id));
     }
@@ -430,7 +433,7 @@ async fn reserve_idempotency(
     .bind(key_hash.as_slice())
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, "idempotency_key_reused", request_id))?;
+    .map_err(|error| ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id))?;
     if existing.0.as_slice() != fingerprint.as_slice() {
         return Err(ProvisioningError::idempotency_reused(request_id));
     }
@@ -453,7 +456,7 @@ async fn complete_idempotency(
             .execute(&mut **tx)
             .await
             .map_err(|error| {
-                ProvisioningError::database(&error, "idempotency_key_reused", request_id)
+                ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
             })?;
     }
     Ok(())
@@ -471,7 +474,7 @@ async fn list_organizations(
     .fetch_all(&state.pool)
     .await
     .map_err(|error| {
-        ProvisioningError::database(&error, "organization_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
     })?;
     Ok(Json(OrganizationPage { items }))
 }
@@ -486,11 +489,11 @@ async fn list_projects(
     let exists: bool = OrganizationRepository::exists(&state.pool, organization_id)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, "project_slug_conflict", &request_id)
+            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
         })?;
     if !exists {
         return Err(ProvisioningError::not_found(
-            "organization_not_found",
+            ErrorCode::ORGANIZATION_NOT_FOUND,
             &request_id,
         ));
     }
@@ -500,7 +503,7 @@ async fn list_projects(
     .bind(organization_id)
     .fetch_all(&state.pool)
     .await
-    .map_err(|error| ProvisioningError::database(&error, "project_slug_conflict", &request_id))?;
+    .map_err(|error| ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id))?;
     Ok(Json(ProjectPage { items }))
 }
 
@@ -516,11 +519,11 @@ async fn list_applications(
         .fetch_one(&state.pool)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
         })?;
     if !exists {
         return Err(ProvisioningError::not_found(
-            "project_not_found",
+            ErrorCode::PROJECT_NOT_FOUND,
             &request_id,
         ));
     }
@@ -531,7 +534,7 @@ async fn list_applications(
     .fetch_all(&state.pool)
     .await
     .map_err(|error| {
-        ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
     })?;
     Ok(Json(ApplicationPage { items }))
 }
@@ -551,9 +554,9 @@ async fn get_application(
     .fetch_optional(&state.pool)
     .await
     .map_err(|error| {
-        ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
     })?
-    .ok_or_else(|| ProvisioningError::not_found("application_not_found", &request_id))?;
+    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, &request_id))?;
     Ok(Json(application))
 }
 
@@ -567,7 +570,7 @@ async fn create_organization(
     validate_slug(&input.slug, &request_id)?;
     validate_name(&input.name, &request_id)?;
     let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, "organization_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
     })?;
     let idempotency = reserve_idempotency(
         &mut tx,
@@ -584,7 +587,11 @@ async fn create_organization(
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| {
-                    ProvisioningError::database(&error, "organization_slug_conflict", &request_id)
+                    ProvisioningError::database(
+                        &error,
+                        ErrorCode::ORGANIZATION_SLUG_CONFLICT,
+                        &request_id,
+                    )
                 })?;
         return Ok((StatusCode::OK, Json(organization)));
     }
@@ -596,10 +603,10 @@ async fn create_organization(
     .bind(input.name)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, "organization_slug_conflict", &request_id))?;
+    .map_err(|error| ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id))?;
     complete_idempotency(&mut tx, &idempotency, organization.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, "organization_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
     })?;
     Ok((StatusCode::CREATED, Json(organization)))
 }
@@ -615,13 +622,13 @@ async fn create_project(
     authorize_organization(
         principal,
         organization_id,
-        "organization_not_found",
+        ErrorCode::ORGANIZATION_NOT_FOUND,
         &request_id,
     )?;
     validate_slug(&input.slug, &request_id)?;
     validate_name(&input.name, &request_id)?;
     let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, "project_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
     })?;
     let organization_id_text = organization_id.to_string();
     let idempotency = reserve_idempotency(
@@ -640,26 +647,26 @@ async fn create_project(
         .bind(organization_id)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|error| ProvisioningError::database(&error, "project_slug_conflict", &request_id))?;
+        .map_err(|error| ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id))?;
         return Ok((StatusCode::OK, Json(project)));
     }
     let exists: bool = OrganizationRepository::exists(&mut *tx, organization_id)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, "project_slug_conflict", &request_id)
+            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
         })?;
     if !exists {
         return Err(ProvisioningError::not_found(
-            "organization_not_found",
+            ErrorCode::ORGANIZATION_NOT_FOUND,
             &request_id,
         ));
     }
     let project: ProjectResponse = sqlx::query_as("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,$3,$4) RETURNING id,organization_id,slug,name,created_at")
         .bind(Uuid::new_v4()).bind(organization_id).bind(input.slug).bind(input.name)
-        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,"project_slug_conflict",&request_id))?;
+        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,ErrorCode::PROJECT_SLUG_CONFLICT,&request_id))?;
     complete_idempotency(&mut tx, &idempotency, project.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, "project_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
     })?;
     Ok((StatusCode::CREATED, Json(project)))
 }
@@ -675,7 +682,7 @@ async fn create_application(
     validate_slug(&input.slug, &request_id)?;
     validate_name(&input.name, &request_id)?;
     let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
     })?;
     let (organization_id, project_name): (Uuid, String) =
         sqlx::query_as("SELECT organization_id,name FROM projects WHERE id=$1")
@@ -683,10 +690,21 @@ async fn create_application(
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| {
-                ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+                ProvisioningError::database(
+                    &error,
+                    ErrorCode::APPLICATION_SLUG_CONFLICT,
+                    &request_id,
+                )
             })?
-            .ok_or_else(|| ProvisioningError::not_found("project_not_found", &request_id))?;
-    authorize_organization(principal, organization_id, "project_not_found", &request_id)?;
+            .ok_or_else(|| {
+                ProvisioningError::not_found(ErrorCode::PROJECT_NOT_FOUND, &request_id)
+            })?;
+    authorize_organization(
+        principal,
+        organization_id,
+        ErrorCode::PROJECT_NOT_FOUND,
+        &request_id,
+    )?;
     let project_id_text = project_id.to_string();
     let idempotency = reserve_idempotency(
         &mut tx,
@@ -701,7 +719,7 @@ async fn create_application(
     }
     let application: ApplicationResponse = sqlx::query_as("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,$4,$5) RETURNING id,organization_id,project_id,slug,name,created_at")
         .bind(Uuid::new_v4()).bind(organization_id).bind(project_id).bind(input.slug).bind(input.name)
-        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,"application_slug_conflict",&request_id))?;
+        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,ErrorCode::APPLICATION_SLUG_CONFLICT,&request_id))?;
     let credential = issue(
         &mut tx,
         organization_id,
@@ -711,7 +729,7 @@ async fn create_application(
     )
     .await
     .map_err(|error| {
-        ProvisioningError::database(&error, "credential_name_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
     })?;
     let response = CreatedApplicationResponse {
         application,
@@ -728,7 +746,7 @@ async fn create_application(
     .await?;
     complete_idempotency(&mut tx, &idempotency, response.application.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, "application_slug_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
     })?;
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -750,7 +768,7 @@ async fn enqueue_application_mail(
     .bind(organization_id)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, "application_slug_conflict", request_id))?;
+    .map_err(|error| ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id))?;
     if rows.len() > crate::transactional_mail::MAX_RECIPIENTS {
         return Err(ProvisioningError::invalid(
             "owners",
@@ -787,13 +805,13 @@ fn mail_error(error: MailError, request_id: &RequestId) -> ProvisioningError {
             request_id,
         ),
         MailError::Database(error) => {
-            ProvisioningError::database(&error, "application_slug_conflict", request_id)
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
         }
         MailError::InvalidPayload => {
             tracing::error!(request_id=%request_id.0, "application mail payload rejected");
             ProvisioningError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "internal_error",
+                code: ErrorCode::INTERNAL_ERROR,
                 message: "internal server error".into(),
                 request_id: request_id.clone(),
                 fields: None,
@@ -814,9 +832,9 @@ async fn owned_application(
         .fetch_optional(&state.pool)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, "application_slug_conflict", request_id)
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
         })?
-        .ok_or_else(|| ProvisioningError::not_found("application_not_found", request_id))
+        .ok_or_else(|| ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, request_id))
 }
 
 async fn list_application_credentials(
@@ -831,13 +849,13 @@ async fn list_application_credentials(
     authorize_organization(
         principal,
         organization_id,
-        "application_not_found",
+        ErrorCode::APPLICATION_NOT_FOUND,
         &request_id,
     )?;
     let items = list_credentials(&state.pool, organization_id, project_id, application_id)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, "credential_name_conflict", &request_id)
+            ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
         })?;
     Ok(Json(CredentialPage { items }))
 }
@@ -856,11 +874,11 @@ async fn issue_application_credential(
     authorize_organization(
         principal,
         organization_id,
-        "application_not_found",
+        ErrorCode::APPLICATION_NOT_FOUND,
         &request_id,
     )?;
     let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, "credential_name_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
     })?;
     let project_id_text = project_id.to_string();
     let application_id_text = application_id.to_string();
@@ -884,12 +902,12 @@ async fn issue_application_credential(
     )
     .await
     .map_err(|error| {
-        ProvisioningError::database(&error, "credential_name_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
     })?;
     let response = issued_response(&credential);
     complete_idempotency(&mut tx, &idempotency, response.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, "credential_name_conflict", &request_id)
+        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
     })?;
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -906,7 +924,7 @@ async fn revoke_application_credential(
     authorize_organization(
         principal,
         organization_id,
-        "application_not_found",
+        ErrorCode::APPLICATION_NOT_FOUND,
         &request_id,
     )?;
     revoke(
@@ -917,8 +935,10 @@ async fn revoke_application_credential(
         credential_id,
     )
     .await
-    .map_err(|error| ProvisioningError::database(&error, "credential_name_conflict", &request_id))?
-    .ok_or_else(|| ProvisioningError::not_found("credential_not_found", &request_id))?;
+    .map_err(|error| {
+        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
+    })?
+    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::CREDENTIAL_NOT_FOUND, &request_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -946,11 +966,11 @@ mod tests {
     #[test]
     fn validation_codes_and_fields_are_stable() {
         let slug = validate_slug("Invalid--slug", &request_id()).unwrap_err();
-        assert_eq!(slug.code, "validation_failed");
+        assert_eq!(slug.code, ErrorCode::VALIDATION_FAILED);
         assert!(slug.fields.unwrap().contains_key("slug"));
 
         let credential = validate_credential_name("rotation 1", &request_id()).unwrap_err();
-        assert_eq!(credential.code, "validation_failed");
+        assert_eq!(credential.code, ErrorCode::VALIDATION_FAILED);
         assert!(credential.fields.unwrap().contains_key("name"));
     }
 

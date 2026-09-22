@@ -1,3 +1,4 @@
+use crate::error_code::ErrorCode;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -47,13 +48,13 @@ pub fn router(pool: PgPool) -> Router {
 #[derive(Debug)]
 struct HealthError {
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
     request_id: RequestId,
 }
 
 impl HealthError {
-    fn new(status: StatusCode, code: &'static str, message: &'static str, id: &RequestId) -> Self {
+    fn new(status: StatusCode, code: ErrorCode, message: &'static str, id: &RequestId) -> Self {
         Self {
             status,
             code,
@@ -62,13 +63,18 @@ impl HealthError {
         }
     }
     fn invalid(message: &'static str, id: &RequestId) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, id)
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::INVALID_REQUEST,
+            message,
+            id,
+        )
     }
     fn database(_error: &sqlx::Error, id: &RequestId) -> Self {
         tracing::error!(request_id=%id.0, "agent health database error");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
+            ErrorCode::INTERNAL_ERROR,
             "internal server error",
             id,
         )
@@ -522,7 +528,7 @@ async fn authorize_application(
         .ok_or_else(|| {
             HealthError::new(
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential",
                 request_id,
             )
@@ -534,7 +540,7 @@ async fn authorize_application(
     if !owned {
         return Err(HealthError::new(
             StatusCode::NOT_FOUND,
-            "not_found",
+            ErrorCode::NOT_FOUND,
             "resource not found",
             request_id,
         ));
