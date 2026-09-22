@@ -9,9 +9,9 @@ resources:
 # the corresponding immutable image has been published successfully.
 images:
   - name: ghcr.io/okoscope/okoscope-server
-    newTag: "f41a4c4fbf22b9727dadf4ee36f49bcbe5572bd5"
+    newTag: "0fdc9f8eb2a82cc219a171974fef3abc749324ad"
   - name: ghcr.io/okoscope/okoscope-agent
-    newTag: "f41a4c4fbf22b9727dadf4ee36f49bcbe5572bd5"
+    newTag: "0fdc9f8eb2a82cc219a171974fef3abc749324ad"
   - name: ghcr.io/okoscope/okoscope-web
     newTag: "4bfa5a880ee3be8089f64260366ac728fc5fee33"
 
