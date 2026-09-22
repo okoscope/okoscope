@@ -100,6 +100,35 @@ jobs:
       - name: Validate installation documentation
         run: deploy/helm/test-docs.sh
 
+  ebpf:
+    # The kernel-side crate cannot join the `verify` job: it targets
+    # bpfel-unknown-none and needs a nightly toolchain to build core. Leaving
+    # it out of CI entirely left the most dangerous code in the tree unchecked.
+    #
+    # This job lints and type-checks the program for its real target, which is
+    # everything short of the final link. Linking needs bpf-linker, which in
+    # turn needs an LLVM newer than any Ubuntu runner image ships; pinning that
+    # toolchain here would trade a checked crate for a brittle job. Producing
+    # the object file stays a local step, `make build-ebpf`, and a change that
+    # only the linker would reject is not caught here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-21
+          components: rust-src, clippy
+      - uses: Swatinem/rust-cache@v2
+      # rust-toolchain.toml pins the workspace to stable, and that file wins
+      # over the toolchain this job installed, so the channel is named
+      # explicitly here the same way `make check-ebpf` names it.
+      - name: Lint kernel program
+        run: cargo +nightly-2026-09-21 clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
+      - name: Lint shared kernel types
+        run: cargo +nightly-2026-09-21 clippy -p agent-ebpf-common --target bpfel-unknown-none -Z build-std=core -- -D warnings
+      - name: Build C kernel program
+        run: make -C crates/agent-ebpf-core
+
   inventory-benchmark:
     # Wall-clock acceptance budgets, so this runs on a schedule and on demand
     # rather than gating every pull request on shared-runner timing.

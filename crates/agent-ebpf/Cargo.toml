@@ -12,3 +12,6 @@ path = "src/main.rs"
 [dependencies]
 agent-ebpf-common.workspace = true
 aya-ebpf.workspace = true
+
+[lints]
+workspace = true

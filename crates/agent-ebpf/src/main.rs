@@ -1,6 +1,17 @@
 #![no_std]
 #![no_main]
+// eBPF programs read kernel memory through raw helper calls and keep their
+// state in BPF maps, neither of which can be expressed in safe Rust. This is
+// the one crate in the workspace that opts out of the `unsafe_code` denial;
+// every other lint the workspace sets still applies.
+#![allow(unsafe_code)]
 #![allow(static_mut_refs)]
+// aya's program macros dictate these entry-point signatures: the context is
+// taken by value whether or not the body consumes it.
+#![allow(clippy::needless_pass_by_value)]
+// The BPF verifier rejects programs whose helpers are not inlined, so
+// `#[inline(always)]` here is a requirement rather than a hint.
+#![allow(clippy::inline_always)]
 
 use agent_ebpf_common::{
     ADDRESS_FAMILY_IPV4, ADDRESS_FAMILY_IPV6, CONNECT_OUTCOME_FAILED, CONNECT_OUTCOME_IN_PROGRESS,
@@ -274,6 +285,8 @@ pub fn okoscope_dns_ingress(ctx: SkBuffContext) -> i32 {
     1
 }
 
+// `captured_len` is clamped to DNS_CAPTURE_BYTES (1232) before the cast.
+#[allow(clippy::cast_possible_truncation)]
 fn capture_dns(ctx: &SkBuffContext, direction: u8) -> Result<(), ()> {
     let family = ctx.skb.family();
     let (address_family, protocol, transport_offset, resolver_address) = match family {
@@ -448,6 +461,8 @@ fn parse_transport(
     }
 }
 
+// The kernel reports the syscall number in the low half of the register.
+#[allow(clippy::cast_possible_truncation)]
 fn try_sys_enter(ctx: &TracePointContext) -> Result<(), u32> {
     let syscall_id: u64 = unsafe { ctx.read_at(8).map_err(|_| 1_u32)? };
     let syscall_id = syscall_id as u32;
@@ -458,6 +473,8 @@ fn try_sys_enter(ctx: &TracePointContext) -> Result<(), u32> {
 }
 
 #[inline(always)]
+// Both path lengths are rejected above unless below FILE_PATH_LEN (1024).
+#[allow(clippy::cast_possible_truncation)]
 fn file_path_enter(
     ctx: &TracePointContext,
     mut operation: u8,
@@ -479,12 +496,9 @@ fn file_path_enter(
     scratch.path_len = 0;
     scratch.new_path_len = 0;
     scratch.command = bpf_get_current_comm().unwrap_or([0; 16]);
-    let path_ptr: u64 = match unsafe { ctx.read_at(path_offset) } {
-        Ok(value) => value,
-        Err(_) => {
-            increment_file_counter(FILE_COUNTER_PATH_READ_FAILED);
-            return 0;
-        }
+    let Ok(path_ptr) = (unsafe { ctx.read_at::<u64>(path_offset) }) else {
+        increment_file_counter(FILE_COUNTER_PATH_READ_FAILED);
+        return 0;
     };
     let Ok(path) =
         (unsafe { bpf_probe_read_user_str_bytes(path_ptr as *const u8, &mut scratch.path) })
@@ -502,12 +516,9 @@ fn file_path_enter(
     }
     scratch.path_len = path.len() as u16;
     if let Some(offset) = new_path_offset {
-        let new_path_ptr: u64 = match unsafe { ctx.read_at(offset) } {
-            Ok(value) => value,
-            Err(_) => {
-                increment_file_counter(FILE_COUNTER_PATH_READ_FAILED);
-                return 0;
-            }
+        let Ok(new_path_ptr) = (unsafe { ctx.read_at::<u64>(offset) }) else {
+            increment_file_counter(FILE_COUNTER_PATH_READ_FAILED);
+            return 0;
         };
         let Ok(new_path) = (unsafe {
             bpf_probe_read_user_str_bytes(new_path_ptr as *const u8, &mut scratch.new_path)
@@ -545,6 +556,8 @@ fn file_path_enter(
 }
 
 #[inline(always)]
+// A file descriptor is an i32; the register read widens it to u64.
+#[allow(clippy::cast_possible_truncation)]
 fn file_fd_enter(ctx: &TracePointContext, operation: u8) -> u32 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let fd_raw: u64 = match unsafe { ctx.read_at(16) } {
@@ -587,6 +600,8 @@ fn file_fd_enter(ctx: &TracePointContext, operation: u8) -> u32 {
 }
 
 #[inline(always)]
+// A tracepoint result is an i64 carrying either an i32 fd or -errno.
+#[allow(clippy::cast_possible_truncation)]
 fn file_open_exit(ctx: &TracePointContext) -> u32 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let Some(pending_ptr) = (unsafe { PENDING_FILE_OPERATIONS.get_ptr(&pid_tgid) }) else {
@@ -632,6 +647,8 @@ fn file_open_exit(ctx: &TracePointContext) -> u32 {
 }
 
 #[inline(always)]
+// A tracepoint result is an i64 carrying either an i32 fd or -errno.
+#[allow(clippy::cast_possible_truncation)]
 fn file_operation_exit(ctx: &TracePointContext, positive_result: bool) -> u32 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let Some(pending_ptr) = (unsafe { PENDING_FILE_OPERATIONS.get_ptr(&pid_tgid) }) else {
@@ -793,6 +810,9 @@ fn try_connect_enter(ctx: &TracePointContext) -> Result<(), u32> {
     Ok(())
 }
 
+// The errno casts are guarded by the `(-4095..0)` range check below, so the
+// negated value is positive and fits a u16.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn try_connect_exit(ctx: &TracePointContext) -> Result<(), u32> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let Some(pending_ptr) = (unsafe { PENDING_CONNECTS.get_ptr(&pid_tgid) }) else {
@@ -888,7 +908,8 @@ fn try_inet_sock_set_state(ctx: &TracePointContext) -> Result<(), u32> {
         padding: [0; 3],
     };
     if transition == InboundTransition::Listen {
-        return emit_inbound(EVENT_KIND_NETWORK_LISTEN, &endpoints);
+        emit_inbound(EVENT_KIND_NETWORK_LISTEN, &endpoints);
+        return Ok(());
     }
     if transition == InboundTransition::PendingAccept {
         let _ = unsafe { PENDING_ACCEPTS.insert(&skaddr, &endpoints, 0) };
@@ -896,6 +917,10 @@ fn try_inet_sock_set_state(ctx: &TracePointContext) -> Result<(), u32> {
     Ok(())
 }
 
+// Part of the `try_*` family whose uniform `Result<(), u32>` is what the
+// program entry points match on, so the wrapper stays even where it cannot
+// currently fail.
+#[allow(clippy::unnecessary_wraps)]
 fn try_inet_csk_accept_return(ctx: &RetProbeContext) -> Result<(), u32> {
     let Some(skaddr) = ctx.ret::<u64>() else {
         increment_inbound_counter(INBOUND_COUNTER_DECODE_FAILED);
@@ -911,18 +936,19 @@ fn try_inet_csk_accept_return(ctx: &RetProbeContext) -> Result<(), u32> {
     let mut endpoints = unsafe { *endpoints_ptr };
     let _ = unsafe { PENDING_ACCEPTS.remove(&skaddr) };
     endpoints.observed_at_ns = unsafe { bpf_ktime_get_ns() };
-    emit_inbound(EVENT_KIND_NETWORK_ACCEPT, &endpoints)
+    emit_inbound(EVENT_KIND_NETWORK_ACCEPT, &endpoints);
+    Ok(())
 }
 
-fn emit_inbound(event_kind: u8, endpoints: &InboundEndpoints) -> Result<(), u32> {
+fn emit_inbound(event_kind: u8, endpoints: &InboundEndpoints) {
     let cgroup_id = unsafe { bpf_get_current_cgroup_id() };
     if cgroup_id == 0 {
         increment_inbound_counter(INBOUND_COUNTER_ATTRIBUTION_FAILED);
-        return Ok(());
+        return;
     }
     let Some(mut slot) = (unsafe { INBOUND_EVENTS.reserve::<InboundKernelEvent>(0) }) else {
         increment_inbound_counter(INBOUND_COUNTER_KERNEL_LOST);
-        return Ok(());
+        return;
     };
     slot.write(InboundKernelEvent {
         timestamp_ns: endpoints.observed_at_ns,
@@ -938,7 +964,6 @@ fn emit_inbound(event_kind: u8, endpoints: &InboundEndpoints) -> Result<(), u32>
         command: bpf_get_current_comm().unwrap_or([0; 16]),
     });
     slot.submit(0);
-    Ok(())
 }
 
 fn increment_counter(index: u32) {
