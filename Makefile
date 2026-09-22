@@ -11,7 +11,7 @@ HELM_UPGRADE = helm upgrade "$(HELM_RELEASE)" "$(HELM_CHART)" \
 	--reset-then-reuse-values $(if $(VALUES),--values "$(VALUES)") \
 	--wait --timeout "$(DEPLOY_TIMEOUT)"
 
-.PHONY: build build-ebpf check test proto-check deployment-test deploy-check deploy-preview deploy deploy-status
+.PHONY: build build-ebpf check check-ebpf test proto-check deployment-test deploy-check deploy-preview deploy deploy-status
 
 build:
 	cargo build --workspace --exclude agent-ebpf
@@ -23,6 +23,11 @@ build-ebpf:
 check:
 	cargo fmt --all -- --check
 	cargo clippy --workspace --exclude agent-ebpf --all-targets -- -D warnings
+
+# The kernel program is linted separately because it targets bpfel-unknown-none
+# and needs a nightly toolchain. Requires the same prerequisites as build-ebpf.
+check-ebpf:
+	cargo +nightly clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
 
 test:
 	cargo test --workspace --exclude agent-ebpf

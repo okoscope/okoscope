@@ -100,6 +100,28 @@ jobs:
       - name: Validate installation documentation
         run: deploy/helm/test-docs.sh
 
+  ebpf:
+    # The kernel-side crate cannot join the `verify` job: it targets
+    # bpfel-unknown-none, needs a nightly toolchain to build core, and links
+    # through bpf-linker. Leaving it out of CI entirely left the most
+    # dangerous code in the tree unchecked, so it gets its own job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-21
+          components: rust-src, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked --version 0.11.1
+      - name: Lint kernel program
+        run: cargo clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
+      - name: Build kernel program
+        run: cargo build -p agent-ebpf --target bpfel-unknown-none -Z build-std=core
+      - name: Build C kernel program
+        run: make -C crates/agent-ebpf-core
+
   inventory-benchmark:
     # Wall-clock acceptance budgets, so this runs on a schedule and on demand
     # rather than gating every pull request on shared-runner timing.
