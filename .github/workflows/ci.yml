@@ -119,10 +119,13 @@ jobs:
           toolchain: nightly-2026-09-21
           components: rust-src, clippy
       - uses: Swatinem/rust-cache@v2
+      # rust-toolchain.toml pins the workspace to stable, and that file wins
+      # over the toolchain this job installed, so the channel is named
+      # explicitly here the same way `make check-ebpf` names it.
       - name: Lint kernel program
-        run: cargo clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
+        run: cargo +nightly-2026-09-21 clippy -p agent-ebpf --target bpfel-unknown-none -Z build-std=core -- -D warnings
       - name: Lint shared kernel types
-        run: cargo clippy -p agent-ebpf-common --target bpfel-unknown-none -Z build-std=core -- -D warnings
+        run: cargo +nightly-2026-09-21 clippy -p agent-ebpf-common --target bpfel-unknown-none -Z build-std=core -- -D warnings
       - name: Build C kernel program
         run: make -C crates/agent-ebpf-core
 
