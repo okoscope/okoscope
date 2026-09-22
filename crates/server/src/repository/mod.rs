@@ -18,6 +18,7 @@
 pub mod applications;
 pub mod event_groups;
 pub mod events;
+pub mod memberships;
 pub mod organizations;
 pub mod projects;
 pub mod users;
@@ -25,6 +26,7 @@ pub mod users;
 pub use applications::ApplicationRepository;
 pub use event_groups::{EventGroupRepository, GroupKey};
 pub use events::{EventRepository, StoredEvent};
+pub use memberships::MembershipRepository;
 pub use organizations::OrganizationRepository;
 pub use projects::ProjectRepository;
 pub use users::UserRepository;

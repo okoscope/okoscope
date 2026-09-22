@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::MembershipRepository;
 use std::collections::HashMap;
 
 use axum::{
@@ -620,11 +621,12 @@ async fn organization_access(
             .fetch_all(&state.pool)
             .await?
     } else {
-        sqlx::query_scalar("SELECT project_id FROM project_memberships WHERE organization_id=$1 AND user_id=$2 ORDER BY project_id")
-            .bind(organization_id)
-            .bind(principal.user_id)
-            .fetch_all(&state.pool)
-            .await?
+        MembershipRepository::accessible_project_ids(
+            &state.pool,
+            organization_id,
+            principal.user_id,
+        )
+        .await?
     };
     Ok(OrganizationAccess {
         organization_id,

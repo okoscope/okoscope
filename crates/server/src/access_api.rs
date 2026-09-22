@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::MembershipRepository;
 use crate::repository::ProjectRepository;
 use crate::repository::event_groups::aggregates;
 use crate::{
@@ -310,9 +311,13 @@ async fn select_organization(
     Json(input): Json<OrganizationSelection>,
 ) -> Result<Response, AccessError> {
     let principal = identity(&state, &headers, &request_id).await?;
-    let role: Option<String> = sqlx::query_scalar("SELECT m.role FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=$1 AND m.organization_id=$2 AND o.status='active'")
-        .bind(principal.user_id).bind(input.organization_id).fetch_optional(&state.pool).await
-        .map_err(|error| AccessError::database(&error, &request_id))?;
+    let role = MembershipRepository::organization_role_when_active(
+        &state.pool,
+        principal.user_id,
+        input.organization_id,
+    )
+    .await
+    .map_err(|error| AccessError::database(&error, &request_id))?;
     let role: OrganizationRole = role.and_then(|value| value.parse().ok()).ok_or_else(|| {
         AccessError::new(
             StatusCode::NOT_FOUND,
@@ -600,9 +605,14 @@ async fn create_platform_organization(
         .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
     let invitation = match input.ownership {
         PlatformOwnership::SelfOwner => {
-            sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')")
-                .bind(organization_id).bind(actor.user_id).execute(&mut *tx).await
-                .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
+            MembershipRepository::insert_organization_role(
+                &mut *tx,
+                organization_id,
+                actor.user_id,
+                "owner",
+            )
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
             None
         }
         PlatformOwnership::InvitedOwner { email, locale } => Some(
@@ -1168,13 +1178,9 @@ async fn list_organization_members(
         .into_iter()
         .filter_map(organization_member)
         .collect::<Vec<_>>();
-    let owner_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM organization_memberships WHERE organization_id=$1 AND role='owner'",
-    )
-    .bind(organization_id)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|error| AccessError::database(&error, &request_id))?;
+    let owner_count = MembershipRepository::organization_owner_count(&state.pool, organization_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
         let allowed = actor.is_super_admin
             || can_manage_organization_role(
@@ -1313,11 +1319,7 @@ async fn remove_organization_member(
         .map_err(|error| AccessError::database(&error, &request_id))?;
     lock_authority(&mut tx, &request_id).await?;
     let result =
-        sqlx::query("DELETE FROM organization_memberships WHERE organization_id=$1 AND user_id=$2")
-            .bind(organization_id)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await;
+        MembershipRepository::remove_organization_role(&mut *tx, organization_id, user_id).await;
     map_authority_result(
         result,
         ErrorCode::LAST_ORGANIZATION_OWNER_REQUIRED,
@@ -1521,8 +1523,14 @@ async fn add_project_member(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    let created = sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,$4)")
-        .bind(organization_id).bind(project_id).bind(input.user_id).bind(project_role_name(input.role)).execute(&mut *tx).await;
+    let created = MembershipRepository::insert_project_role(
+        &mut *tx,
+        organization_id,
+        project_id,
+        input.user_id,
+        project_role_name(input.role),
+    )
+    .await;
     created.map_err(|error| {
         if error
             .as_database_error()
@@ -1632,10 +1640,7 @@ async fn remove_project_member(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    sqlx::query("DELETE FROM project_memberships WHERE project_id=$1 AND user_id=$2")
-        .bind(project_id)
-        .bind(user_id)
-        .execute(&mut *tx)
+    MembershipRepository::remove_project_role(&mut *tx, project_id, user_id)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
@@ -1712,8 +1717,8 @@ fn role_promotes(current: OrganizationRole, next: OrganizationRole) -> bool {
     )
 }
 
-fn map_authority_result(
-    result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>,
+fn map_authority_result<T>(
+    result: Result<T, sqlx::Error>,
     code: ErrorCode,
     request_id: &RequestId,
 ) -> Result<(), AccessError> {
