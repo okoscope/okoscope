@@ -1,4 +1,6 @@
 use crate::error_code::ErrorCode;
+use crate::repository::UserRepository;
+use crate::repository::users::ACTIVE;
 use std::{fmt, str::FromStr};
 
 use axum::{
@@ -1474,9 +1476,7 @@ async fn inspect(
         .map_err(|error| InvitationError::database(&error, &request_id))?
         .filter(is_live)
         .ok_or_else(|| InvitationError::unusable(&request_id))?;
-    let user_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)")
-        .bind(&row.recipient_email)
-        .fetch_one(&state.pool)
+    let user_exists: bool = UserRepository::exists_by_email(&state.pool, &row.recipient_email)
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?;
     let inspection = InvitationInspection {
@@ -1546,9 +1546,7 @@ async fn accept_new_user(
         .map_err(|error| InvitationError::database(&error, &request_id))?
         .filter(is_live)
         .ok_or_else(|| InvitationError::unusable(&request_id))?;
-    let user_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)")
-        .bind(&row.recipient_email)
-        .fetch_one(&mut *tx)
+    let user_exists: bool = UserRepository::exists_by_email(&mut *tx, &row.recipient_email)
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?;
     if user_exists {
@@ -1558,10 +1556,16 @@ async fn accept_new_user(
         ));
     }
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale,display_name) VALUES($1,$2,$3,now(),$4,$5)")
-        .bind(user_id).bind(&row.recipient_email).bind(password_hash)
-        .bind(input.locale.as_str()).bind(&input.display_name).execute(&mut *tx).await
-        .map_err(|error| map_accept_error(&error, &request_id))?;
+    UserRepository::insert_verified(
+        &mut *tx,
+        user_id,
+        &row.recipient_email,
+        &password_hash,
+        input.locale.as_str(),
+        &input.display_name,
+    )
+    .await
+    .map_err(|error| map_accept_error(&error, &request_id))?;
     grant_and_consume(&mut tx, &row, user_id, &request_id).await?;
     let (_, session) = insert_session_with_context(
         &mut tx,
@@ -1683,7 +1687,9 @@ async fn activate_first_owner(
     invitation: &InvitationRow,
 ) -> Result<(), sqlx::Error> {
     if invitation.project_id.is_none() && invitation.role == "owner" {
-        sqlx::query("UPDATE organizations SET status='active',updated_at=now() WHERE id=$1 AND status='pending_owner' AND EXISTS(SELECT 1 FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.role='owner' AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL)")
+        sqlx::query(&format!(
+            "UPDATE organizations SET status='active',updated_at=now() WHERE id=$1 AND status='pending_owner' AND EXISTS(SELECT 1 FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.role='owner' AND {ACTIVE})"
+        ))
             .bind(invitation.organization_id).execute(&mut **tx).await?;
     }
     Ok(())

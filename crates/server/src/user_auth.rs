@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::UserRepository;
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -88,14 +89,9 @@ pub async fn recover_super_admin(
     sqlx::query("SELECT pg_advisory_xact_lock(1869373292)")
         .execute(&mut *tx)
         .await?;
-    let user_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email=$1 AND disabled_at IS NULL AND email_verified_at IS NOT NULL FOR UPDATE")
-        .bind(email)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| match error {
-            sqlx::Error::RowNotFound => anyhow::anyhow!("eligible verified user does not exist"),
-            other => anyhow::Error::new(other),
-        })?;
+    let user_id = UserRepository::active_id_by_email_for_update(&mut *tx, &email)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("eligible verified user does not exist"))?;
     sqlx::query("INSERT INTO platform_role_assignments(user_id,role,revoked_at) VALUES($1,'super_admin',NULL) ON CONFLICT(user_id) DO UPDATE SET role='super_admin',revoked_at=NULL,granted_at=now(),granted_by_user_id=NULL")
         .bind(user_id).execute(&mut *tx).await?;
     write_access_audit(
@@ -118,11 +114,7 @@ pub async fn recover_super_admin(
 }
 
 pub async fn verify_user_access(pool: &PgPool, setup_enabled: bool) -> anyhow::Result<()> {
-    let administrator_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM platform_role_assignments p JOIN users u ON u.id=p.user_id WHERE p.role='super_admin' AND p.revoked_at IS NULL AND u.disabled_at IS NULL AND u.email_verified_at IS NOT NULL",
-    )
-            .fetch_one(pool)
-            .await?;
+    let administrator_count = UserRepository::active_super_admin_count(pool).await?;
     anyhow::ensure!(
         setup_enabled || administrator_count > 0,
         "no active super administrator exists; configure setup authorization or run platform recovery"
@@ -527,8 +519,15 @@ async fn create_registration(
     user_id: Uuid,
     organization_id: Uuid,
 ) -> Result<(), crate::transactional_mail::MailError> {
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale,display_name) VALUES($1,$2,$3,NULL,$4,$5)")
-        .bind(user_id).bind(email).bind(password_hash).bind(input.locale.as_str()).bind(&input.display_name).execute(&mut **tx).await?;
+    UserRepository::insert_unverified(
+        &mut **tx,
+        user_id,
+        email,
+        password_hash,
+        input.locale.as_str(),
+        &input.display_name,
+    )
+    .await?;
     sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3)")
         .bind(organization_id)
         .bind(&input.organization_slug)
