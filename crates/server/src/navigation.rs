@@ -12,6 +12,7 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::repository::ApplicationRepository;
+use crate::repository::event_groups::aggregates;
 use crate::{
     access_control::ProjectRole,
     auth::{UserPrincipal, UserSessionAuthenticator},
@@ -312,7 +313,7 @@ async fn projects(
         ));
     }
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, ProjectSummary>("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=p.organization_id AND g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4")
+    let mut items = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4", aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(principal.organization_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
     let organization_admin = principal.role.inherits_project_access();
     let mut visible = Vec::with_capacity(items.len());
@@ -336,7 +337,7 @@ async fn project(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ProjectSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let mut item = sqlx::query_as::<_, ProjectSummary>("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=p.organization_id AND g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2")
+    let mut item = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2", aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(principal.organization_id).bind(project_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
     let (role, source) = effective_project_access(&state.pool, principal, project_id)
         .await
@@ -385,7 +386,7 @@ async fn applications(
         ));
     }
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, ApplicationSummary>("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=a.organization_id AND g.project_id=a.project_id AND g.application_id=a.id AND g.occurrence_count>0) runtime_group_count,(SELECT max(e.last_seen_at) FROM runtime_event_groups e WHERE e.organization_id=a.organization_id AND e.project_id=a.project_id AND e.application_id=a.id AND e.occurrence_count>0) latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4)) ORDER BY a.created_at,a.id LIMIT $5")
+    let mut items = sqlx::query_as::<_, ApplicationSummary>(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4)) ORDER BY a.created_at,a.id LIMIT $5", aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
         .bind(principal.organization_id).bind(project_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
     for item in &mut items {
         apply_application_access(
@@ -409,7 +410,7 @@ async fn application(
         .await
         .map_err(|error| NavigationError::database(&error, &request_id))?
         .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    let mut item = sqlx::query_as::<_, ApplicationSummary>("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.organization_id=a.organization_id AND g.project_id=a.project_id AND g.application_id=a.id AND g.occurrence_count>0) runtime_group_count,(SELECT max(e.last_seen_at) FROM runtime_event_groups e WHERE e.organization_id=a.organization_id AND e.project_id=a.project_id AND e.application_id=a.id AND e.occurrence_count>0) latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3")
+    let mut item = sqlx::query_as::<_, ApplicationSummary>(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.organization_id=a.organization_id AND r.project_id=a.project_id AND r.application_id=a.id) release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3", aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
         .bind(principal.organization_id).bind(project_id).bind(application_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
     apply_application_access(
         &mut item,

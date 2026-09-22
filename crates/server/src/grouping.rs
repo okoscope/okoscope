@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::repository::{EventGroupRepository, GroupKey};
 use event_model::{
     EventPayload, GenerationCorrelation, NetworkAddressFamily, ProcessTermination, RuntimeEvent,
 };
@@ -108,44 +109,33 @@ pub async fn assign_event(
         fingerprint_v1(scope, event).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
     let version = i16::from(fingerprint.version);
     let candidate_group_id = Uuid::new_v4();
-    let created_group_id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO runtime_event_groups (id, organization_id, project_id, cluster_id, application_id, namespace, workload_kind, workload_name, fingerprint_version, fingerprint_digest, event_kind, semantic_summary, first_seen_at, last_seen_at, occurrence_count, representative_event_id, first_seen_event_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,1,$14,$14) ON CONFLICT (organization_id, project_id, application_id, cluster_id, namespace, workload_kind, workload_name, fingerprint_version, fingerprint_digest) DO NOTHING RETURNING id",
+    let key = GroupKey {
+        organization_id: scope.organization_id,
+        project_id: scope.project_id,
+        application_id: scope.application_id,
+        cluster_id: scope.cluster_id,
+        namespace: scope.namespace,
+        workload_kind: scope.workload_kind,
+        workload_name: scope.workload_name,
+        fingerprint_version: version,
+        fingerprint_digest: fingerprint.digest.as_slice(),
+    };
+    let created_group_id = EventGroupRepository::insert_if_absent(
+        &mut **tx,
+        candidate_group_id,
+        key,
+        &fingerprint.summary.event_kind,
+        &fingerprint.summary.semantic,
+        event.observed_at,
+        raw_event_id,
     )
-    .bind(candidate_group_id)
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.cluster_id)
-    .bind(scope.application_id)
-    .bind(scope.namespace)
-    .bind(scope.workload_kind)
-    .bind(scope.workload_name)
-    .bind(version)
-    .bind(fingerprint.digest.as_slice())
-    .bind(&fingerprint.summary.event_kind)
-    .bind(&fingerprint.summary.semantic)
-    .bind(event.observed_at)
-    .bind(raw_event_id)
-    .fetch_optional(&mut **tx)
     .await?;
 
     let group_created = created_group_id.is_some();
     let group_id = if let Some(group_id) = created_group_id {
         group_id
     } else {
-        sqlx::query_scalar(
-            "SELECT id FROM runtime_event_groups WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND namespace=$5 AND workload_kind=$6 AND workload_name=$7 AND fingerprint_version=$8 AND fingerprint_digest=$9 FOR UPDATE",
-        )
-        .bind(scope.organization_id)
-        .bind(scope.project_id)
-        .bind(scope.application_id)
-        .bind(scope.cluster_id)
-        .bind(scope.namespace)
-        .bind(scope.workload_kind)
-        .bind(scope.workload_name)
-        .bind(version)
-        .bind(fingerprint.digest.as_slice())
-        .fetch_one(&mut **tx)
-        .await?
+        EventGroupRepository::lock_existing(&mut **tx, key).await?
     };
 
     let membership_created = sqlx::query_scalar::<_, Uuid>(
@@ -163,7 +153,13 @@ pub async fn assign_event(
     .is_some();
 
     if membership_created && !group_created {
-        update_group_occurrence(tx, group_id, raw_event_id, event).await?;
+        EventGroupRepository::record_occurrence(
+            &mut **tx,
+            group_id,
+            event.observed_at,
+            raw_event_id,
+        )
+        .await?;
     }
 
     if membership_created && let Some(release_id) = release_id {
@@ -201,23 +197,6 @@ pub async fn assign_event(
     );
     tracing::debug!(group_id=%group_id, group_created, membership_created, source=source.as_str(), "runtime event grouped");
     Ok(outcome)
-}
-
-async fn update_group_occurrence(
-    tx: &mut Transaction<'_, Postgres>,
-    group_id: Uuid,
-    raw_event_id: Uuid,
-    event: &RuntimeEvent,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE runtime_event_groups SET first_seen_event_id=CASE WHEN ($2,$3) < (first_seen_at,first_seen_event_id) THEN $3 ELSE first_seen_event_id END, first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END, last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END, representative_event_id=COALESCE(representative_event_id,$3), occurrence_count=occurrence_count+1, updated_at=now() WHERE id=$1",
-    )
-    .bind(group_id)
-    .bind(event.observed_at)
-    .bind(raw_event_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 async fn update_release_summary(

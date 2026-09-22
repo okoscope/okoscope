@@ -16,11 +16,13 @@
 //! code and error envelope depend on the endpoint, not on the query.
 
 pub mod applications;
+pub mod event_groups;
 pub mod events;
 pub mod organizations;
 pub mod projects;
 
 pub use applications::ApplicationRepository;
+pub use event_groups::{EventGroupRepository, GroupKey};
 pub use events::{EventRepository, StoredEvent};
 pub use organizations::OrganizationRepository;
 pub use projects::ProjectRepository;

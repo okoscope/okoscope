@@ -11,6 +11,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::repository::ProjectRepository;
+use crate::repository::event_groups::aggregates;
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     access_control::{
@@ -764,7 +765,7 @@ async fn list_platform_projects(
 ) -> Result<Json<PlatformProjectPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformProject> = sqlx::query_as("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.project_id=p.id) application_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.project_id=p.id) runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3")
+    let mut items: Vec<PlatformProject> = sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(organization_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
@@ -875,7 +876,7 @@ async fn list_platform_applications(
 ) -> Result<Json<PlatformApplicationPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformApplication> = sqlx::query_as("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.application_id=a.id) release_count,(SELECT count(*) FROM runtime_event_groups g WHERE g.application_id=a.id) runtime_group_count,(SELECT max(last_seen_at) FROM runtime_event_groups g WHERE g.application_id=a.id) latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3")
+    let mut items: Vec<PlatformApplication> = sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.application_id=a.id) release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", aggregates::COUNT_ALL_FOR_APPLICATION,aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
         .bind(project_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {

@@ -279,12 +279,9 @@ async fn group_scope(
     principal: IdentityPrincipal,
     group_id: Uuid,
 ) -> Result<(Uuid, Uuid), ApiError> {
-    let scope: (Uuid, Uuid) =
-        sqlx::query_as("SELECT organization_id,project_id FROM runtime_event_groups WHERE id=$1")
-            .bind(group_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or(ApiError::NotFound)?;
+    let scope = crate::repository::EventGroupRepository::tenant_of(&state.pool, group_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     resolve_project_access(&state.pool, principal, scope.0, scope.1)
         .await?
         .ok_or(ApiError::NotFound)?;

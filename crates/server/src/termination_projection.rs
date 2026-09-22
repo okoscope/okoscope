@@ -9,6 +9,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION;
+use crate::repository::{EventGroupRepository, GroupKey};
 
 pub const CORRELATION_TOLERANCE: Duration = Duration::seconds(30);
 pub const RESTART_WINDOW: Duration = Duration::minutes(10);
@@ -171,11 +172,26 @@ async fn upsert_restart_loop_group(
     let digest = hash.finalize();
     let summary = json!({"evidence_source":"derived","projection_version":RESTART_PROJECTION_VERSION,"threshold":RESTART_THRESHOLD_V1,"window_started_at":window_start,"window_ended_at":window_end,"observed_restart_count":observed_count,"container_name":event.attribution.container_name,"latest_termination":restart.previous_termination,"latest_waiting_reason":restart.waiting_reason});
     let candidate = Uuid::new_v4();
-    let group_id: Uuid = sqlx::query_scalar("INSERT INTO runtime_event_groups (id,organization_id,project_id,cluster_id,application_id,namespace,workload_kind,workload_name,fingerprint_version,fingerprint_digest,event_kind,semantic_summary,first_seen_at,last_seen_at,occurrence_count,representative_event_id,first_seen_event_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'container.restart_loop',$11,$12,$12,1,$13,$13) ON CONFLICT (organization_id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,fingerprint_digest) DO UPDATE SET semantic_summary=EXCLUDED.semantic_summary,last_seen_at=GREATEST(runtime_event_groups.last_seen_at,EXCLUDED.last_seen_at),representative_event_id=EXCLUDED.representative_event_id,updated_at=now() RETURNING id")
-        .bind(candidate).bind(organization_id).bind(event.attribution.project_id).bind(cluster_id)
-        .bind(event.attribution.application_id).bind(&event.attribution.namespace).bind(&event.attribution.workload_kind)
-        .bind(&event.attribution.workload_name).bind(DERIVED_GROUP_FINGERPRINT_VERSION).bind(digest.as_slice())
-        .bind(&summary).bind(event.observed_at).bind(raw_event_id).fetch_one(&mut **tx).await?;
+    let group_id = EventGroupRepository::upsert_derived(
+        &mut **tx,
+        candidate,
+        GroupKey {
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id,
+            namespace: &event.attribution.namespace,
+            workload_kind: &event.attribution.workload_kind,
+            workload_name: &event.attribution.workload_name,
+            fingerprint_version: DERIVED_GROUP_FINGERPRINT_VERSION,
+            fingerprint_digest: digest.as_slice(),
+        },
+        "container.restart_loop",
+        &summary,
+        event.observed_at,
+        raw_event_id,
+    )
+    .await?;
     if group_id == candidate {
         sqlx::query("INSERT INTO outbox_messages (id,organization_id,project_id,topic,aggregate_id,schema_version,source,payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,'live',$5) ON CONFLICT (topic,aggregate_id,schema_version) DO NOTHING")
             .bind(Uuid::new_v4())
@@ -196,12 +212,7 @@ async fn upsert_restart_loop_group(
         .bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
         .bind(raw_event_id).bind(group_id).bind(DERIVED_GROUP_FINGERPRINT_VERSION).execute(&mut **tx).await?;
     if membership.rows_affected() > 0 && group_id != candidate {
-        sqlx::query(
-            "UPDATE runtime_event_groups SET occurrence_count=occurrence_count+1 WHERE id=$1",
-        )
-        .bind(group_id)
-        .execute(&mut **tx)
-        .await?;
+        EventGroupRepository::increment_occurrence(&mut **tx, group_id).await?;
     }
     sqlx::query("INSERT INTO runtime_inventory_group_links (organization_id,project_id,application_id,item_id,group_id) SELECT $1,$2,$3,m.item_id,$4 FROM runtime_inventory_event_memberships m WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.event_id=$5 AND m.identity_version=$6 ON CONFLICT (item_id,group_id) DO NOTHING")
         .bind(organization_id)
