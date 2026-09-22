@@ -100,6 +100,24 @@ jobs:
       - name: Validate installation documentation
         run: deploy/helm/test-docs.sh
 
+  dependencies:
+    # Advisories, licenses and sources for the whole dependency graph. This
+    # runs on pull requests and again weekly, because an advisory is published
+    # against dependencies that have not changed: both findings this project
+    # carried on merge day were disclosed weeks after the lockfile last moved,
+    # and a pull-request gate alone would not have surfaced them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+      - name: Check dependency policy
+        run: cargo deny check
+
   ebpf:
     # The kernel-side crate cannot join the `verify` job: it targets
     # bpfel-unknown-none and needs a nightly toolchain to build core. Leaving
