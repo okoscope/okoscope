@@ -49,8 +49,9 @@ fn every_descendant_route_family_has_a_project_access_seam() {
         );
     }
     let attention = include_str!("../src/attention.rs");
-    assert!(attention.contains("project_id=ANY($2)"));
     assert!(attention.contains("project_ids"));
+    let attention_queries = include_str!("../src/repository/attention.rs");
+    assert!(attention_queries.contains("project_id=ANY($2)"));
 }
 
 fn principal(

@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::resources::ResourceRepository;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -93,29 +94,42 @@ async fn cleanup_project_inner(
     // lock on the organization, which deadlocked against the retention worker
     // and inventory operations. A project never changes organization, so the
     // unlocked read below is only used to find which row to lock.
-    let organization_id: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let organization_id: Uuid = ProjectRepository::organization_id_of(&mut *tx, project_id).await?;
     crate::repository::OrganizationRepository::lock_shared(&mut *tx, organization_id).await?;
-    let (detail, rollup): (i32, i32) = sqlx::query_as("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days),COALESCE(p.resource_rollup_retention_days,o.resource_rollup_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1 FOR UPDATE OF p")
-        .bind(project_id).fetch_one(&mut *tx).await?;
+    let (detail, rollup): (i32, i32) =
+        ResourceRepository::retention_days_for_update(&mut *tx, project_id).await?;
     let detail_before = now - Duration::days(i64::from(detail));
     let rollup_before = now - Duration::days(i64::from(rollup));
-    sqlx::query("UPDATE projects SET resource_closed_before=GREATEST(resource_closed_before,$2),resource_rollup_expired_before=GREATEST(resource_rollup_expired_before,$3) WHERE id=$1")
-        .bind(project_id).bind(detail_before).bind(rollup_before).execute(&mut *tx).await?;
-    let contributions = sqlx::query("DELETE FROM resource_contributions WHERE (organization_id,application_id,id) IN (SELECT organization_id,application_id,id FROM resource_contributions WHERE project_id=$1 AND interval_end<$2 ORDER BY interval_end,id LIMIT $3 FOR UPDATE SKIP LOCKED)")
-        .bind(project_id).bind(detail_before).bind(limit.clamp(1,1_000)).execute(&mut *tx).await?.rows_affected();
+    ResourceRepository::advance_retention_horizons(
+        &mut *tx,
+        project_id,
+        detail_before,
+        rollup_before,
+    )
+    .await?;
+    let contributions = ResourceRepository::delete_expired_contributions(
+        &mut *tx,
+        project_id,
+        detail_before,
+        limit.clamp(1, 1_000),
+    )
+    .await?
+    .rows_affected();
     let remaining = limit
         .clamp(1, 1_000)
         .saturating_sub(i64::try_from(contributions).unwrap_or(i64::MAX));
     let rollups = if remaining == 0 {
         0
     } else {
-        sqlx::query("DELETE FROM resource_rollup_points WHERE (application_id,release_key,container_name,bucket_start,step_seconds,metric) IN (SELECT application_id,release_key,container_name,bucket_start,step_seconds,metric FROM resource_rollup_points WHERE project_id=$1 AND ((step_seconds=60 AND bucket_start<$2) OR bucket_start<$3) ORDER BY bucket_start,application_id LIMIT $4 FOR UPDATE SKIP LOCKED)")
-            .bind(project_id).bind(detail_before).bind(rollup_before).bind(remaining)
-            .execute(&mut *tx).await?.rows_affected()
+        ResourceRepository::delete_expired_rollups(
+            &mut *tx,
+            project_id,
+            detail_before,
+            rollup_before,
+            remaining,
+        )
+        .await?
+        .rows_affected()
     };
     tx.commit().await?;
     Ok(contributions.saturating_add(rollups))
@@ -249,8 +263,7 @@ pub async fn persist_resource_aggregate(
 }
 
 async fn effective_detail_retention(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::Error> {
-    let days: i32 = sqlx::query_scalar("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1")
-        .bind(project_id).fetch_one(pool).await?;
+    let days: i32 = ResourceRepository::detail_retention_days(pool, project_id).await?;
     Ok(i64::from(days))
 }
 
@@ -284,18 +297,31 @@ async fn insert_contribution(
     aggregate: &ResourceAggregate,
 ) -> Result<bool, sqlx::Error> {
     let values = serde_json::to_value(&aggregate.values).unwrap_or_else(|_| serde_json::json!({}));
-    let result = sqlx::query("INSERT INTO resource_contributions(id,organization_id,project_id,application_id,cluster_id,agent_id,release_id,schema_version,interval_start,interval_end,covered_usec,sample_count,contributing_containers,namespace,workload_uid,workload_kind,workload_name,container_name,node_name,unavailable_sources,values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(organization_id,application_id,id) DO NOTHING")
-        .bind(aggregate.id).bind(application.organization_id).bind(application.project_id)
-        .bind(application.application_id).bind(scope.cluster_id).bind(agent_id).bind(release_id)
-        .bind(i16::try_from(aggregate.schema_version).unwrap_or(i16::MAX))
-        .bind(aggregate.interval_start).bind(aggregate.interval_end)
-        .bind(i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX))
-        .bind(i32::try_from(aggregate.sample_count).unwrap_or(i32::MAX))
-        .bind(i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX))
-        .bind(&aggregate.namespace).bind(&aggregate.workload_uid).bind(&aggregate.workload_kind)
-        .bind(&aggregate.workload_name).bind(&aggregate.container_name).bind(&aggregate.node_name)
-        .bind(i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX)).bind(values)
-        .execute(&mut **transaction).await?;
+    let result = ResourceRepository::insert_contribution(
+        &mut **transaction,
+        aggregate.id,
+        application.organization_id,
+        application.project_id,
+        application.application_id,
+        scope.cluster_id,
+        agent_id,
+        release_id,
+        i16::try_from(aggregate.schema_version).unwrap_or(i16::MAX),
+        aggregate.interval_start,
+        aggregate.interval_end,
+        i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
+        i32::try_from(aggregate.sample_count).unwrap_or(i32::MAX),
+        i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX),
+        &aggregate.namespace,
+        &aggregate.workload_uid,
+        &aggregate.workload_kind,
+        &aggregate.workload_name,
+        &aggregate.container_name,
+        &aggregate.node_name,
+        i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
+        values,
+    )
+    .await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -573,16 +599,29 @@ async fn upsert_rollup(
         .num_microseconds()
         .unwrap_or(0)
         .saturating_mul(i64::from(aggregate.contributing_containers));
-    sqlx::query("INSERT INTO resource_rollup_points(organization_id,project_id,application_id,release_key,release_id,container_name,bucket_start,step_seconds,metric,unit,value_sum,value_min,value_max,value_weight,limit_value,covered_usec,expected_usec,sample_count,contributor_count,observed_replicas,ready_replicas,unavailable_sources) VALUES($1,$2,$3,$4,$5,$6,to_timestamp(floor(extract(epoch from $7::timestamptz)/$8)*$8),$8,$9,$10,$11*$12,$11,$11,$12,$13,$14,$15,$16,1,$17,$18,$19) ON CONFLICT(application_id,release_key,container_name,bucket_start,step_seconds,metric) DO UPDATE SET value_sum=resource_rollup_points.value_sum+EXCLUDED.value_sum,value_min=LEAST(resource_rollup_points.value_min,EXCLUDED.value_min),value_max=GREATEST(resource_rollup_points.value_max,EXCLUDED.value_max),value_weight=resource_rollup_points.value_weight+EXCLUDED.value_weight,limit_value=COALESCE(EXCLUDED.limit_value,resource_rollup_points.limit_value),covered_usec=resource_rollup_points.covered_usec+EXCLUDED.covered_usec,expected_usec=resource_rollup_points.expected_usec+EXCLUDED.expected_usec,sample_count=resource_rollup_points.sample_count+EXCLUDED.sample_count,contributor_count=resource_rollup_points.contributor_count+1,observed_replicas=GREATEST(resource_rollup_points.observed_replicas,EXCLUDED.observed_replicas),ready_replicas=GREATEST(resource_rollup_points.ready_replicas,EXCLUDED.ready_replicas),unavailable_sources=resource_rollup_points.unavailable_sources|EXCLUDED.unavailable_sources,updated_at=now()")
-        .bind(application.organization_id).bind(application.project_id).bind(application.application_id)
-        .bind(release_key).bind(release_id).bind(&aggregate.container_name).bind(aggregate.interval_start)
-        .bind(step).bind(metric.name).bind(metric.unit).bind(metric.value)
-        .bind(u64_as_f64(aggregate.covered_usec)).bind(metric.limit)
-        .bind(i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX)).bind(expected)
-        .bind(i64::from(aggregate.sample_count)).bind(i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX))
-        .bind(i32::try_from(aggregate.ready_containers).unwrap_or(i32::MAX))
-        .bind(i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX))
-        .execute(&mut **transaction).await?;
+    ResourceRepository::add_rollup_point(
+        &mut **transaction,
+        application.organization_id,
+        application.project_id,
+        application.application_id,
+        release_key,
+        release_id,
+        &aggregate.container_name,
+        aggregate.interval_start,
+        step,
+        metric.name,
+        metric.unit,
+        metric.value,
+        u64_as_f64(aggregate.covered_usec),
+        metric.limit,
+        i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
+        expected,
+        i64::from(aggregate.sample_count),
+        i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX),
+        i32::try_from(aggregate.ready_containers).unwrap_or(i32::MAX),
+        i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
+    )
+    .await?;
     Ok(())
 }
 
@@ -686,10 +725,19 @@ async fn resource_history(
     let organization_id = project_organization(&state, principal, project_id).await?;
     ensure_application(&state.pool, organization_id, project_id, application_id).await?;
     let step = validate_history_query(&query)?;
-    let rows = sqlx::query_as::<_, HistoryRow>("SELECT p.bucket_start,p.unit,p.value_sum/p.value_weight value,p.limit_value,p.covered_usec,p.expected_usec,p.sample_count,p.contributor_count,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int observed_replicas,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int ready_replicas,p.unavailable_sources,p.release_id,CASE WHEN r.id IS NULL THEN NULL ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name,p.container_name FROM resource_rollup_points p JOIN applications a ON a.id=p.application_id LEFT JOIN releases r ON r.id=p.release_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.metric=$4 AND p.step_seconds=$5 AND p.bucket_start >= $6 AND p.bucket_start < $7 AND ($8::uuid IS NULL OR p.release_id=$8) AND ($9::text IS NULL OR p.container_name=$9) ORDER BY p.bucket_start,p.container_name,p.release_key LIMIT 45360")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(&query.metric)
-        .bind(step).bind(query.from).bind(query.to).bind(query.release_id).bind(&query.container)
-        .fetch_all(&state.pool).await?;
+    let rows = ResourceRepository::history::<_, HistoryRow>(
+        &state.pool,
+        organization_id,
+        project_id,
+        application_id,
+        &query.metric,
+        step,
+        query.from,
+        query.to,
+        query.release_id,
+        query.container.as_deref(),
+    )
+    .await?;
     Ok(Json(history_response(query, step, rows)))
 }
 
@@ -1145,8 +1193,14 @@ async fn fetch_episode(
     application_id: Uuid,
     release_id: Uuid,
 ) -> Result<Option<EpisodeWindowSource>, sqlx::Error> {
-    sqlx::query_as("SELECT e.id episode_id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.first_observed_at,e.first_ready_at FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 ORDER BY e.first_observed_at DESC,e.id DESC LIMIT 1")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id).fetch_optional(pool).await
+    ResourceRepository::episode_window(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        release_id,
+    )
+    .await
 }
 
 async fn fetch_baseline_episode(
@@ -1169,8 +1223,14 @@ async fn fetch_baseline_episode(
         .ok_or(ResourceError::NotFound)?;
         return Ok((Some(episode), "explicit"));
     }
-    let rows = sqlx::query_as::<_, EpisodeWindowSource>("SELECT p.id episode_id,p.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,p.first_observed_at,p.first_ready_at FROM deployment_episode_predecessors x JOIN deployment_episodes p ON p.id=x.predecessor_episode_id JOIN releases r ON r.id=p.release_id JOIN applications a ON a.id=p.application_id WHERE x.episode_id=$1 AND p.organization_id=$2 AND p.project_id=$3 AND p.application_id=$4 ORDER BY x.observed_at DESC,p.id DESC LIMIT 2")
-        .bind(target.episode_id).bind(organization_id).bind(project_id).bind(application_id).fetch_all(pool).await?;
+    let rows = ResourceRepository::predecessor_episode_windows::<_, EpisodeWindowSource>(
+        pool,
+        target.episode_id,
+        organization_id,
+        project_id,
+        application_id,
+    )
+    .await?;
     let source = match rows.len() {
         0 => "none",
         1 => "transition",
@@ -1180,8 +1240,12 @@ async fn fetch_baseline_episode(
 }
 
 pub async fn refresh_project_findings(pool: &PgPool, organization_id: Uuid, project_id: Uuid) {
-    let targets = sqlx::query_as::<_, ProjectEvaluationTarget>("SELECT DISTINCT ON(e.application_id) e.organization_id,e.application_id,e.id episode_id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.first_observed_at,e.first_ready_at FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.first_ready_at IS NOT NULL ORDER BY e.application_id,e.first_observed_at DESC,e.id DESC LIMIT 64")
-        .bind(organization_id).bind(project_id).fetch_all(pool).await;
+    let targets = ResourceRepository::latest_ready_episodes::<_, ProjectEvaluationTarget>(
+        pool,
+        organization_id,
+        project_id,
+    )
+    .await;
     let Ok(targets) = targets else {
         tracing::warn!(%organization_id, %project_id, "resource finding target scan failed");
         return;
@@ -1339,10 +1403,15 @@ async fn persist_findings(
         .iter()
         .map(|finding| finding.id)
         .collect::<Vec<_>>();
-    sqlx::query("UPDATE release_resource_findings SET clean_evaluations=LEAST(clean_evaluations+1,2),closed_at=CASE WHEN clean_evaluations+1>=2 THEN now() ELSE NULL END,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND target_release_id=$4 AND closed_at IS NULL AND NOT(id=ANY($5))")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(target_release_id)
-        .bind(&active_ids)
-        .execute(&mut *tx).await?;
+    ResourceRepository::age_findings(
+        &mut *tx,
+        organization_id,
+        project_id,
+        application_id,
+        target_release_id,
+        &active_ids,
+    )
+    .await?;
     for finding in findings {
         let unit = metrics
             .iter()
@@ -1353,11 +1422,22 @@ async fn persist_findings(
             "threshold":finding.threshold,"sustained_buckets":finding.sustained_buckets,
             "baseline":finding.baseline,"target":finding.target,"change":finding.change,
             "baseline_window":baseline_window,"target_window":target_window});
-        sqlx::query("INSERT INTO release_resource_findings(id,organization_id,project_id,application_id,target_release_id,baseline_release_id,reason_code,priority,metric,rule_version,facts,opened_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(application_id,target_release_id,reason_code,metric,rule_version) DO UPDATE SET facts=EXCLUDED.facts,priority=EXCLUDED.priority,clean_evaluations=0,closed_at=NULL,updated_at=now()")
-            .bind(finding.id).bind(organization_id).bind(project_id).bind(application_id)
-            .bind(target_release_id).bind(baseline_release_id).bind(finding.reason_code)
-            .bind(finding.priority).bind(&finding.metric).bind(i16::try_from(finding.rule_version).unwrap_or(i16::MAX))
-            .bind(facts).bind(target_window.from).execute(&mut *tx).await?;
+        ResourceRepository::upsert_finding(
+            &mut *tx,
+            finding.id,
+            organization_id,
+            project_id,
+            application_id,
+            target_release_id,
+            baseline_release_id,
+            finding.reason_code,
+            finding.priority,
+            &finding.metric,
+            i16::try_from(finding.rule_version).unwrap_or(i16::MAX),
+            facts,
+            target_window.from,
+        )
+        .await?;
     }
     tx.commit().await
 }
@@ -1388,8 +1468,16 @@ async fn summarize_window(
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Vec<MetricSummary>, sqlx::Error> {
-    sqlx::query_as("SELECT metric,min(unit) unit,sum(value_sum)/sum(value_weight) value,max(limit_value) limit_value,sum(covered_usec)::bigint covered_usec,sum(expected_usec)::bigint expected_usec,sum(sample_count)::bigint sample_count,sum(contributor_count)::bigint contributor_count,ceil(sum(covered_usec)::numeric/1800000000)::int observed_replicas,ceil(sum(covered_usec)::numeric/1800000000)::int ready_replicas,count(DISTINCT bucket_start)::bigint bucket_count FROM resource_rollup_points WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND release_id=$4 AND step_seconds=60 AND bucket_start >= $5 AND bucket_start < $6 GROUP BY metric ORDER BY metric")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id).bind(from).bind(to).fetch_all(pool).await
+    ResourceRepository::window_summary(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        release_id,
+        from,
+        to,
+    )
+    .await
 }
 
 fn window_coverage(metrics: &[MetricSummary], expected_seconds: i64) -> Coverage {
@@ -1576,9 +1664,16 @@ async fn sustained_findings(
     if candidates.is_empty() {
         return Ok(candidates);
     }
-    let buckets = sqlx::query_as::<_, MetricBucket>("SELECT metric,bucket_start,sum(value_sum)/sum(value_weight) value FROM resource_rollup_points WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND release_id=$4 AND step_seconds=60 AND bucket_start >= $5 AND bucket_start < $6 GROUP BY metric,bucket_start HAVING sum(covered_usec)::double precision/sum(expected_usec)>=0.8 ORDER BY metric,bucket_start")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id)
-        .bind(from).bind(to).fetch_all(pool).await?;
+    let buckets = ResourceRepository::covered_buckets::<_, MetricBucket>(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        release_id,
+        from,
+        to,
+    )
+    .await?;
     Ok(candidates
         .into_iter()
         .filter(|finding| finding.reason_code == "oom_observed" || sustained(finding, &buckets))
