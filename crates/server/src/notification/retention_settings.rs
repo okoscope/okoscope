@@ -1,3 +1,4 @@
+use crate::repository::notification_retention::NotificationRetentionRepository;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -31,8 +32,12 @@ pub async fn initialize(pool: &PgPool, legacy: RetentionPolicy) -> Result<(), sq
             "invalid legacy retention window".into(),
         ));
     }
-    sqlx::query("UPDATE organizations SET notification_retention_enabled=$1,notification_retention_days=$2,notification_retention_initialized=true,notification_retention_updated_at=now() WHERE NOT notification_retention_initialized")
-        .bind(legacy.enabled).bind(legacy.history_days).execute(pool).await?;
+    NotificationRetentionRepository::initialize_organizations(
+        pool,
+        legacy.enabled,
+        legacy.history_days,
+    )
+    .await?;
     Ok(())
 }
 
@@ -40,8 +45,7 @@ pub async fn organization(
     pool: &PgPool,
     organization_id: Uuid,
 ) -> Result<Option<RetentionPolicy>, sqlx::Error> {
-    sqlx::query_as("SELECT notification_retention_enabled enabled,notification_retention_days history_days FROM organizations WHERE id=$1 AND notification_retention_initialized")
-        .bind(organization_id).fetch_optional(pool).await
+    NotificationRetentionRepository::organization_policy(pool, organization_id).await
 }
 
 #[derive(FromRow)]
@@ -59,9 +63,8 @@ pub async fn project(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<ProjectRetention>, sqlx::Error> {
-    let row: Option<ProjectPolicyRow> = sqlx::query_as(
-        "SELECT p.notification_retention_enabled override_enabled,p.notification_retention_days override_days,e.enabled,e.history_days,o.notification_retention_enabled inherited_enabled,o.notification_retention_days inherited_days FROM projects p JOIN organizations o ON o.id=p.organization_id JOIN effective_notification_retention e ON e.project_id=p.id WHERE p.organization_id=$1 AND p.id=$2",
-    ).bind(organization_id).bind(project_id).fetch_optional(pool).await?;
+    let row: Option<ProjectPolicyRow> =
+        NotificationRetentionRepository::project_policy(pool, organization_id, project_id).await?;
     Ok(row.map(|row| {
         let policy_override =
             row.override_enabled
@@ -92,9 +95,14 @@ pub async fn set_organization(
     actor: Uuid,
     policy: RetentionPolicy,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE organizations SET notification_retention_enabled=$2,notification_retention_days=$3,notification_retention_initialized=true,notification_retention_updated_at=now(),notification_retention_updated_by=$4 WHERE id=$1")
-        .bind(organization_id).bind(policy.enabled).bind(policy.history_days).bind(actor)
-        .execute(pool).await?;
+    NotificationRetentionRepository::set_organization_policy(
+        pool,
+        organization_id,
+        policy.enabled,
+        policy.history_days,
+        actor,
+    )
+    .await?;
     Ok(())
 }
 
@@ -105,8 +113,14 @@ pub async fn set_project(
     actor: Uuid,
     policy: Option<RetentionPolicy>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE projects SET notification_retention_enabled=$3,notification_retention_days=$4,notification_retention_updated_at=now(),notification_retention_updated_by=$5 WHERE organization_id=$1 AND id=$2")
-        .bind(organization_id).bind(project_id).bind(policy.map(|p| p.enabled))
-        .bind(policy.map(|p| p.history_days)).bind(actor).execute(pool).await?;
+    NotificationRetentionRepository::set_project_override(
+        pool,
+        organization_id,
+        project_id,
+        policy.map(|p| p.enabled),
+        policy.map(|p| p.history_days),
+        actor,
+    )
+    .await?;
     Ok(())
 }

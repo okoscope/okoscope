@@ -1,3 +1,4 @@
+use crate::repository::notification_deliveries::NotificationDeliveryRepository;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{FromRow, PgPool};
@@ -105,24 +106,16 @@ pub async fn load_project_snapshot(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<NotificationQueueSnapshot, sqlx::Error> {
-    sqlx::query_as(PROJECT_SNAPSHOT_SQL)
-        .bind(organization_id)
-        .bind(project_id)
-        .fetch_one(pool)
-        .await
+    NotificationDeliveryRepository::project_queue_snapshot(pool, organization_id, project_id).await
 }
 
 pub async fn load_global_snapshot(pool: &PgPool) -> Result<NotificationQueueSnapshot, sqlx::Error> {
-    sqlx::query_as(GLOBAL_SNAPSHOT_SQL).fetch_one(pool).await
+    NotificationDeliveryRepository::queue_snapshot(pool).await
 }
 
 fn non_negative(value: i64) -> i64 {
     value.max(0)
 }
-
-const PROJECT_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND enabled=true) enabled_destination_count, count(*) FILTER (WHERE status='pending') pending_count, count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count, count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count, count(*) FILTER (WHERE status='in_flight') in_flight_count, count(*) FILTER (WHERE status='in_flight' AND lease_expires_at<=now()) expired_lease_count, count(*) FILTER (WHERE status='failed') failed_count, CASE WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0 THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now()-min(available_at) FILTER (WHERE status='pending' AND available_at<=now())))::bigint,0) END oldest_due_age_seconds FROM notification_deliveries WHERE organization_id=$1 AND project_id=$2";
-
-const GLOBAL_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destinations WHERE enabled=true) enabled_destination_count, count(*) FILTER (WHERE status='pending') pending_count, count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count, count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count, count(*) FILTER (WHERE status='in_flight') in_flight_count, count(*) FILTER (WHERE status='in_flight' AND lease_expires_at<=now()) expired_lease_count, count(*) FILTER (WHERE status='failed') failed_count, CASE WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0 THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now()-min(available_at) FILTER (WHERE status='pending' AND available_at<=now())))::bigint,0) END oldest_due_age_seconds FROM notification_deliveries";
 
 #[cfg(test)]
 mod tests {
