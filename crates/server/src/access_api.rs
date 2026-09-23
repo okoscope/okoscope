@@ -586,14 +586,15 @@ async fn create_platform_organization(
     let actor = platform(&state, &headers, &request_id, true)
         .await
         .map_err(IntoResponse::into_response)?;
-    validate_platform_organization(&state, &input, &request_id)
-        .await
-        .map_err(IntoResponse::into_response)?;
+    validate_platform_organization(&input, &request_id).map_err(IntoResponse::into_response)?;
     let mut tx = state
         .pool
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
+    ensure_organization_capacity(&mut tx, state.config.organization_mode, &request_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
     let organization_id = Uuid::new_v4();
     let status = if matches!(input.ownership, PlatformOwnership::SelfOwner) {
         OrganizationStatus::Active
@@ -667,8 +668,7 @@ async fn create_platform_organization(
         .into_response())
 }
 
-async fn validate_platform_organization(
-    state: &AccessState,
+fn validate_platform_organization(
     input: &CreatePlatformOrganization,
     request_id: &RequestId,
 ) -> Result<(), AccessError> {
@@ -680,16 +680,34 @@ async fn validate_platform_organization(
             request_id,
         ));
     }
-    if state.config.organization_mode == OrganizationMode::Single {
-        let exists = OrganizationRepository::any_exists(&state.pool)
-            .await
-            .map_err(|error| AccessError::database(&error, request_id))?;
-        if exists {
-            return Err(AccessError::conflict(
-                ErrorCode::ORGANIZATION_LIMIT_REACHED,
-                request_id,
-            ));
-        }
+    Ok(())
+}
+
+/// Refuses to create a second organization in single-organization mode.
+///
+/// Must run inside the transaction that creates the organization. The check
+/// used to run on the pool before that transaction began, so two concurrent
+/// requests could both find no organization and both insert one; nothing in
+/// the schema limits the table to a single row. Holding the authority lock
+/// across the check and the insert means a second request waits for the first
+/// to commit and then sees its organization.
+async fn ensure_organization_capacity(
+    tx: &mut Transaction<'_, Postgres>,
+    mode: OrganizationMode,
+    request_id: &RequestId,
+) -> Result<(), AccessError> {
+    if mode != OrganizationMode::Single {
+        return Ok(());
+    }
+    lock_authority(tx, request_id).await?;
+    let exists = OrganizationRepository::any_exists(&mut **tx)
+        .await
+        .map_err(|error| AccessError::database(&error, request_id))?;
+    if exists {
+        return Err(AccessError::conflict(
+            ErrorCode::ORGANIZATION_LIMIT_REACHED,
+            request_id,
+        ));
     }
     Ok(())
 }
@@ -1892,4 +1910,92 @@ async fn audit(
         crate::metrics::record_platform_mutation();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two creations racing in single-organization mode must leave exactly one
+    /// organization. The first has passed the capacity check and inserted but
+    /// not committed when the second arrives, which is the window the check
+    /// used to leave open: under read committed the second could not see the
+    /// first's row, found the table empty, and inserted its own.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn single_mode_admits_one_organization_under_concurrency(pool: PgPool) {
+        let request_id = RequestId("first".into());
+        let mut first = pool.begin().await.unwrap();
+        ensure_organization_capacity(&mut first, OrganizationMode::Single, &request_id)
+            .await
+            .unwrap();
+        OrganizationRepository::insert(
+            &mut *first,
+            Uuid::new_v4(),
+            "first",
+            "First",
+            OrganizationStatus::Active,
+        )
+        .await
+        .unwrap();
+
+        let second_pool = pool.clone();
+        let second = tokio::spawn(async move {
+            let request_id = RequestId("second".into());
+            let mut tx = second_pool.begin().await.unwrap();
+            let admitted =
+                ensure_organization_capacity(&mut tx, OrganizationMode::Single, &request_id)
+                    .await
+                    .is_ok();
+            if admitted {
+                OrganizationRepository::insert(
+                    &mut *tx,
+                    Uuid::new_v4(),
+                    "second",
+                    "Second",
+                    OrganizationStatus::Active,
+                )
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+            }
+            admitted
+        });
+        // Let the second request reach its check while the first is open.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        first.commit().await.unwrap();
+
+        assert!(
+            !second.await.unwrap(),
+            "the second creation must be refused once the first commits"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM organizations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "single mode must never hold two organizations");
+    }
+
+    /// Multiple-organization mode has no limit and takes no lock.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn multiple_mode_is_not_limited(pool: PgPool) {
+        let request_id = RequestId("multiple".into());
+        for slug in ["one", "two"] {
+            let mut tx = pool.begin().await.unwrap();
+            ensure_organization_capacity(&mut tx, OrganizationMode::Multiple, &request_id)
+                .await
+                .unwrap();
+            OrganizationRepository::insert(
+                &mut *tx,
+                Uuid::new_v4(),
+                slug,
+                slug,
+                OrganizationStatus::Active,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
 }
