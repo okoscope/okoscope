@@ -870,9 +870,16 @@ async fn validate_release_scope(
     let Some(release_id) = release_id else {
         return Ok(());
     };
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4)")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(release_id)
-        .fetch_one(pool).await?;
+    let exists: bool = crate::repository::ReleaseRepository::exists(
+        pool,
+        crate::repository::ApplicationScope {
+            organization_id: principal.organization_id,
+            project_id,
+            application_id,
+        },
+        release_id,
+    )
+    .await?;
     if exists {
         Ok(())
     } else {
@@ -1411,9 +1418,19 @@ async fn item_releases(
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor = if let Some(cursor) = query.cursor {
-        Some(sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT deployed_at,id FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-            .bind(principal.organization_id).bind(project_id).bind(application_id).bind(cursor)
-            .fetch_optional(&state.pool).await?.ok_or_else(|| InventoryApiError::Invalid("release cursor is invalid".into()))?)
+        Some(
+            crate::repository::ReleaseRepository::cursor(
+                &state.pool,
+                crate::repository::ApplicationScope {
+                    organization_id: principal.organization_id,
+                    project_id,
+                    application_id,
+                },
+                cursor,
+            )
+            .await?
+            .ok_or_else(|| InventoryApiError::Invalid("release cursor is invalid".into()))?,
+        )
     } else {
         None
     };
