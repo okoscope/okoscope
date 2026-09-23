@@ -1,3 +1,5 @@
+use crate::repository::notification_deliveries::NotificationDeliveryRepository;
+use crate::repository::notification_recovery::NotificationRecoveryRepository;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -226,15 +228,14 @@ impl RecoveryRepository {
         let operation_id = Uuid::new_v4();
         let completed_at = Utc::now();
         let generation = delivery.recovery_generation.saturating_add(1);
-        let changed = sqlx::query(
-            "UPDATE notification_deliveries SET status='pending',recovery_generation=$4,attempt_count=0,available_at=now(),lease_owner=NULL,lease_expires_at=NULL,terminal_at=NULL,last_error_class=NULL,last_error=NULL,last_recovery_operation_id=$5,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND status='failed'",
+        let changed = NotificationDeliveryRepository::requeue_failed(
+            &mut *tx,
+            organization_id,
+            project_id,
+            delivery_id,
+            generation,
+            operation_id,
         )
-        .bind(organization_id)
-        .bind(project_id)
-        .bind(delivery_id)
-        .bind(generation)
-        .bind(operation_id)
-        .execute(&mut *tx)
         .await?;
         if changed.rows_affected() != 1 {
             return Err(RecoveryError::Conflict(RecoveryConflictCode::InvalidState));
@@ -312,14 +313,13 @@ impl RecoveryRepository {
         ensure_cancel_eligible(&delivery)?;
         let operation_id = Uuid::new_v4();
         let completed_at = Utc::now();
-        let changed = sqlx::query(
-            "UPDATE notification_deliveries SET status='cancelled',terminal_at=now(),last_error_class='user_cancelled',last_error='delivery cancelled by authenticated project user',last_recovery_operation_id=$4,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND status='pending' AND lease_owner IS NULL AND lease_expires_at IS NULL",
+        let changed = NotificationDeliveryRepository::cancel_pending(
+            &mut *tx,
+            organization_id,
+            project_id,
+            delivery_id,
+            operation_id,
         )
-        .bind(organization_id)
-        .bind(project_id)
-        .bind(delivery_id)
-        .bind(operation_id)
-        .execute(&mut *tx)
         .await?;
         if changed.rows_affected() != 1 {
             return Err(RecoveryError::Conflict(RecoveryConflictCode::ActiveLease));
@@ -370,6 +370,7 @@ impl RecoveryRepository {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn bulk_retry(
         &self,
         organization_id: Uuid,
@@ -394,17 +395,16 @@ impl RecoveryRepository {
         {
             return Ok(result);
         }
-        let mut candidates = sqlx::query_as::<_, (Uuid, i32)>(
-            "SELECT d.id,d.recovery_generation FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.status='failed' AND w.enabled=true AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::timestamptz IS NULL OR d.terminal_at<$4) AND ($5::timestamptz IS NULL OR d.terminal_at>=$5) AND ($6::text IS NULL OR d.last_error_class=$6) ORDER BY d.terminal_at,d.created_at,d.id FOR UPDATE OF d SKIP LOCKED LIMIT $7",
+        let mut candidates = NotificationDeliveryRepository::failed_for_retry(
+            &mut *tx,
+            organization_id,
+            project_id,
+            filter.destination_id,
+            filter.failed_before,
+            filter.failed_after,
+            filter.error_class.as_deref(),
+            limit + 1,
         )
-        .bind(organization_id)
-        .bind(project_id)
-        .bind(filter.destination_id)
-        .bind(filter.failed_before)
-        .bind(filter.failed_after)
-        .bind(&filter.error_class)
-        .bind(limit + 1)
-        .fetch_all(&mut *tx)
         .await?;
         let saw_more = i64::try_from(candidates.len()).unwrap_or(i64::MAX) > limit;
         if saw_more {
@@ -415,14 +415,29 @@ impl RecoveryRepository {
         let mut changed = Vec::with_capacity(candidates.len());
         for (delivery_id, previous_generation) in candidates {
             let generation = previous_generation.saturating_add(1);
-            let updated = sqlx::query("UPDATE notification_deliveries SET status='pending',recovery_generation=$4,attempt_count=0,available_at=now(),lease_owner=NULL,lease_expires_at=NULL,terminal_at=NULL,last_error_class=NULL,last_error=NULL,last_recovery_operation_id=$5,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND status='failed'")
-                .bind(organization_id).bind(project_id).bind(delivery_id).bind(generation).bind(operation_id).execute(&mut *tx).await?;
+            let updated = NotificationDeliveryRepository::requeue_failed(
+                &mut *tx,
+                organization_id,
+                project_id,
+                delivery_id,
+                generation,
+                operation_id,
+            )
+            .await?;
             if updated.rows_affected() == 1 {
                 changed.push((delivery_id, generation));
             }
         }
-        let remaining = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.status='failed' AND w.enabled=true AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::timestamptz IS NULL OR d.terminal_at<$4) AND ($5::timestamptz IS NULL OR d.terminal_at>=$5) AND ($6::text IS NULL OR d.last_error_class=$6)")
-            .bind(organization_id).bind(project_id).bind(filter.destination_id).bind(filter.failed_before).bind(filter.failed_after).bind(&filter.error_class).fetch_one(&mut *tx).await?;
+        let remaining = NotificationDeliveryRepository::count_failed_for_retry(
+            &mut *tx,
+            organization_id,
+            project_id,
+            filter.destination_id,
+            filter.failed_before,
+            filter.failed_after,
+            filter.error_class.as_deref(),
+        )
+        .await?;
         let retried = i32::try_from(changed.len()).unwrap_or(i32::MAX);
         let selected = retried;
         let remaining = i32::try_from(remaining).unwrap_or(i32::MAX);
@@ -482,14 +497,22 @@ impl RecoveryRepository {
     ) -> Result<(Vec<RecoveryOperationSummary>, Option<Uuid>), RecoveryError> {
         let limit = filter.limit.unwrap_or(50).clamp(1, 200);
         let cursor = if let Some(cursor) = filter.cursor {
-            sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT created_at,id FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-                .bind(organization_id).bind(project_id).bind(cursor).fetch_optional(&self.pool).await?
+            NotificationRecoveryRepository::cursor(&self.pool, organization_id, project_id, cursor)
+                .await?
         } else {
             None
         };
         let (cursor_time, cursor_id) = cursor.unzip();
-        let mut rows = sqlx::query_as::<_, RecoveryOperationSummary>("SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,created_at,completed_at FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND ($3::text IS NULL OR command_type=$3) AND ($4::timestamptz IS NULL OR (created_at,id)<($4,$5)) ORDER BY created_at DESC,id DESC LIMIT $6")
-            .bind(organization_id).bind(project_id).bind(&filter.command_type).bind(cursor_time).bind(cursor_id).bind(limit + 1).fetch_all(&self.pool).await?;
+        let mut rows = NotificationRecoveryRepository::page::<_, RecoveryOperationSummary>(
+            &self.pool,
+            organization_id,
+            project_id,
+            filter.command_type.as_deref(),
+            cursor_time,
+            cursor_id,
+            limit + 1,
+        )
+        .await?;
         let next_cursor = if i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
             rows.pop();
             rows.last().map(|row| row.id)
@@ -505,13 +528,21 @@ impl RecoveryRepository {
         project_id: Uuid,
         operation_id: Uuid,
     ) -> Result<Option<RecoveryOperationDetail>, RecoveryError> {
-        let operation = sqlx::query_as::<_, RecoveryOperationSummary>("SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,created_at,completed_at FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id).bind(project_id).bind(operation_id).fetch_optional(&self.pool).await?;
+        let operation = NotificationRecoveryRepository::get::<_, RecoveryOperationSummary>(
+            &self.pool,
+            organization_id,
+            project_id,
+            operation_id,
+        )
+        .await?;
         let Some(operation) = operation else {
             return Ok(None);
         };
-        let affected_deliveries = sqlx::query_as::<_, RecoveryOperationDelivery>("SELECT delivery_id,recovery_generation,action,created_at FROM notification_recovery_operation_deliveries WHERE organization_id=$1 AND project_id=$2 AND operation_id=$3 ORDER BY created_at,delivery_id LIMIT 200")
-            .bind(organization_id).bind(project_id).bind(operation_id).fetch_all(&self.pool).await?;
+        let affected_deliveries = NotificationRecoveryRepository::deliveries::<
+            _,
+            RecoveryOperationDelivery,
+        >(&self.pool, organization_id, project_id, operation_id)
+        .await?;
         Ok(Some(RecoveryOperationDetail {
             operation,
             affected_deliveries,
@@ -525,8 +556,14 @@ async fn lock_delivery(
     project_id: Uuid,
     delivery_id: Uuid,
 ) -> Result<LockedDelivery, RecoveryError> {
-    sqlx::query_as::<_, LockedDelivery>("SELECT d.status,w.enabled destination_enabled,d.lease_expires_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3 FOR UPDATE OF d")
-        .bind(organization_id).bind(project_id).bind(delivery_id).fetch_optional(&mut **tx).await?.ok_or(RecoveryError::NotFound)
+    NotificationDeliveryRepository::lock_for_recovery::<_, LockedDelivery>(
+        &mut **tx,
+        organization_id,
+        project_id,
+        delivery_id,
+    )
+    .await?
+    .ok_or(RecoveryError::NotFound)
 }
 
 fn ensure_retry_eligible(delivery: &LockedDelivery) -> Result<(), RecoveryError> {
@@ -580,8 +617,11 @@ async fn replay<T: DeserializeOwned + Serialize>(
     key_hash: &[u8; 32],
     fingerprint: &[u8; 32],
 ) -> Result<Option<T>, RecoveryError> {
-    let existing = sqlx::query_as::<_, ExistingCommand>("SELECT request_fingerprint,result FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND idempotency_key_hash=$3 FOR UPDATE")
-        .bind(organization_id).bind(project_id).bind(key_hash.as_slice()).fetch_optional(&mut **tx).await?;
+    let existing = NotificationRecoveryRepository::by_idempotency_key_for_update::<
+        _,
+        ExistingCommand,
+    >(&mut **tx, organization_id, project_id, key_hash.as_slice())
+    .await?;
     let Some(existing) = existing else {
         return Ok(None);
     };
@@ -620,11 +660,27 @@ async fn insert_operation<T: Serialize>(
     tx: &mut Transaction<'_, Postgres>,
     input: OperationInsert<'_, T>,
 ) -> Result<(), RecoveryError> {
-    sqlx::query("INSERT INTO notification_recovery_operations (id,organization_id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,idempotency_key_hash,request_fingerprint,safe_filters,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,result,completed_at) VALUES ($1,$2,$3,$4,$5,'user',$6,$7,$8,$9,$10,'completed',$11,$12,$13,$14,$15,$16,$17)")
-        .bind(input.id).bind(input.organization_id).bind(input.project_id).bind(input.command.as_str()).bind(input.target_delivery_id)
-        .bind(input.actor.id).bind(input.actor.request_id).bind(input.key_hash.as_slice()).bind(input.fingerprint.as_slice()).bind(input.safe_filters)
-        .bind(input.selected).bind(input.retried).bind(input.cancelled).bind(input.skipped).bind(input.remaining)
-        .bind(serde_json::to_value(input.result)?).bind(input.completed_at).execute(&mut **tx).await?;
+    NotificationRecoveryRepository::insert(
+        &mut **tx,
+        input.id,
+        input.organization_id,
+        input.project_id,
+        input.command.as_str(),
+        input.target_delivery_id,
+        input.actor.id,
+        input.actor.request_id,
+        input.key_hash.as_slice(),
+        input.fingerprint.as_slice(),
+        input.safe_filters,
+        input.selected,
+        input.retried,
+        input.cancelled,
+        input.skipped,
+        input.remaining,
+        serde_json::to_value(input.result)?,
+        input.completed_at,
+    )
+    .await?;
     Ok(())
 }
 
@@ -637,8 +693,16 @@ async fn link_delivery(
     recovery_generation: i32,
     action: &str,
 ) -> Result<(), RecoveryError> {
-    sqlx::query("INSERT INTO notification_recovery_operation_deliveries (operation_id,organization_id,project_id,delivery_id,recovery_generation,action) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(operation_id).bind(organization_id).bind(project_id).bind(delivery_id).bind(recovery_generation).bind(action).execute(&mut **tx).await?;
+    NotificationRecoveryRepository::link_delivery(
+        &mut **tx,
+        operation_id,
+        organization_id,
+        project_id,
+        delivery_id,
+        recovery_generation,
+        action,
+    )
+    .await?;
     Ok(())
 }
 

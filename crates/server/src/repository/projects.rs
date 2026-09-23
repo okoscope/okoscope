@@ -45,6 +45,24 @@ pub struct LockedProject {
 pub struct ProjectRepository;
 
 impl ProjectRepository {
+    /// Locks the project row for update, without the organization lock
+    /// [`Self::lock_for_update`] takes first. Fails with `RowNotFound` when
+    /// there is no such project in the organization.
+    pub async fn lock_row_for_update<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+    ) -> Result<sqlx::postgres::PgRow, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("SELECT id FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE")
+            .bind(organization_id)
+            .bind(project_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// The project's organization. Fails with `RowNotFound` when there is no
     /// such project; [`Self::organization_of`] reports that as `None`.
     pub async fn organization_id_of<'e, E>(

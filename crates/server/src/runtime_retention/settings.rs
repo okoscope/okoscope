@@ -1,3 +1,6 @@
+use crate::repository::organizations::OrganizationRepository;
+use crate::repository::projects::ProjectRepository;
+use crate::repository::runtime_retention::RuntimeRetentionRepository;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -39,8 +42,7 @@ pub async fn organization(
     pool: &PgPool,
     organization_id: Uuid,
 ) -> Result<Option<RetentionPolicy>, sqlx::Error> {
-    sqlx::query_as("SELECT runtime_retention_enabled enabled,runtime_retention_raw_days raw_days,runtime_retention_history_days history_days FROM organizations WHERE id=$1")
-        .bind(organization_id).fetch_optional(pool).await
+    RuntimeRetentionRepository::organization_policy(pool, organization_id).await
 }
 
 #[derive(FromRow)]
@@ -80,9 +82,8 @@ pub async fn project(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<ProjectRetention>, sqlx::Error> {
-    let row: Option<ProjectPolicyRow> = sqlx::query_as(
-        "SELECT p.runtime_retention_enabled override_enabled,p.runtime_retention_raw_days override_raw_days,p.runtime_retention_history_days override_history_days,o.runtime_retention_enabled enabled,o.runtime_retention_raw_days raw_days,o.runtime_retention_history_days history_days FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.organization_id=$1 AND p.id=$2",
-    ).bind(organization_id).bind(project_id).fetch_optional(pool).await?;
+    let row: Option<ProjectPolicyRow> =
+        RuntimeRetentionRepository::project_policy(pool, organization_id, project_id).await?;
     Ok(row.map(ProjectPolicyRow::resolve))
 }
 
@@ -93,13 +94,16 @@ pub async fn set_organization(
     policy: RetentionPolicy,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE")
-        .bind(organization_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE organizations SET runtime_retention_enabled=$2,runtime_retention_raw_days=$3,runtime_retention_history_days=$4,runtime_retention_updated_at=now(),runtime_retention_updated_by=$5 WHERE id=$1")
-        .bind(organization_id).bind(policy.enabled).bind(policy.raw_days).bind(policy.history_days).bind(actor)
-        .execute(&mut *tx).await?;
+    OrganizationRepository::lock_for_update(&mut *tx, organization_id).await?;
+    RuntimeRetentionRepository::set_organization_policy(
+        &mut *tx,
+        organization_id,
+        policy.enabled,
+        policy.raw_days,
+        policy.history_days,
+        actor,
+    )
+    .await?;
     tx.commit().await
 }
 
@@ -111,19 +115,18 @@ pub async fn set_project(
     policy: Option<RetentionPolicy>,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE")
-        .bind(organization_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    sqlx::query("SELECT id FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE")
-        .bind(organization_id)
-        .bind(project_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE projects SET runtime_retention_enabled=$3,runtime_retention_raw_days=$4,runtime_retention_history_days=$5,runtime_retention_updated_at=now(),runtime_retention_updated_by=$6 WHERE organization_id=$1 AND id=$2")
-        .bind(organization_id).bind(project_id).bind(policy.map(|p| p.enabled))
-        .bind(policy.map(|p| p.raw_days)).bind(policy.and_then(|p| p.history_days)).bind(actor)
-        .execute(&mut *tx).await?;
+    OrganizationRepository::lock_for_update(&mut *tx, organization_id).await?;
+    ProjectRepository::lock_row_for_update(&mut *tx, organization_id, project_id).await?;
+    RuntimeRetentionRepository::set_project_override(
+        &mut *tx,
+        organization_id,
+        project_id,
+        policy.map(|p| p.enabled),
+        policy.map(|p| p.raw_days),
+        policy.and_then(|p| p.history_days),
+        actor,
+    )
+    .await?;
     tx.commit().await
 }
 
