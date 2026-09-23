@@ -14,16 +14,32 @@
 //! Errors surface as [`sqlx::Error`]. Mapping persistence failures onto an
 //! API-facing error type stays the caller's responsibility, because the status
 //! code and error envelope depend on the endpoint, not on the query.
+//!
+//! # Projections shaped by their endpoint
+//!
+//! Some statements exist for one endpoint and select exactly the columns its
+//! response carries. Those still belong here, but their row type does not: a
+//! method returning such a projection is generic over `T: FromRow`, and the
+//! caller names the response type it decodes into. The repository owns the
+//! statement and its tenant scoping; the endpoint owns the shape. Each such
+//! method documents the columns it selects, because that list is the contract
+//! between the two.
 
+pub mod agent_health;
 pub mod applications;
+pub mod dns_groups;
 pub mod event_groups;
 pub mod events;
 pub mod memberships;
+pub mod navigation;
 pub mod organizations;
 pub mod projects;
 pub mod releases;
 pub mod sessions;
 pub mod users;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use applications::ApplicationRepository;
 pub use event_groups::{EventGroupRepository, GroupKey};
