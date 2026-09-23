@@ -42,10 +42,9 @@ pub async fn lock_project(
     org: Uuid,
     project: Uuid,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-    sqlx::query("SELECT id FROM organizations WHERE id=$1 FOR SHARE")
-        .bind(org)
-        .execute(&mut **tx)
-        .await?;
+    // A missing organization is not an error here: the project lookup below
+    // cannot find a row without one, and reports that itself.
+    crate::repository::OrganizationRepository::lock_shared(&mut **tx, org).await?;
     sqlx::query_scalar(
         "SELECT runtime_closed_before FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE",
     )

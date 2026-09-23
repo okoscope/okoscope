@@ -425,11 +425,8 @@ async fn render(State(state): State<MetricsState>) -> impl IntoResponse {
             "database metrics unavailable\n".to_owned(),
         );
     };
-    let pending_owner_organizations = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM organizations WHERE status='pending_owner'",
-    )
-    .fetch_one(pool)
-    .await;
+    let pending_owner_organizations =
+        crate::repository::OrganizationRepository::pending_owner_count(pool).await;
     let Ok(pending_owner_organizations) = pending_owner_organizations else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
