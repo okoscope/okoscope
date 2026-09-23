@@ -24,7 +24,6 @@ use std::path::Path;
 const REMAINING: &[(&str, usize)] = &[
     ("access_api.rs", 19),
     ("access_audit.rs", 1),
-    ("agent_health.rs", 13),
     ("application_credentials.rs", 5),
     ("attention.rs", 14),
     ("auth.rs", 1),

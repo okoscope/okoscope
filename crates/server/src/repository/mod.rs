@@ -31,6 +31,7 @@
 //! fails the build if any module gains one. Existing statements are being moved
 //! here incrementally; the counts it records only ever go down.
 
+pub mod agent_health;
 pub mod applications;
 pub mod dns_groups;
 pub mod event_groups;
