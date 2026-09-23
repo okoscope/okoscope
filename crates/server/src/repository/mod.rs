@@ -25,6 +25,7 @@
 //! method documents the columns it selects, because that list is the contract
 //! between the two.
 
+pub mod agent_health;
 pub mod applications;
 pub mod dns_groups;
 pub mod event_groups;
