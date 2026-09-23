@@ -1,5 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::MembershipRepository;
+use crate::repository::navigation::NavigationRepository;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -14,7 +15,6 @@ use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
 use crate::repository::ApplicationRepository;
-use crate::repository::event_groups::aggregates;
 use crate::{
     access_control::ProjectRole,
     auth::{UserPrincipal, UserSessionAuthenticator},
@@ -281,9 +281,7 @@ async fn organization(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Organization>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let value = sqlx::query_as("SELECT id,slug,name,created_at FROM organizations WHERE id=$1")
-        .bind(principal.organization_id)
-        .fetch_optional(&state.pool)
+    let value = NavigationRepository::organization(&state.pool, principal.organization_id)
         .await
         .map_err(|error| NavigationError::database(&error, &request_id))?
         .ok_or_else(|| NavigationError::not_found(&request_id))?;
@@ -314,8 +312,15 @@ async fn projects(
         ));
     }
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
-        .bind(principal.organization_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
+    let mut items = NavigationRepository::project_page::<_, ProjectSummary>(
+        &state.pool,
+        principal.organization_id,
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?;
     let organization_admin = principal.role.inherits_project_access();
     let mut visible = Vec::with_capacity(items.len());
     for mut item in items.drain(..) {
@@ -338,8 +343,14 @@ async fn project(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ProjectSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let mut item = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
-        .bind(principal.organization_id).bind(project_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
+    let mut item = NavigationRepository::project::<_, ProjectSummary>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?
+    .ok_or_else(|| NavigationError::not_found(&request_id))?;
     let (role, source) = effective_project_access(&state.pool, principal, project_id)
         .await
         .map_err(|error| NavigationError::database(&error, &request_id))?
@@ -387,8 +398,16 @@ async fn applications(
         ));
     }
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, ApplicationSummary>(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4)) ORDER BY a.created_at,a.id LIMIT $5", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
-        .bind(principal.organization_id).bind(project_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
+    let mut items = NavigationRepository::application_page::<_, ApplicationSummary>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?;
     for item in &mut items {
         apply_application_access(
             item,
@@ -411,8 +430,15 @@ async fn application(
         .await
         .map_err(|error| NavigationError::database(&error, &request_id))?
         .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    let mut item = sqlx::query_as::<_, ApplicationSummary>(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
-        .bind(principal.organization_id).bind(project_id).bind(application_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
+    let mut item = NavigationRepository::application::<_, ApplicationSummary>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?
+    .ok_or_else(|| NavigationError::not_found(&request_id))?;
     apply_application_access(
         &mut item,
         access_role,
@@ -449,15 +475,16 @@ async fn application_workers(
         .transpose()
         .map_err(|message| NavigationError::invalid(message, &request_id))?;
     if let Some(cursor) = &cursor {
-        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 GROUP BY agent_id HAVING max(observed_at)=$5)")
-            .bind(principal.organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cursor.agent_id)
-            .bind(cursor.last_observed_at)
-            .fetch_one(&state.pool)
-            .await
-            .map_err(|error| NavigationError::database(&error, &request_id))?;
+        let valid: bool = NavigationRepository::worker_cursor_is_valid(
+            &state.pool,
+            principal.organization_id,
+            project_id,
+            application_id,
+            cursor.agent_id,
+            cursor.last_observed_at,
+        )
+        .await
+        .map_err(|error| NavigationError::database(&error, &request_id))?;
         if !valid {
             return Err(NavigationError::invalid(
                 "cursor is outside this scope",
@@ -467,16 +494,17 @@ async fn application_workers(
     }
     let cursor_time = cursor.as_ref().map(|value| value.last_observed_at);
     let cursor_agent = cursor.as_ref().map(|value| value.agent_id);
-    let mut items = sqlx::query_as::<_, ApplicationWorker>("WITH observed AS (SELECT agent_id,min(observed_at) first_observed_at,max(observed_at) last_observed_at FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 GROUP BY agent_id) SELECT a.id agent_id,a.cluster_id,c.name cluster_name,a.node_name,a.agent_version,a.architecture,a.kernel_release,o.first_observed_at,o.last_observed_at,a.last_seen_at agent_last_seen_at FROM observed o JOIN agents a ON a.organization_id=$1 AND a.id=o.agent_id JOIN clusters c ON c.organization_id=$1 AND c.id=a.cluster_id WHERE ($4::timestamptz IS NULL OR (o.last_observed_at,o.agent_id)<($4,$5)) ORDER BY o.last_observed_at DESC,o.agent_id DESC LIMIT $6")
-        .bind(principal.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .bind(cursor_time)
-        .bind(cursor_agent)
-        .bind(limit + 1)
-        .fetch_all(&state.pool)
-        .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?;
+    let mut items = NavigationRepository::worker_page::<_, ApplicationWorker>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        cursor_time,
+        cursor_agent,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| NavigationError::database(&error, &request_id))?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items
@@ -539,13 +567,9 @@ async fn cursor_position(
         return Ok(None);
     };
     if table == "projects" {
-        sqlx::query_as("SELECT created_at,id FROM projects WHERE organization_id=$1 AND id=$2")
-            .bind(organization_id)
-            .bind(cursor)
-            .fetch_optional(pool)
-            .await
+        NavigationRepository::project_cursor(pool, organization_id, cursor).await
     } else {
-        sqlx::query_as("SELECT created_at,id FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3").bind(organization_id).bind(project_id).bind(cursor).fetch_optional(pool).await
+        NavigationRepository::application_cursor(pool, organization_id, project_id, cursor).await
     }
 }
 

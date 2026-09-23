@@ -40,7 +40,6 @@ const REMAINING: &[(&str, usize)] = &[
     ("invitation_api.rs", 23),
     ("main.rs", 1),
     ("metrics.rs", 4),
-    ("navigation.rs", 9),
     ("notification/health.rs", 2),
     ("notification/recovery.rs", 13),
     ("notification/repository.rs", 8),
