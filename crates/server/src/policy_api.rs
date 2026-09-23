@@ -1,4 +1,7 @@
 use crate::error_code::ErrorCode;
+use crate::repository::inventory::InventoryRepository;
+use crate::repository::policies::PolicyRepository;
+use crate::repository::transaction::TransactionRepository;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -437,10 +440,16 @@ async fn get_recomputation(
         &request_id,
     )
     .await?;
-    let value = sqlx::query_as::<_, RecomputeSummary>("SELECT id,state,attempt_count,requested_policy_revision_id,created_at,started_at,completed_at,updated_at FROM runtime_policy_recomputations WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.recomputation_id)
-        .fetch_optional(&state.pool).await.map_err(|error| PolicyApiError::database(&error,&request_id))?
-        .ok_or_else(|| PolicyApiError::not_found(&request_id))?;
+    let value = PolicyRepository::recomputation::<_, RecomputeSummary>(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.recomputation_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?
+    .ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     Ok(Json(value))
 }
 
@@ -487,9 +496,16 @@ async fn list_policies(
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let mut items:Vec<PolicySummary>=sqlx::query_as("SELECT p.id,p.project_id,p.application_id,p.name,p.current_revision_id,r.revision_number,r.enabled,r.inventory_kind,r.identity_version,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,p.created_by_user_id,p.created_at,p.updated_at FROM runtime_policies p LEFT JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND ($4::uuid IS NULL OR p.id>$4) ORDER BY p.id LIMIT $5")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(query.cursor).bind(limit+1)
-        .fetch_all(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?;
+    let mut items: Vec<PolicySummary> = PolicyRepository::page(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?;
     let next_cursor =
         (items.len() > usize::try_from(limit).unwrap_or(0)).then(|| items.pop().unwrap().id);
     Ok(Json(Page { items, next_cursor }))
@@ -502,10 +518,16 @@ async fn get_policy(
     Path(path): Path<PolicyPath>,
 ) -> Result<Json<PolicySummary>, PolicyApiError> {
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
-    let item=sqlx::query_as("SELECT p.id,p.project_id,p.application_id,p.name,p.current_revision_id,r.revision_number,r.enabled,r.inventory_kind,r.identity_version,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,p.created_by_user_id,p.created_at,p.updated_at FROM runtime_policies p LEFT JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.id=$4")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id)
-        .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
-        .ok_or_else(||PolicyApiError::not_found(&request_id))?;
+    let item = PolicyRepository::get(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.policy_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?
+    .ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     Ok(Json(item))
 }
 
@@ -518,9 +540,17 @@ async fn list_revisions(
 ) -> Result<Json<Page<PolicyRevision>>, PolicyApiError> {
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let mut items:Vec<PolicyRevision>=sqlx::query_as("SELECT r.id,r.policy_id,r.revision_number,r.prior_revision_id,r.enabled,r.inventory_kind,r.identity_version,r.identity_digest,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,r.source_inventory_item_id,r.source_runtime_group_id,r.created_by_user_id,r.created_at FROM runtime_policy_revisions r WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND r.policy_id=$4 AND ($5::uuid IS NULL OR r.id<$5) ORDER BY r.id DESC LIMIT $6")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id).bind(query.cursor).bind(limit+1)
-        .fetch_all(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?;
+    let mut items: Vec<PolicyRevision> = PolicyRepository::revision_page(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.policy_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?;
     if items.is_empty() {
         let _ = get_policy(
             State(state.clone()),
@@ -542,10 +572,16 @@ async fn inventory_seed(
     Path(path): Path<ItemPath>,
 ) -> Result<Json<SeedResponse>, PolicyApiError> {
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
-    let row:InventoryIdentityRow=sqlx::query_as("SELECT id,inventory_kind,identity_version,identity_digest,semantic_summary FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.item_id)
-        .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
-        .ok_or_else(||PolicyApiError::not_found(&request_id))?;
+    let row: InventoryIdentityRow = InventoryRepository::identity(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.item_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?
+    .ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     let response = match BehaviorIdentity::from_inventory(
         &row.inventory_kind,
         row.identity_version,
@@ -567,10 +603,16 @@ async fn group_seed(
     Path(path): Path<GroupPath>,
 ) -> Result<Json<SeedResponse>, PolicyApiError> {
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
-    let row:GroupSeedRow=sqlx::query_as("SELECT i.id item_id,i.inventory_kind,i.identity_version,i.identity_digest,i.semantic_summary,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_event_groups g JOIN runtime_inventory_group_links l ON l.organization_id=g.organization_id AND l.project_id=g.project_id AND l.application_id=g.application_id AND l.group_id=g.id JOIN runtime_inventory_items i ON i.organization_id=l.organization_id AND i.project_id=l.project_id AND i.application_id=l.application_id AND i.id=l.item_id WHERE g.organization_id=$1 AND g.project_id=$2 AND g.application_id=$3 AND g.id=$4 ORDER BY i.id LIMIT 1")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.group_id)
-        .fetch_optional(&state.pool).await.map_err(|error|PolicyApiError::database(&error,&request_id))?
-        .ok_or_else(||PolicyApiError::not_found(&request_id))?;
+    let row: GroupSeedRow = InventoryRepository::group_seed(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.group_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, &request_id))?
+    .ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     let response = match BehaviorIdentity::from_inventory(
         &row.inventory_kind,
         row.identity_version,
@@ -605,16 +647,15 @@ async fn list_suppressions(
     let principal = principal(&headers, &state, path.project_id, &request_id).await?;
     ensure_application(&state, principal, path, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let mut items: Vec<SuppressionSummary> = sqlx::query_as(
-        "SELECT id,inventory_kind,identity_version,identity_digest,behavior_matcher,cluster_ids,namespaces,workload_kinds,workload_names,reason,expires_at,cancelled_at,cancelled_by_user_id,source_inventory_item_id,source_runtime_group_id,created_by_user_id,created_at FROM runtime_policy_suppressions WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND ($4::uuid IS NULL OR id<$4) AND ($5::boolean IS NULL OR $5=(cancelled_at IS NULL AND expires_at>now())) ORDER BY id DESC LIMIT $6",
+    let mut items: Vec<SuppressionSummary> = PolicyRepository::suppression_page(
+        &state.pool,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        query.cursor,
+        query.active,
+        limit + 1,
     )
-    .bind(principal.organization_id)
-    .bind(path.project_id)
-    .bind(path.application_id)
-    .bind(query.cursor)
-    .bind(query.active)
-    .bind(limit + 1)
-    .fetch_all(&state.pool)
     .await
     .map_err(|error| PolicyApiError::database(&error, &request_id))?;
     let next_cursor = (items.len() > usize::try_from(limit).unwrap_or(0))
@@ -655,19 +696,13 @@ async fn begin_command<T: DeserializeOwned>(
     digest: &[u8],
     request_id: &RequestId,
 ) -> Result<Option<T>, PolicyApiError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!("{organization_id}:{key}"))
-        .execute(&mut **tx)
+    PolicyRepository::lock_command(&mut **tx, format!("{organization_id}:{key}"))
         .await
         .map_err(|error| PolicyApiError::database(&error, request_id))?;
-    let existing: Option<(Vec<u8>, Value)> = sqlx::query_as(
-        "SELECT request_digest,result FROM runtime_policy_commands WHERE organization_id=$1 AND idempotency_key=$2",
-    )
-    .bind(organization_id)
-    .bind(key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| PolicyApiError::database(&error, request_id))?;
+    let existing: Option<(Vec<u8>, Value)> =
+        PolicyRepository::command(&mut **tx, organization_id, key)
+            .await
+            .map_err(|error| PolicyApiError::database(&error, request_id))?;
     match existing {
         Some((stored, result)) if stored == digest => serde_json::from_value(result)
             .map(Some)
@@ -686,9 +721,14 @@ async fn policy_state_version(
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<i64, PolicyApiError> {
-    sqlx::query_scalar("INSERT INTO runtime_policy_states(organization_id,project_id,application_id,state_version) VALUES($1,$2,$3,1) ON CONFLICT(organization_id,project_id,application_id) DO UPDATE SET state_version=runtime_policy_states.state_version+1,updated_at=now() RETURNING state_version")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id)
-        .fetch_one(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))
+    PolicyRepository::bump_state_version(
+        &mut **tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))
 }
 
 async fn load_revision_identity(
@@ -708,14 +748,27 @@ async fn load_revision_identity(
             request_id,
         ));
     }
-    let row: InventoryIdentityRow=sqlx::query_as("SELECT id,inventory_kind,identity_version,identity_digest,semantic_summary FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(input.source_inventory_item_id)
-        .fetch_optional(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?
-        .ok_or_else(||PolicyApiError::not_found(request_id))?;
+    let row: InventoryIdentityRow = InventoryRepository::identity(
+        &mut **tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        input.source_inventory_item_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?
+    .ok_or_else(|| PolicyApiError::not_found(request_id))?;
     if let Some(group_id) = input.source_runtime_group_id {
-        let linked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runtime_inventory_group_links WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND item_id=$4 AND group_id=$5)")
-            .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(row.id).bind(group_id)
-            .fetch_one(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?;
+        let linked: bool = InventoryRepository::item_linked_to_group(
+            &mut **tx,
+            principal.organization_id,
+            path.project_id,
+            path.application_id,
+            row.id,
+            group_id,
+        )
+        .await
+        .map_err(|error| PolicyApiError::database(&error, request_id))?;
         if !linked {
             return Err(PolicyApiError::not_found(request_id));
         }
@@ -755,21 +808,78 @@ async fn insert_revision(
     )
     .map_err(|_| PolicyApiError::invalid("invalid inventory identity", request_id))?
     .matcher;
-    sqlx::query("INSERT INTO runtime_policy_revisions(id,policy_id,organization_id,project_id,application_id,revision_number,prior_revision_id,enabled,inventory_kind,identity_version,identity_digest,behavior_matcher,cluster_ids,namespaces,workload_kinds,workload_names,inside_effect,outside_effect,source_inventory_item_id,source_runtime_group_id,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
-        .bind(revision_id).bind(policy_id).bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(revision_number).bind(prior_revision_id).bind(enabled)
-        .bind(&identity.inventory_kind).bind(identity.identity_version).bind(&identity.identity_digest).bind(serde_json::to_value(matcher).unwrap())
-        .bind(input.placement.cluster_ids.iter().copied().collect::<Vec<_>>()).bind(input.placement.namespaces.iter().cloned().collect::<Vec<_>>())
-        .bind(input.placement.workload_kinds.iter().cloned().collect::<Vec<_>>()).bind(input.placement.workload_names.iter().cloned().collect::<Vec<_>>())
-        .bind(match input.inside_effect{PolicyEffect::Expected=>"expected",PolicyEffect::RequiresReview=>"requires_review"})
-        .bind(input.outside_effect.map(|_|"requires_review")).bind(identity.id).bind(input.source_runtime_group_id).bind(principal.user_id)
-        .execute(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?;
-    sqlx::query("UPDATE runtime_policies SET current_revision_id=$4,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$5")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(revision_id).bind(policy_id)
-        .execute(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?;
+    PolicyRepository::insert_revision(
+        &mut **tx,
+        revision_id,
+        policy_id,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        revision_number,
+        prior_revision_id,
+        enabled,
+        &identity.inventory_kind,
+        identity.identity_version,
+        &identity.identity_digest,
+        serde_json::to_value(matcher).unwrap(),
+        input
+            .placement
+            .cluster_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .namespaces
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .workload_kinds
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .workload_names
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        match input.inside_effect {
+            PolicyEffect::Expected => "expected",
+            PolicyEffect::RequiresReview => "requires_review",
+        },
+        input.outside_effect.map(|_| "requires_review"),
+        identity.id,
+        input.source_runtime_group_id,
+        principal.user_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?;
+    PolicyRepository::set_current_revision(
+        &mut **tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        revision_id,
+        policy_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?;
     let version = policy_state_version(tx, principal, path, request_id).await?;
-    sqlx::query("INSERT INTO runtime_policy_recomputations(id,organization_id,project_id,application_id,identity_version,identity_digest,requested_policy_revision_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
-        .bind(recomputation_id).bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(identity.identity_version).bind(&identity.identity_digest).bind(revision_id)
-        .execute(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?;
+    PolicyRepository::request_recomputation(
+        &mut **tx,
+        recomputation_id,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        identity.identity_version,
+        &identity.identity_digest,
+        revision_id,
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?;
     Ok((revision_id, recomputation_id, version))
 }
 
@@ -785,9 +895,21 @@ async fn record_command<T: Serialize>(
     resource_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), PolicyApiError> {
-    sqlx::query("INSERT INTO runtime_policy_commands(id,organization_id,project_id,application_id,idempotency_key,command_kind,request_digest,actor_user_id,result_resource_id,result) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-        .bind(Uuid::new_v4()).bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(key).bind(kind).bind(digest).bind(principal.user_id).bind(resource_id).bind(serde_json::to_value(result).unwrap())
-        .execute(&mut **tx).await.map_err(|error|PolicyApiError::database(&error,request_id))?;
+    PolicyRepository::record_command(
+        &mut **tx,
+        Uuid::new_v4(),
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        key,
+        kind,
+        digest,
+        principal.user_id,
+        resource_id,
+        serde_json::to_value(result).unwrap(),
+    )
+    .await
+    .map_err(|error| PolicyApiError::database(&error, request_id))?;
     Ok(())
 }
 
@@ -823,7 +945,17 @@ async fn create_policy(
     let identity =
         load_revision_identity(&mut tx, principal, path, &mut input.revision, &request_id).await?;
     let policy_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_policies(id,organization_id,project_id,application_id,name,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6)").bind(policy_id).bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(&input.name).bind(principal.user_id).execute(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
+    PolicyRepository::insert(
+        &mut *tx,
+        policy_id,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        &input.name,
+        principal.user_id,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let (revision_id, recompute, version) = insert_revision(
         &mut tx,
         principal,
@@ -861,6 +993,7 @@ async fn create_policy(
     Ok(Json(result))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn preview_policy(
     State(state): State<PolicyApiState>,
     headers: HeaderMap,
@@ -875,14 +1008,12 @@ async fn preview_policy(
         .begin()
         .await
         .map_err(|e| PolicyApiError::database(&e, &request_id))?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
+    TransactionRepository::begin_consistent_read(&mut *tx)
         .await
         .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let identity =
         load_revision_identity(&mut tx, principal, path, &mut input, &request_id).await?;
-    let snapshot_at: DateTime<Utc> = sqlx::query_scalar("SELECT transaction_timestamp()")
-        .fetch_one(&mut *tx)
+    let snapshot_at: DateTime<Utc> = TransactionRepository::snapshot_time(&mut *tx)
         .await
         .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let clusters = input
@@ -909,15 +1040,47 @@ async fn preview_policy(
         .iter()
         .cloned()
         .collect::<Vec<_>>();
-    let (sighting_count,cluster_count,namespace_count,workload_count,inside_count):(i64,i64,i64,i64,i64)=sqlx::query_as("SELECT count(*)::bigint,count(DISTINCT cluster_id)::bigint,count(DISTINCT (cluster_id,namespace))::bigint,count(DISTINCT (cluster_id,namespace,workload_kind,workload_name))::bigint,count(*) FILTER(WHERE (cardinality($2::uuid[])=0 OR cluster_id=ANY($2)) AND (cardinality($3::text[])=0 OR namespace=ANY($3)) AND (cardinality($4::text[])=0 OR workload_kind=ANY($4)) AND (cardinality($5::text[])=0 OR workload_name=ANY($5)))::bigint FROM runtime_inventory_sightings WHERE item_id=$1").bind(identity.id).bind(&clusters).bind(&namespaces).bind(&kinds).bind(&names).fetch_one(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
-    let representative_group_ids:Vec<Uuid>=sqlx::query_scalar("SELECT g.id FROM runtime_inventory_group_links l JOIN runtime_event_groups g ON g.organization_id=l.organization_id AND g.project_id=l.project_id AND g.application_id=l.application_id AND g.id=l.group_id WHERE l.item_id=$1 AND ((cardinality($2::uuid[])=0 OR g.cluster_id=ANY($2)) AND (cardinality($3::text[])=0 OR g.namespace=ANY($3)) AND (cardinality($4::text[])=0 OR g.workload_kind=ANY($4)) AND (cardinality($5::text[])=0 OR g.workload_name=ANY($5)) OR $6::boolean) ORDER BY g.id LIMIT 20").bind(identity.id).bind(&clusters).bind(&namespaces).bind(&kinds).bind(&names).bind(input.outside_effect.is_some()).fetch_all(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
-    let representative_sightings:Vec<PreviewSighting>=sqlx::query_as("SELECT cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name FROM runtime_inventory_sightings WHERE item_id=$1 AND ((cardinality($2::uuid[])=0 OR cluster_id=ANY($2)) AND (cardinality($3::text[])=0 OR namespace=ANY($3)) AND (cardinality($4::text[])=0 OR workload_kind=ANY($4)) AND (cardinality($5::text[])=0 OR workload_name=ANY($5)) OR $6::boolean) ORDER BY last_seen_at DESC,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name LIMIT 20").bind(identity.id).bind(&clusters).bind(&namespaces).bind(&kinds).bind(&names).bind(input.outside_effect.is_some()).fetch_all(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
-    let group_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM runtime_inventory_group_links WHERE item_id=$1")
-            .bind(identity.id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| PolicyApiError::database(&e, &request_id))?;
+    let (sighting_count, cluster_count, namespace_count, workload_count, inside_count): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = PolicyRepository::preview_counts(
+        &mut *tx,
+        identity.id,
+        &clusters,
+        &namespaces,
+        &kinds,
+        &names,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
+    let representative_group_ids: Vec<Uuid> = PolicyRepository::preview_group_ids(
+        &mut *tx,
+        identity.id,
+        &clusters,
+        &namespaces,
+        &kinds,
+        &names,
+        input.outside_effect.is_some(),
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
+    let representative_sightings: Vec<PreviewSighting> = PolicyRepository::preview_sightings(
+        &mut *tx,
+        identity.id,
+        &clusters,
+        &namespaces,
+        &kinds,
+        &names,
+        input.outside_effect.is_some(),
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
+    let group_count: i64 = InventoryRepository::linked_group_count(&mut *tx, identity.id)
+        .await
+        .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let outside = if input.outside_effect.is_some() {
         sighting_count - inside_count
     } else {
@@ -978,13 +1141,18 @@ async fn replace_policy(
     {
         return Ok(Json(result));
     }
-    let current:Option<(Uuid,i64)>=sqlx::query_as("SELECT current_revision_id,r.revision_number FROM runtime_policies p JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.id=$4 FOR UPDATE OF p").bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id).fetch_optional(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
+    let current: Option<(Uuid, i64)> = PolicyRepository::current_revision_for_update(
+        &mut *tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.policy_id,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let (prior, number) = current.ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     if let Some(name) = &input.name {
-        sqlx::query("UPDATE runtime_policies SET name=$1 WHERE id=$2")
-            .bind(name)
-            .bind(path.policy_id)
-            .execute(&mut *tx)
+        PolicyRepository::rename(&mut *tx, name, path.policy_id)
             .await
             .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     }
@@ -1057,7 +1225,15 @@ async fn set_policy_enabled(
     {
         return Ok(Json(result));
     }
-    let row:Option<PolicyRevision>=sqlx::query_as("SELECT r.id,r.policy_id,r.revision_number,r.prior_revision_id,r.enabled,r.inventory_kind,r.identity_version,r.identity_digest,r.behavior_matcher,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect,r.source_inventory_item_id,r.source_runtime_group_id,r.created_by_user_id,r.created_at FROM runtime_policies p JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.id=$4 FOR UPDATE OF p").bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.policy_id).fetch_optional(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
+    let row: Option<PolicyRevision> = PolicyRepository::current_revision_detail_for_update(
+        &mut *tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.policy_id,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let row = row.ok_or_else(|| PolicyApiError::not_found(&request_id))?;
     let mut input = RevisionInput {
         source_inventory_item_id: row.source_inventory_item_id.ok_or_else(|| {
@@ -1137,10 +1313,17 @@ async fn current_policy_state(
     path: ApplicationPath,
     request_id: &RequestId,
 ) -> Result<i64, PolicyApiError> {
-    sqlx::query_scalar("INSERT INTO runtime_policy_states(organization_id,project_id,application_id) VALUES($1,$2,$3) ON CONFLICT(organization_id,project_id,application_id) DO UPDATE SET updated_at=runtime_policy_states.updated_at RETURNING state_version")
-        .bind(principal.organization_id).bind(path.project_id).bind(path.application_id).fetch_one(&mut **tx).await.map_err(|e|PolicyApiError::database(&e,request_id))
+    PolicyRepository::current_state_version(
+        &mut **tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, request_id))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_suppression(
     State(state): State<PolicyApiState>,
     headers: HeaderMap,
@@ -1200,7 +1383,49 @@ async fn create_suppression(
     )
     .map_err(|_| PolicyApiError::invalid("invalid inventory identity", &request_id))?;
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_policy_suppressions(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,behavior_matcher,cluster_ids,namespaces,workload_kinds,workload_names,reason,expires_at,source_inventory_item_id,source_runtime_group_id,created_by_user_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)").bind(id).bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(&identity.inventory_kind).bind(identity.identity_version).bind(&identity.identity_digest).bind(serde_json::to_value(behavior.matcher).unwrap()).bind(input.placement.cluster_ids.iter().copied().collect::<Vec<_>>()).bind(input.placement.namespaces.iter().cloned().collect::<Vec<_>>()).bind(input.placement.workload_kinds.iter().cloned().collect::<Vec<_>>()).bind(input.placement.workload_names.iter().cloned().collect::<Vec<_>>()).bind(&input.reason).bind(input.expires_at).bind(input.source_inventory_item_id).bind(input.source_runtime_group_id).bind(principal.user_id).bind(now).execute(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
+    PolicyRepository::insert_suppression(
+        &mut *tx,
+        id,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        &identity.inventory_kind,
+        identity.identity_version,
+        &identity.identity_digest,
+        serde_json::to_value(behavior.matcher).unwrap(),
+        input
+            .placement
+            .cluster_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .namespaces
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .workload_kinds
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        input
+            .placement
+            .workload_names
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        &input.reason,
+        input.expires_at,
+        input.source_inventory_item_id,
+        input.source_runtime_group_id,
+        principal.user_id,
+        now,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     let version = current_policy_state(&mut tx, principal, path, &request_id).await?;
     let result = MutationResult {
         resource_id: id,
@@ -1255,7 +1480,16 @@ async fn cancel_suppression(
     {
         return Ok(Json(result));
     }
-    let updated=sqlx::query("UPDATE runtime_policy_suppressions SET cancelled_at=COALESCE(cancelled_at,now()),cancelled_by_user_id=COALESCE(cancelled_by_user_id,$5) WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4").bind(principal.organization_id).bind(path.project_id).bind(path.application_id).bind(path.suppression_id).bind(principal.user_id).execute(&mut *tx).await.map_err(|e|PolicyApiError::database(&e,&request_id))?;
+    let updated = PolicyRepository::cancel_suppression(
+        &mut *tx,
+        principal.organization_id,
+        path.project_id,
+        path.application_id,
+        path.suppression_id,
+        principal.user_id,
+    )
+    .await
+    .map_err(|e| PolicyApiError::database(&e, &request_id))?;
     if updated.rows_affected() == 0 {
         return Err(PolicyApiError::not_found(&request_id));
     }

@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::inventory::{FacetColumn, InventoryFilter, InventoryRepository};
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
@@ -701,17 +702,16 @@ async fn put_user_label(
 ) -> Result<Json<UserLabel>, InventoryApiError> {
     let principal = project_principal(&headers, &state, project_id).await?;
     let display_name = normalize_display_name(&input.display_name)?;
-    let row = sqlx::query_as::<_, UserLabel>(
-        "INSERT INTO runtime_behavior_user_labels(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,display_name,created_by_user_id,updated_by_user_id) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.identity_digest,$5,$6,$6 FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO UPDATE SET display_name=EXCLUDED.display_name,updated_by_user_id=EXCLUDED.updated_by_user_id,updated_at=CASE WHEN runtime_behavior_user_labels.display_name=EXCLUDED.display_name THEN runtime_behavior_user_labels.updated_at ELSE now() END WHERE $7::timestamptz IS NULL OR runtime_behavior_user_labels.updated_at=$7 RETURNING display_name,created_by_user_id,updated_by_user_id,created_at,updated_at",
+    let row = InventoryRepository::put_user_label::<_, UserLabel>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        display_name,
+        principal.user_id,
+        input.expected_updated_at,
     )
-    .bind(principal.organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(item_id)
-    .bind(display_name)
-    .bind(principal.user_id)
-    .bind(input.expected_updated_at)
-    .fetch_optional(&state.pool)
     .await?;
     if let Some(row) = row {
         return Ok(Json(row));
@@ -728,11 +728,17 @@ async fn delete_user_label(
 ) -> Result<StatusCode, InventoryApiError> {
     let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
-    let result = sqlx::query("DELETE FROM runtime_behavior_user_labels l USING runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND ($5::timestamptz IS NULL OR l.updated_at=$5)")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id)
-        .bind(input.expected_updated_at).execute(&state.pool).await?;
+    let result = InventoryRepository::delete_user_label(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        input.expected_updated_at,
+    )
+    .await?;
     if result.rows_affected() == 0 && input.expected_updated_at.is_some() {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runtime_behavior_user_labels l JOIN runtime_inventory_items i ON i.organization_id=l.organization_id AND i.project_id=l.project_id AND i.application_id=l.application_id AND i.inventory_kind=l.inventory_kind AND i.identity_version=l.identity_version AND i.identity_digest=l.identity_digest WHERE i.id=$1)").bind(item_id).fetch_one(&state.pool).await?;
+        let exists: bool = InventoryRepository::user_label_exists(&state.pool, item_id).await?;
         if exists {
             return Err(InventoryApiError::Conflict);
         }
@@ -855,6 +861,32 @@ impl InventoryScope {
         hex::encode(Sha256::digest(bytes))
     }
 
+    /// The repository filter for this scope within a tenant path; `search`
+    /// is the `ILIKE` pattern from [`Self::search_pattern`].
+    fn filter<'a>(
+        &'a self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        search: Option<&'a str>,
+    ) -> InventoryFilter<'a> {
+        InventoryFilter {
+            organization_id,
+            project_id,
+            application_id,
+            release_id: self.release_id,
+            cluster_id: self.cluster_id,
+            namespace: self.namespace.as_deref(),
+            workload_kind: self.workload_kind.as_deref(),
+            workload_name: self.workload_name.as_deref(),
+            container_name: self.container_name.as_deref(),
+            observed_from: self.observed_from,
+            observed_to: self.observed_to,
+            operation: self.operation.as_deref(),
+            search,
+        }
+    }
+
     fn search_pattern(&self) -> Option<String> {
         self.search.as_ref().map(|value| format!("%{value}%"))
     }
@@ -908,14 +940,15 @@ async fn ensure_item(
     application_id: Uuid,
     item_id: Uuid,
 ) -> Result<(), InventoryApiError> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 AND identity_version=$5)")
-        .bind(principal.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .bind(item_id)
-        .bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-        .fetch_one(pool)
-        .await?;
+    let exists: bool = InventoryRepository::exists(
+        pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+    )
+    .await?;
     exists.then_some(()).ok_or(InventoryApiError::NotFound)
 }
 
@@ -944,11 +977,16 @@ async fn summary(
     )?;
     let version = CURRENT_INVENTORY_IDENTITY_VERSION.get();
     let search = scope.search_pattern();
-    let rows: Vec<KindAggregate> =
-        sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
-            .bind(principal.organization_id).bind(project_id).bind(application_id).bind(version)
-            .bind(scope.release_id).bind(scope.cluster_id).bind(scope.namespace.as_deref()).bind(scope.workload_kind.as_deref()).bind(scope.workload_name.as_deref()).bind(scope.container_name.as_deref()).bind(scope.observed_from).bind(scope.observed_to).bind(scope.operation.as_deref()).bind(search.as_deref())
-            .fetch_all(&state.pool).await?;
+    let rows: Vec<KindAggregate> = InventoryRepository::kind_summary(
+        &state.pool,
+        scope.filter(
+            principal.organization_id,
+            project_id,
+            application_id,
+            search.as_deref(),
+        ),
+    )
+    .await?;
     let mut kinds: Vec<_> = [
         "destination",
         "domain",
@@ -1028,26 +1066,17 @@ async fn distribution(
     let limit = aggregate_limit(query.limit)?;
     let version = CURRENT_INVENTORY_IDENTITY_VERSION.get();
     let search = scope.search_pattern();
-    let rows = sqlx::query_as::<_, DistributionRow>(
-        "WITH scoped AS MATERIALIZED (SELECT i.id,i.identity_digest,i.semantic_summary,CASE WHEN l.id IS NULL THEN NULL ELSE jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) END user_label,i.occurrence_count FROM runtime_inventory_items i LEFT JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND i.inventory_kind=$5 AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$10)) AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$11)) AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path',l.display_name) ILIKE $15)), ranked AS (SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,count(*) OVER()::bigint total_item_count,COALESCE(sum(occurrence_count) OVER(),0)::bigint total_occurrence_count FROM scoped) SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,total_item_count,total_occurrence_count FROM ranked ORDER BY occurrence_count DESC,identity_digest ASC LIMIT $16",
+    let rows: Vec<DistributionRow> = InventoryRepository::distribution(
+        &state.pool,
+        scope.filter(
+            principal.organization_id,
+            project_id,
+            application_id,
+            search.as_deref(),
+        ),
+        &query.kind,
+        limit,
     )
-    .bind(principal.organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(version)
-    .bind(&query.kind)
-    .bind(scope.release_id)
-    .bind(scope.cluster_id)
-    .bind(scope.namespace.as_deref())
-    .bind(scope.workload_kind.as_deref())
-    .bind(scope.workload_name.as_deref())
-    .bind(scope.container_name.as_deref())
-    .bind(scope.observed_from)
-    .bind(scope.observed_to)
-    .bind(scope.operation.as_deref())
-    .bind(search.as_deref())
-    .bind(limit)
-    .fetch_all(&state.pool)
     .await?;
     let total_item_count = rows.first().map_or(0, |row| row.total_item_count);
     let total_occurrence_count = rows.first().map_or(0, |row| row.total_occurrence_count);
@@ -1207,45 +1236,32 @@ async fn load_facet_options(
     pool: &PgPool,
     load: &FacetLoad,
 ) -> Result<Vec<FacetOption>, InventoryApiError> {
-    let (value_sql, label_sql, cluster_join) = match load.facet {
-        InventoryFacet::Cluster => (
-            "s.cluster_id::text",
-            "c.name",
-            "JOIN clusters c ON c.organization_id=s.organization_id AND c.id=s.cluster_id",
-        ),
-        InventoryFacet::Namespace => ("s.namespace", "s.namespace", ""),
-        InventoryFacet::WorkloadKind => ("s.workload_kind", "s.workload_kind", ""),
-        InventoryFacet::WorkloadName => ("s.workload_name", "s.workload_name", ""),
-        InventoryFacet::ContainerName => ("s.container_name", "s.container_name", ""),
+    let column = match load.facet {
+        InventoryFacet::Cluster => FacetColumn::Cluster,
+        InventoryFacet::Namespace => FacetColumn::Namespace,
+        InventoryFacet::WorkloadKind => FacetColumn::WorkloadKind,
+        InventoryFacet::WorkloadName => FacetColumn::WorkloadName,
+        InventoryFacet::ContainerName => FacetColumn::ContainerName,
     };
-    let sql = format!(
-        "SELECT {value_sql} value,{label_sql} label,count(DISTINCT i.id)::bigint item_count,COALESCE(sum(s.occurrence_count),0)::bigint occurrence_count FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id {cluster_join} WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::text IS NULL OR i.inventory_kind=$5) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR s.cluster_id=$7) AND ($8::text IS NULL OR s.namespace=$8) AND ($9::text IS NULL OR s.workload_kind=$9) AND ($10::text IS NULL OR s.workload_name=$10) AND ($11::text IS NULL OR s.container_name=$11) AND ($12::timestamptz IS NULL OR s.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR s.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $15 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $15)) AND ($16::text IS NULL OR concat_ws(' ',{label_sql},{value_sql}) ILIKE $16) GROUP BY {value_sql},{label_sql} HAVING ($17::bigint IS NULL OR count(DISTINCT i.id)<$17 OR (count(DISTINCT i.id)=$17 AND ({label_sql}>$18 OR ({label_sql}=$18 AND {value_sql}>$19)))) ORDER BY item_count DESC,label ASC,value ASC LIMIT $20"
-    );
     let search = load.scope.search_pattern();
     let facet_search = load.facet_search.as_ref().map(|value| format!("%{value}%"));
-    Ok(sqlx::query_as::<_, FacetOption>(&sql)
-        .bind(load.organization_id)
-        .bind(load.project_id)
-        .bind(load.application_id)
-        .bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-        .bind(load.kind.as_deref())
-        .bind(load.scope.release_id)
-        .bind(load.scope.cluster_id)
-        .bind(load.scope.namespace.as_deref())
-        .bind(load.scope.workload_kind.as_deref())
-        .bind(load.scope.workload_name.as_deref())
-        .bind(load.scope.container_name.as_deref())
-        .bind(load.scope.observed_from)
-        .bind(load.scope.observed_to)
-        .bind(load.scope.operation.as_deref())
-        .bind(search.as_deref())
-        .bind(facet_search.as_deref())
-        .bind(load.cursor.as_ref().map(|value| value.item_count))
-        .bind(load.cursor.as_ref().map(|value| value.label.as_str()))
-        .bind(load.cursor.as_ref().map(|value| value.value.as_str()))
-        .bind(load.limit + 1)
-        .fetch_all(pool)
-        .await?)
+    Ok(InventoryRepository::facet_options(
+        pool,
+        column,
+        load.scope.filter(
+            load.organization_id,
+            load.project_id,
+            load.application_id,
+            search.as_deref(),
+        ),
+        load.kind.as_deref(),
+        facet_search.as_deref(),
+        load.cursor.as_ref().map(|value| value.item_count),
+        load.cursor.as_ref().map(|value| value.label.as_str()),
+        load.cursor.as_ref().map(|value| value.value.as_str()),
+        load.limit + 1,
+    )
+    .await?)
 }
 
 fn facet_next_cursor(
@@ -1320,27 +1336,46 @@ async fn list_items(
     .await?;
     let limit = limit(query.limit)?;
     let cursor = if let Some(cursor) = query.cursor {
-        Some(sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT last_seen_at,id FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 AND identity_version=$5")
-            .bind(principal.organization_id).bind(project_id).bind(application_id).bind(cursor).bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-            .fetch_optional(&state.pool).await?.ok_or_else(|| InventoryApiError::Invalid("cursor is invalid for this application".into()))?)
+        Some(
+            InventoryRepository::item_cursor(
+                &state.pool,
+                principal.organization_id,
+                project_id,
+                application_id,
+                cursor,
+                CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+            )
+            .await?
+            .ok_or_else(|| {
+                InventoryApiError::Invalid("cursor is invalid for this application".into())
+            })?,
+        )
     } else {
         None
     };
     let (cursor_time, cursor_id) = cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
     let search = scope.search_pattern();
-    let mut items = sqlx::query_as::<_, InventoryItem>(
-        "SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::text IS NULL OR i.inventory_kind=$5) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$10)) AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$11)) AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $15 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $15)) AND ($16::uuid IS NULL OR (i.id=$16 AND i.identity_digest=$17)) AND ($18::text IS NULL OR EXISTS(SELECT 1 FROM runtime_sighting_policy_evaluations e JOIN runtime_policy_states ps ON ps.organization_id=e.organization_id AND ps.project_id=e.project_id AND ps.application_id=e.application_id WHERE e.item_id=i.id AND e.policy_state_version=ps.state_version AND e.evaluator_version=$21 AND e.verdict=$18)) AND ($19::bool IS NULL OR $19=EXISTS(SELECT 1 FROM runtime_inventory_sightings s JOIN runtime_policy_suppressions z ON z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) WHERE s.item_id=i.id)) AND ($20::bool IS NULL OR $20=EXISTS(SELECT 1 FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.item_id=i.id AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$21))) AND ($22::timestamptz IS NULL OR (i.last_seen_at,i.id)<($22,$23)) ORDER BY i.last_seen_at DESC,i.id DESC LIMIT $24",
+    let mut items: Vec<InventoryItem> = InventoryRepository::item_page(
+        &state.pool,
+        scope.filter(
+            principal.organization_id,
+            project_id,
+            application_id,
+            search.as_deref(),
+        ),
+        query.kind.as_deref(),
+        identity.as_ref().map(|value| value.item_id),
+        identity
+            .as_ref()
+            .and_then(|value| hex::decode(&value.identity_digest).ok()),
+        query.verdict.as_deref(),
+        query.suppressed,
+        query.evaluation_pending,
+        cursor_time,
+        cursor_id,
+        limit + 1,
     )
-    .bind(principal.organization_id).bind(project_id).bind(application_id)
-    .bind(CURRENT_INVENTORY_IDENTITY_VERSION.get()).bind(query.kind).bind(scope.release_id).bind(scope.cluster_id)
-    .bind(scope.namespace).bind(scope.workload_kind).bind(scope.workload_name).bind(scope.container_name)
-    .bind(scope.observed_from).bind(scope.observed_to).bind(scope.operation).bind(search)
-    .bind(identity.as_ref().map(|value| value.item_id))
-    .bind(identity.as_ref().and_then(|value| hex::decode(&value.identity_digest).ok()))
-    .bind(query.verdict).bind(query.suppressed).bind(query.evaluation_pending)
-    .bind(crate::policy::POLICY_EVALUATOR_VERSION)
-    .bind(cursor_time).bind(cursor_id).bind(limit + 1)
-    .fetch_all(&state.pool).await?;
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items.last().map(|item| item.id)
@@ -1369,9 +1404,16 @@ async fn fetch_item(
     application_id: Uuid,
     item_id: Uuid,
 ) -> Result<InventoryItem, InventoryApiError> {
-    sqlx::query_as::<_, InventoryItem>("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND i.identity_version=$5")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-        .fetch_optional(&state.pool).await?.ok_or(InventoryApiError::NotFound)
+    InventoryRepository::item::<_, InventoryItem>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+    )
+    .await?
+    .ok_or(InventoryApiError::NotFound)
 }
 
 async fn item_detail(
@@ -1382,15 +1424,14 @@ async fn item_detail(
     let started = Instant::now();
     let principal = project_principal(&headers, &state, project_id).await?;
     let item = fetch_item(&state, principal, project_id, application_id, item_id).await?;
-    let policy_placement_summary: Value = sqlx::query_scalar(
-        "SELECT jsonb_build_object('placement_count',count(*),'evaluation_pending',count(*) FILTER (WHERE e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$5),'verdicts',jsonb_build_object('expected',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='expected'),'requires_review',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='requires_review'),'policy_conflict',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='policy_conflict'),'unclassified',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='unclassified'))) FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4",
+    let policy_placement_summary: Value = InventoryRepository::placement_summary(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        crate::policy::POLICY_EVALUATOR_VERSION,
     )
-    .bind(principal.organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(item_id)
-    .bind(crate::policy::POLICY_EVALUATOR_VERSION)
-    .fetch_one(&state.pool)
     .await?;
     crate::metrics::record_inventory_query(
         u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
@@ -1435,9 +1476,17 @@ async fn item_releases(
         None
     };
     let (cursor_time, cursor_id) = cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
-    let mut items = sqlx::query_as::<_, ReleasePresence>("SELECT r.id release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,r.version,r.deployed_at,CASE WHEN ir.release_id IS NOT NULL AND ir.occurrence_count>0 THEN 'observed' WHEN EXISTS(SELECT 1 FROM projects p WHERE p.id=r.project_id AND r.deployed_at<p.runtime_closed_before) THEN 'unknown' WHEN EXISTS(SELECT 1 FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) THEN 'not_observed' ELSE 'unknown' END presence,ir.occurrence_count,ir.first_seen_at,ir.last_seen_at,(SELECT count(*) FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) release_evidence_count FROM releases r JOIN applications a ON a.id=r.application_id LEFT JOIN runtime_inventory_releases ir ON ir.release_id=r.id AND ir.item_id=$4 WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($5::timestamptz IS NULL OR (r.deployed_at,r.id)<($5,$6)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $7")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(cursor_time).bind(cursor_id).bind(limit + 1)
-        .fetch_all(&state.pool).await?;
+    let mut items = InventoryRepository::release_presence_page::<_, ReleasePresence>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items.last().map(|item| item.release_id)
@@ -1479,13 +1528,23 @@ async fn item_sightings(
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor: Option<SightingCursor> = query.cursor.as_deref().map(decode_cursor).transpose()?;
-    let mut items = sqlx::query_as::<_, InventorySighting>("SELECT s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.pod_name,s.container_name,s.occurrence_count,s.first_seen_at,s.last_seen_at,jsonb_build_object('state',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE 'current' END,'verdict',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN NULL ELSE e.verdict END,'reason_code',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE e.reason_code END,'winning_revision_id',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.winning_revision_id END,'explanation',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.explanation ELSE '{}'::jsonb END,'evaluated_at',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.evaluated_at END) policy_evaluation,x.summary active_suppression,(x.summary IS NULL AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 OR e.verdict<>'expected')) actionable FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id LEFT JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN LATERAL (SELECT jsonb_build_object('id',z.id,'reason',z.reason,'expires_at',z.expires_at,'created_at',z.created_at) summary FROM runtime_policy_suppressions z WHERE z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) ORDER BY z.expires_at,z.id LIMIT 1) x ON true WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4 AND ($5::timestamptz IS NULL OR (s.last_seen_at,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name)<($5,$6,$7,$8,$9,$10,$11)) ORDER BY s.last_seen_at DESC,s.cluster_id DESC,s.namespace DESC,s.workload_kind DESC,s.workload_name DESC,s.pod_uid DESC,s.container_name DESC LIMIT $12")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id)
-        .bind(cursor.as_ref().map(|value| value.last_seen_at)).bind(cursor.as_ref().map(|value| value.cluster_id))
-        .bind(cursor.as_ref().map(|value| value.namespace.as_str())).bind(cursor.as_ref().map(|value| value.workload_kind.as_str()))
-        .bind(cursor.as_ref().map(|value| value.workload_name.as_str())).bind(cursor.as_ref().map(|value| value.pod_uid.as_str()))
-        .bind(cursor.as_ref().map(|value| value.container_name.as_str())).bind(limit + 1)
-        .bind(crate::policy::POLICY_EVALUATOR_VERSION).fetch_all(&state.pool).await?;
+    let mut items = InventoryRepository::sighting_page::<_, InventorySighting>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        cursor.as_ref().map(|value| value.last_seen_at),
+        cursor.as_ref().map(|value| value.cluster_id),
+        cursor.as_ref().map(|value| value.namespace.as_str()),
+        cursor.as_ref().map(|value| value.workload_kind.as_str()),
+        cursor.as_ref().map(|value| value.workload_name.as_str()),
+        cursor.as_ref().map(|value| value.pod_uid.as_str()),
+        cursor.as_ref().map(|value| value.container_name.as_str()),
+        limit + 1,
+        crate::policy::POLICY_EVALUATOR_VERSION,
+    )
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items
@@ -1526,9 +1585,16 @@ async fn item_groups(
     let principal = project_principal(&headers, &state, project_id).await?;
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
-    let mut items = sqlx::query_as::<_, InventoryGroup>("SELECT g.id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name,g.event_kind,COALESCE((SELECT jsonb_agg(jsonb_build_object('display_name',ul.display_name,'created_by_user_id',ul.created_by_user_id,'updated_by_user_id',ul.updated_by_user_id,'created_at',ul.created_at,'updated_at',ul.updated_at) ORDER BY ul.display_name,ul.id) FROM runtime_inventory_group_links x JOIN runtime_inventory_items xi ON xi.id=x.item_id JOIN runtime_behavior_user_labels ul ON ul.organization_id=xi.organization_id AND ul.project_id=xi.project_id AND ul.application_id=xi.application_id AND ul.inventory_kind=xi.inventory_kind AND ul.identity_version=xi.identity_version AND ul.identity_digest=xi.identity_digest WHERE x.group_id=g.id),'[]'::jsonb) user_labels,g.status,g.first_seen_at,g.last_seen_at,g.occurrence_count FROM runtime_inventory_group_links l JOIN runtime_event_groups g ON g.id=l.group_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND l.item_id=$4 AND ($5::uuid IS NULL OR g.id<$5) ORDER BY g.id DESC LIMIT $6")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(query.cursor).bind(limit + 1)
-        .fetch_all(&state.pool).await?;
+    let mut items = InventoryRepository::group_page::<_, InventoryGroup>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items.last().map(|item| item.id)
@@ -1557,16 +1623,34 @@ async fn item_occurrences(
     ensure_item(&state.pool, principal, project_id, application_id, item_id).await?;
     let limit = limit(query.limit)?;
     let cursor = if let Some(cursor) = query.cursor {
-        Some(sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT e.observed_at,e.id FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.item_id=$4 AND e.id=$5")
-            .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(cursor)
-            .fetch_optional(&state.pool).await?.ok_or_else(|| InventoryApiError::Invalid("occurrence cursor is invalid".into()))?)
+        Some(
+            InventoryRepository::occurrence_cursor(
+                &state.pool,
+                principal.organization_id,
+                project_id,
+                application_id,
+                item_id,
+                cursor,
+            )
+            .await?
+            .ok_or_else(|| InventoryApiError::Invalid("occurrence cursor is invalid".into()))?,
+        )
     } else {
         None
     };
     let (cursor_time, cursor_id) = cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
-    let mut items = sqlx::query_as::<_, InventoryOccurrence>("SELECT e.id,e.event_id,e.observed_at,e.cluster_id,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_name,e.process_command,e.event_kind,e.payload,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.item_id=$4 AND m.identity_version=$5 AND ($6::timestamptz IS NULL OR (e.observed_at,e.id)<($6,$7)) ORDER BY e.observed_at DESC,e.id DESC LIMIT $8")
-        .bind(principal.organization_id).bind(project_id).bind(application_id).bind(item_id).bind(CURRENT_INVENTORY_IDENTITY_VERSION.get()).bind(cursor_time).bind(cursor_id).bind(limit + 1)
-        .fetch_all(&state.pool).await?;
+    let mut items = InventoryRepository::occurrence_page::<_, InventoryOccurrence>(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        item_id,
+        CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
         items.pop();
         items.last().map(|item| item.id)

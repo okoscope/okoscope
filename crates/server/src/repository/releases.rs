@@ -230,21 +230,6 @@ impl ReleaseRepository {
             .await
     }
 
-    /// Makes the rest of the caller's transaction a read-only snapshot, so
-    /// the diff summary's several statements see one state of the data.
-    ///
-    /// Must be the first statement of the transaction; pass `&mut *tx`.
-    pub async fn begin_consistent_read<'e, E>(
-        executor: E,
-    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
-    where
-        E: PgExecutor<'e>,
-    {
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            .execute(executor)
-            .await
-    }
-
     /// Counts of differences between two releases by classification.
     pub async fn diff_classifications<'e, E, T>(
         executor: E,
@@ -599,6 +584,7 @@ mod api_statement_tests {
     use crate::repository::test_support::{
         exec_in_release, group_ids, ingest, manual_release, observe_revision, tenant,
     };
+    use crate::repository::transaction::TransactionRepository;
     use chrono::{DateTime, Duration, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
@@ -902,7 +888,7 @@ mod api_statement_tests {
         assert!(without_baseline.iter().all(|e| e.classification == "new"));
 
         let mut tx = pool.begin().await.unwrap();
-        ReleaseRepository::begin_consistent_read(&mut *tx)
+        TransactionRepository::begin_consistent_read(&mut *tx)
             .await
             .unwrap();
         let counts: Vec<Count> = ReleaseRepository::diff_classifications(
