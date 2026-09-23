@@ -45,6 +45,255 @@ pub mod aggregates {
 pub struct ReleaseRepository;
 
 impl ReleaseRepository {
+    /// Creates a manual release and returns it with its display name.
+    ///
+    /// A version already used by the application violates
+    /// `UNIQUE (application_id, version)`; the caller reports that as a
+    /// conflict. Selects the columns of the releases API's release view.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_manual<'e, E, T>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        version: &str,
+        description: Option<String>,
+        deployed_at: DateTime<Utc>,
+    ) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("WITH inserted AS (INSERT INTO releases (id,organization_id,project_id,application_id,version,description,deployed_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *) SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,0::bigint revision_count,0::bigint active_episode_count FROM inserted r JOIN applications a ON a.id=r.application_id")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(version)
+            .bind(description)
+            .bind(deployed_at)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// A page of an application's releases, newest deployment first, after
+    /// the cursor's `(deployed_at, id)` when one is given. Same columns as
+    /// [`Self::create_manual`].
+    pub async fn page<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        cursor_deployed_at: Option<DateTime<Utc>>,
+        cursor_id: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($4::timestamptz IS NULL OR (r.deployed_at,r.id)<($4,$5)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $6")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(cursor_deployed_at)
+            .bind(cursor_id)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// A page of the deployment episodes of one release, after the cursor
+    /// episode when one is given.
+    pub async fn deployment_episode_page<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        release_id: Uuid,
+        cursor_id: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT e.id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.revision_id,e.cluster_id,e.occurrence_number,e.state,e.transition_kind,e.first_observed_at,e.first_ready_at,e.last_observed_at,e.ended_at,e.pod_count,e.ready_pod_count,e.workload_ready_pod_count,CASE WHEN e.workload_ready_pod_count>0 THEN e.ready_pod_count::double precision/e.workload_ready_pod_count::double precision END ready_pod_share,e.snapshot_observed_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('episode_id',p.predecessor_episode_id,'observed_at',p.observed_at,'concurrent',p.concurrent) ORDER BY p.observed_at DESC,p.predecessor_episode_id DESC) FROM deployment_episode_predecessors p WHERE p.episode_id=e.id),'[]'::jsonb) predecessors FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 AND ($5::uuid IS NULL OR e.id<$5) ORDER BY e.first_observed_at DESC,e.id DESC LIMIT $6")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(release_id)
+            .bind(cursor_id)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// One release of the application, with the same columns as
+    /// [`Self::create_manual`].
+    pub async fn get<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        release_id: Uuid,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND r.id=$4")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(release_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// The releases a deployment of `release_id` replaced, from the recorded
+    /// deployment-episode transitions. More than one means concurrent
+    /// transitions, which the diff resolves by falling back.
+    pub async fn transition_predecessors<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        release_id: Uuid,
+    ) -> Result<Vec<Uuid>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("SELECT p.release_id FROM deployment_episodes t JOIN deployment_episode_predecessors x ON x.episode_id=t.id JOIN deployment_episodes p ON p.id=x.predecessor_episode_id WHERE t.organization_id=$1 AND t.project_id=$2 AND t.application_id=$3 AND t.release_id=$4 ORDER BY t.first_observed_at DESC,t.id DESC,x.observed_at DESC,p.id DESC LIMIT 2")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(release_id)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// The release deployed immediately before the given one by deployment
+    /// order — the baseline used when no transition was recorded. Same
+    /// columns as [`Self::create_manual`].
+    pub async fn legacy_predecessor<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        deployed_at: DateTime<Utc>,
+        release_id: Uuid,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND (r.deployed_at,r.id)<($4,$5) ORDER BY r.deployed_at DESC,r.id DESC LIMIT 1")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(deployed_at)
+            .bind(release_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// A page of the runtime-group differences between a baseline and a
+    /// target release, after the cursor group when one is given. With no
+    /// baseline the baseline side is empty, so every group observed in the
+    /// target is classified `new`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn diff_page<'e, E, T>(
+        executor: E,
+        baseline_id: Option<Uuid>,
+        target_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        cursor_id: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("WITH b AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,b.occurrence_count baseline_occurrence_count,b.first_seen_at baseline_first_seen_at,b.last_seen_at baseline_last_seen_at,t.occurrence_count target_occurrence_count,t.first_seen_at target_first_seen_at,t.last_seen_at target_last_seen_at FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' AND ($6::uuid IS NULL OR g.id>$6) ORDER BY g.id LIMIT $7")
+            .bind(baseline_id)
+            .bind(target_id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(cursor_id)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// Makes the rest of the caller's transaction a read-only snapshot, so
+    /// the diff summary's several statements see one state of the data.
+    ///
+    /// Must be the first statement of the transaction; pass `&mut *tx`.
+    pub async fn begin_consistent_read<'e, E>(
+        executor: E,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(executor)
+            .await
+    }
+
+    /// Counts of differences between two releases by classification.
+    pub async fn diff_classifications<'e, E, T>(
+        executor: E,
+        baseline_id: Uuid,
+        target_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired), compared AS (SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept') SELECT classification,count(*)::bigint item_count FROM compared GROUP BY classification ORDER BY CASE classification WHEN 'new' THEN 1 WHEN 'disappeared' THEN 2 WHEN 'unchanged' THEN 3 ELSE 4 END")
+            .bind(baseline_id)
+            .bind(target_id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// The differences between two releases with the largest change in
+    /// occurrences, up to `limit`.
+    pub async fn diff_largest_changes<'e, E, T>(
+        executor: E,
+        baseline_id: Uuid,
+        target_id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,COALESCE(b.occurrence_count,0)::bigint baseline_occurrence_count,COALESCE(t.occurrence_count,0)::bigint target_occurrence_count,(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0))::bigint occurrence_delta FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' ORDER BY ABS(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)) DESC,g.id ASC LIMIT $6")
+            .bind(baseline_id)
+            .bind(target_id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(limit)
+            .fetch_all(executor)
+            .await
+    }
+
     /// Reports whether the release belongs to the application.
     ///
     /// `false` covers a release of another application as well as one that
@@ -341,5 +590,383 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod api_statement_tests {
+    use super::ReleaseRepository;
+    use crate::repository::test_support::{
+        exec_in_release, group_ids, ingest, manual_release, observe_revision, tenant,
+    };
+    use chrono::{DateTime, Duration, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    #[derive(Debug, FromRow)]
+    struct Release {
+        id: Uuid,
+        version: String,
+        display_name: String,
+        source: String,
+        deployed_at: DateTime<Utc>,
+        revision_count: i64,
+        active_episode_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Episode {
+        release_id: Uuid,
+        state: String,
+        predecessors: serde_json::Value,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct DiffEntry {
+        group_id: Uuid,
+        classification: String,
+    }
+
+    #[derive(Debug, FromRow, PartialEq)]
+    struct Count {
+        classification: String,
+        item_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Change {
+        group_id: Uuid,
+        occurrence_delta: i64,
+    }
+
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn a_manual_release_is_created_once_per_version(pool: PgPool) {
+        let own = tenant(&pool, "rel-create").await;
+        let created: Release = ReleaseRepository::create_manual(
+            &pool,
+            Uuid::new_v4(),
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            "1.2.3",
+            Some("notes".into()),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                created.version.as_str(),
+                created.source.as_str(),
+                created.revision_count,
+                created.active_episode_count
+            ),
+            ("1.2.3", "manual", 0, 0)
+        );
+        assert!(!created.display_name.is_empty());
+        assert!(
+            ReleaseRepository::create_manual::<_, Release>(
+                &pool,
+                Uuid::new_v4(),
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                "1.2.3",
+                None,
+                Utc::now(),
+            )
+            .await
+            .is_err(),
+            "a version is unique per application"
+        );
+    }
+
+    /// Releases page newest deployment first, a cursor resumes strictly
+    /// before itself, and nothing crosses tenants.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn releases_page_newest_first_and_resolve_within_the_application(pool: PgPool) {
+        let own = tenant(&pool, "rel-page").await;
+        let other = tenant(&pool, "rel-page-other").await;
+        let now = Utc::now();
+        let old = manual_release(&pool, &own, "1", now - Duration::hours(2)).await;
+        let mid = manual_release(&pool, &own, "2", now - Duration::hours(1)).await;
+        let new = manual_release(&pool, &own, "3", now).await;
+        manual_release(&pool, &other, "9", now).await;
+
+        let page: Vec<Release> = ReleaseRepository::page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![new, mid, old]
+        );
+        let after: Vec<Release> = ReleaseRepository::page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            Some(page[0].deployed_at),
+            Some(page[0].id),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            after.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![mid, old]
+        );
+
+        let found: Release = ReleaseRepository::get(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            mid,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.version, "2");
+        assert!(
+            ReleaseRepository::get::<_, Release>(
+                &pool,
+                other.organization_id,
+                other.project_id,
+                other.application_id,
+                mid
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        let previous: Release = ReleaseRepository::legacy_predecessor(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            page[0].deployed_at,
+            new,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(previous.id, mid, "the release deployed just before");
+        assert!(
+            ReleaseRepository::legacy_predecessor::<_, Release>(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                page[2].deployed_at,
+                old
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the first release has no predecessor"
+        );
+    }
+
+    /// A second revision replacing the first gives the second release a
+    /// recorded predecessor and each release its own episode.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn episodes_record_which_release_a_rollout_replaced(pool: PgPool) {
+        let own = tenant(&pool, "rel-episodes").await;
+        let now = Utc::now();
+        let first = observe_revision(&pool, &own, &"a1".repeat(32), "rs-a", now).await;
+        let second = observe_revision(
+            &pool,
+            &own,
+            &"b2".repeat(32),
+            "rs-b",
+            now + Duration::seconds(1),
+        )
+        .await;
+
+        assert_eq!(
+            ReleaseRepository::transition_predecessors(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                second
+            )
+            .await
+            .unwrap(),
+            vec![first]
+        );
+        assert!(
+            ReleaseRepository::transition_predecessors(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                first
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+
+        let episodes: Vec<Episode> = ReleaseRepository::deployment_episode_page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            second,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].release_id, second);
+        assert_ne!(episodes[0].state, "inactive");
+        assert_eq!(
+            episodes[0].predecessors.as_array().map(Vec::len),
+            Some(1),
+            "the episode lists the one it replaced"
+        );
+    }
+
+    /// Groups seen only in the baseline disappeared, only in the target are
+    /// new, in both are unchanged; with no baseline everything is new.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_diff_classifies_groups_between_two_releases(pool: PgPool) {
+        let own = tenant(&pool, "rel-diff").await;
+        let now = Utc::now();
+        let baseline = manual_release(&pool, &own, "v1", now - Duration::hours(1)).await;
+        let target = manual_release(&pool, &own, "v2", now).await;
+        ingest(
+            &pool,
+            &own,
+            &[
+                exec_in_release(&own, "/bin/gone", "v1", now),
+                exec_in_release(&own, "/bin/kept", "v1", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/added", "v2", now),
+            ],
+        )
+        .await;
+        let groups = group_ids(&pool, &own).await;
+        assert_eq!(groups.len(), 3);
+
+        let page: Vec<DiffEntry> = ReleaseRepository::diff_page(
+            &pool,
+            Some(baseline),
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        let mut classes: Vec<&str> = page.iter().map(|e| e.classification.as_str()).collect();
+        classes.sort_unstable();
+        assert_eq!(classes, vec!["disappeared", "new", "unchanged"]);
+        assert!(
+            page.windows(2).all(|w| w[0].group_id < w[1].group_id),
+            "ordered by group id"
+        );
+
+        let without_baseline: Vec<DiffEntry> = ReleaseRepository::diff_page(
+            &pool,
+            None,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_baseline.len(), 2);
+        assert!(without_baseline.iter().all(|e| e.classification == "new"));
+
+        let mut tx = pool.begin().await.unwrap();
+        ReleaseRepository::begin_consistent_read(&mut *tx)
+            .await
+            .unwrap();
+        let counts: Vec<Count> = ReleaseRepository::diff_classifications(
+            &mut *tx,
+            baseline,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                Count {
+                    classification: "new".into(),
+                    item_count: 1
+                },
+                Count {
+                    classification: "disappeared".into(),
+                    item_count: 1
+                },
+                Count {
+                    classification: "unchanged".into(),
+                    item_count: 1
+                },
+            ],
+            "ordered new, disappeared, unchanged"
+        );
+        let largest: Vec<Change> = ReleaseRepository::diff_largest_changes(
+            &mut *tx,
+            baseline,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(largest.len(), 2, "limited");
+        let kept = page
+            .iter()
+            .find(|e| e.classification == "unchanged")
+            .unwrap()
+            .group_id;
+        assert_eq!(
+            (largest[0].group_id, largest[0].occurrence_delta),
+            (kept, 2),
+            "kept went from one to three"
+        );
+        let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            (isolation.as_str(), read_only.as_str()),
+            ("repeatable read", "on")
+        );
+        tx.commit().await.unwrap();
     }
 }

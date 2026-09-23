@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::ReleaseRepository;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -342,9 +343,17 @@ async fn create_release(
             "description must not exceed 2000 bytes".into(),
         ));
     }
-    let result = sqlx::query_as::<_, Release>("WITH inserted AS (INSERT INTO releases (id,organization_id,project_id,application_id,version,description,deployed_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *) SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,0::bigint revision_count,0::bigint active_episode_count FROM inserted r JOIN applications a ON a.id=r.application_id")
-        .bind(Uuid::new_v4()).bind(organization_id).bind(project_id).bind(application_id)
-        .bind(version).bind(input.description).bind(input.deployed_at).fetch_one(&state.pool).await;
+    let result = ReleaseRepository::create_manual::<_, Release>(
+        &state.pool,
+        Uuid::new_v4(),
+        organization_id,
+        project_id,
+        application_id,
+        version,
+        input.description,
+        input.deployed_at,
+    )
+    .await;
     match result {
         Ok(release) => Ok((StatusCode::CREATED, Json(release))),
         Err(error)
@@ -389,9 +398,16 @@ async fn list_releases(
         None
     };
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, Release>("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($4::timestamptz IS NULL OR (r.deployed_at,r.id)<($4,$5)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $6")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(cursor_time).bind(cursor_id).bind(limit+1)
-        .fetch_all(&state.pool).await?;
+    let mut items = ReleaseRepository::page::<_, Release>(
+        &state.pool,
+        organization_id,
+        project_id,
+        application_id,
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
         items.last().map(|item| item.id)
@@ -439,9 +455,16 @@ async fn list_episodes(
     .await?
     .ok_or(ReleaseError::NotFound)?;
     let limit = limit(query.limit)?;
-    let mut items = sqlx::query_as::<_, DeploymentEpisode>("SELECT e.id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.revision_id,e.cluster_id,e.occurrence_number,e.state,e.transition_kind,e.first_observed_at,e.first_ready_at,e.last_observed_at,e.ended_at,e.pod_count,e.ready_pod_count,e.workload_ready_pod_count,CASE WHEN e.workload_ready_pod_count>0 THEN e.ready_pod_count::double precision/e.workload_ready_pod_count::double precision END ready_pod_share,e.snapshot_observed_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('episode_id',p.predecessor_episode_id,'observed_at',p.observed_at,'concurrent',p.concurrent) ORDER BY p.observed_at DESC,p.predecessor_episode_id DESC) FROM deployment_episode_predecessors p WHERE p.episode_id=e.id),'[]'::jsonb) predecessors FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 AND ($5::uuid IS NULL OR e.id<$5) ORDER BY e.first_observed_at DESC,e.id DESC LIMIT $6")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id)
-        .bind(query.cursor).bind(limit+1).fetch_all(&state.pool).await?;
+    let mut items = ReleaseRepository::deployment_episode_page::<_, DeploymentEpisode>(
+        &state.pool,
+        organization_id,
+        project_id,
+        application_id,
+        release_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
         items.last().map(|item| item.id)
@@ -458,8 +481,14 @@ async fn fetch_release(
     application_id: Uuid,
     release_id: Uuid,
 ) -> Result<Option<Release>, sqlx::Error> {
-    sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND r.id=$4")
-        .bind(organization_id).bind(project_id).bind(application_id).bind(release_id).fetch_optional(pool).await
+    ReleaseRepository::get(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        release_id,
+    )
+    .await
 }
 
 async fn resolve_diff_releases(
@@ -483,8 +512,14 @@ async fn resolve_diff_releases(
             BaselineSelectionSource::Explicit,
         )
     } else {
-        let predecessors: Vec<Uuid> = sqlx::query_scalar("SELECT p.release_id FROM deployment_episodes t JOIN deployment_episode_predecessors x ON x.episode_id=t.id JOIN deployment_episodes p ON p.id=x.predecessor_episode_id WHERE t.organization_id=$1 AND t.project_id=$2 AND t.application_id=$3 AND t.release_id=$4 ORDER BY t.first_observed_at DESC,t.id DESC,x.observed_at DESC,p.id DESC LIMIT 2")
-            .bind(organization_id).bind(project_id).bind(application_id).bind(target.id).fetch_all(pool).await?;
+        let predecessors: Vec<Uuid> = ReleaseRepository::transition_predecessors(
+            pool,
+            organization_id,
+            project_id,
+            application_id,
+            target.id,
+        )
+        .await?;
         if let Some(id) = predecessors.first() {
             let source = if predecessors.len() == 1 {
                 BaselineSelectionSource::Transition
@@ -496,8 +531,15 @@ async fn resolve_diff_releases(
                 source,
             )
         } else {
-            let legacy = sqlx::query_as::<_, Release>("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND (r.deployed_at,r.id)<($4,$5) ORDER BY r.deployed_at DESC,r.id DESC LIMIT 1")
-                .bind(organization_id).bind(project_id).bind(application_id).bind(target.deployed_at).bind(target.id).fetch_optional(pool).await?;
+            let legacy = ReleaseRepository::legacy_predecessor::<_, Release>(
+                pool,
+                organization_id,
+                project_id,
+                application_id,
+                target.deployed_at,
+                target.id,
+            )
+            .await?;
             let source = if legacy.is_some() {
                 BaselineSelectionSource::LegacyDeploymentOrder
             } else {
@@ -529,9 +571,17 @@ async fn runtime_diff(
     )
     .await?;
     let baseline_id = baseline.as_ref().map(|release| release.id);
-    let mut items = sqlx::query_as::<_, DiffEntry>(
-        "WITH b AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,b.occurrence_count baseline_occurrence_count,b.first_seen_at baseline_first_seen_at,b.last_seen_at baseline_last_seen_at,t.occurrence_count target_occurrence_count,t.first_seen_at target_first_seen_at,t.last_seen_at target_last_seen_at FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' AND ($6::uuid IS NULL OR g.id>$6) ORDER BY g.id LIMIT $7",
-    ).bind(baseline_id).bind(target.id).bind(organization_id).bind(project_id).bind(application_id).bind(query.cursor).bind(limit+1).fetch_all(&state.pool).await?;
+    let mut items = ReleaseRepository::diff_page::<_, DiffEntry>(
+        &state.pool,
+        baseline_id,
+        target.id,
+        organization_id,
+        project_id,
+        application_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
         items.pop();
         items.last().map(|item| item.group_id)
@@ -594,29 +644,25 @@ async fn runtime_diff_summary(
         }));
     };
     let mut transaction = state.pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *transaction)
-        .await?;
-    let classifications = sqlx::query_as::<_, DiffClassificationCount>(
-        "WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired), compared AS (SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept') SELECT classification,count(*)::bigint item_count FROM compared GROUP BY classification ORDER BY CASE classification WHEN 'new' THEN 1 WHEN 'disappeared' THEN 2 WHEN 'unchanged' THEN 3 ELSE 4 END",
+    ReleaseRepository::begin_consistent_read(&mut *transaction).await?;
+    let classifications = ReleaseRepository::diff_classifications::<_, DiffClassificationCount>(
+        &mut *transaction,
+        baseline_id,
+        target.id,
+        organization_id,
+        project_id,
+        application_id,
     )
-    .bind(baseline_id)
-    .bind(target.id)
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .fetch_all(&mut *transaction)
     .await?;
-    let largest_changes = sqlx::query_as::<_, DiffChangeEntry>(
-        "WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,COALESCE(b.occurrence_count,0)::bigint baseline_occurrence_count,COALESCE(t.occurrence_count,0)::bigint target_occurrence_count,(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0))::bigint occurrence_delta FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' ORDER BY ABS(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)) DESC,g.id ASC LIMIT $6",
+    let largest_changes = ReleaseRepository::diff_largest_changes::<_, DiffChangeEntry>(
+        &mut *transaction,
+        baseline_id,
+        target.id,
+        organization_id,
+        project_id,
+        application_id,
+        limit,
     )
-    .bind(baseline_id)
-    .bind(target.id)
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(limit)
-    .fetch_all(&mut *transaction)
     .await?;
     transaction.commit().await?;
     let total_item_count = classifications.iter().map(|row| row.item_count).sum();
