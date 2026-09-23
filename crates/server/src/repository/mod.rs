@@ -29,19 +29,24 @@ pub mod access_audit;
 pub mod agent_health;
 pub mod application_credentials;
 pub mod applications;
+pub mod attention;
 pub mod dns_groups;
 pub mod email_actions;
 pub mod event_groups;
 pub mod events;
 pub mod installations;
+pub mod inventory;
 pub mod invitations;
 pub mod memberships;
 pub mod navigation;
 pub mod organizations;
+pub mod policies;
 pub mod projects;
 pub mod provisioning;
 pub mod releases;
+pub mod resources;
 pub mod sessions;
+pub mod transaction;
 pub mod users;
 
 #[cfg(test)]
