@@ -1,3 +1,4 @@
+use crate::repository::runtime_retention::RuntimeRetentionRepository;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
@@ -12,7 +13,7 @@ pub struct Coverage {
 }
 
 pub async fn coverage(pool: &PgPool, org: Uuid, project: Uuid) -> Result<Coverage, sqlx::Error> {
-    let mut result:Coverage=sqlx::query_as("SELECT runtime_closed_before closed_before,runtime_history_expired_before history_expired_before FROM projects WHERE organization_id=$1 AND id=$2").bind(org).bind(project).fetch_one(pool).await?;
+    let mut result: Coverage = RuntimeRetentionRepository::coverage(pool, org, project).await?;
     result.detail_scope = "raw";
     Ok(result)
 }
@@ -55,8 +56,17 @@ pub async fn page(
     query: Query,
 ) -> Result<Page, sqlx::Error> {
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
-    let mut items:Vec<Snapshot>=sqlx::query_as("SELECT id,group_id,release_id,day,format_version,occurrence_count,first_observed_at,last_observed_at FROM runtime_history_snapshots WHERE organization_id=$1 AND group_id=$2 AND ($3::date IS NULL OR day >= $3) AND ($4::date IS NULL OR day < $4) AND ($5::uuid IS NULL OR release_id=$5) AND ($6::uuid IS NULL OR (day,id)<(SELECT day,id FROM runtime_history_snapshots WHERE id=$6 AND organization_id=$1 AND group_id=$2)) ORDER BY day DESC,id DESC LIMIT $7")
-        .bind(org).bind(group).bind(query.day_from).bind(query.day_to).bind(query.release_id).bind(query.cursor).bind(limit+1).fetch_all(pool).await?;
+    let mut items: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
+        pool,
+        org,
+        group,
+        query.day_from,
+        query.day_to,
+        query.release_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(100) {
         items.truncate(usize::try_from(limit).unwrap_or(100));
         items.last().map(|item| item.id)

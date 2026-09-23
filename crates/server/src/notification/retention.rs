@@ -1,3 +1,5 @@
+use crate::repository::notification_retention::NotificationRetentionRepository;
+use crate::repository::transaction::TransactionRepository;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -49,33 +51,24 @@ async fn delete_batch(
     let mut tx = pool.begin().await?;
     // One snapshot for all policy reads in this batch. Serialize cleaners so a
     // shared bulk operation cannot be orphaned by two concurrent last-link deletes.
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
-        .await?;
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(220022)")
-        .fetch_one(&mut *tx)
-        .await?;
+    TransactionRepository::begin_repeatable_read(&mut *tx).await?;
+    let acquired: bool = NotificationRetentionRepository::try_lock(&mut *tx).await?;
     if !acquired {
         return Ok(RetentionStats::default());
     }
     let ids = select_expired_deliveries(&mut tx, config.batch_size).await?;
-    let operation_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT operation_id FROM notification_recovery_operation_deliveries WHERE delivery_id=ANY($1)",
-    ).bind(&ids).fetch_all(&mut *tx).await?;
-    let single = sqlx::query(
-        "DELETE FROM notification_recovery_operations WHERE target_delivery_id=ANY($1)",
-    )
-    .bind(&ids)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    let deliveries = sqlx::query("DELETE FROM notification_deliveries WHERE id=ANY($1)")
-        .bind(&ids)
-        .execute(&mut *tx)
+    let operation_ids: Vec<Uuid> =
+        NotificationRetentionRepository::operations_of_deliveries(&mut *tx, &ids).await?;
+    let single = NotificationRetentionRepository::delete_operations_targeting(&mut *tx, &ids)
         .await?
         .rows_affected();
-    let shared = sqlx::query("DELETE FROM notification_recovery_operations o WHERE o.id=ANY($1) AND o.target_delivery_id IS NULL AND NOT EXISTS (SELECT 1 FROM notification_recovery_operation_deliveries l WHERE l.operation_id=o.id)")
-        .bind(&operation_ids).execute(&mut *tx).await?.rows_affected();
+    let deliveries = NotificationRetentionRepository::delete_deliveries(&mut *tx, &ids)
+        .await?
+        .rows_affected();
+    let shared =
+        NotificationRetentionRepository::delete_unlinked_bulk_operations(&mut *tx, &operation_ids)
+            .await?
+            .rows_affected();
     let empty = delete_empty_operations(&mut tx, config.batch_size).await?;
     tx.commit().await?;
     Ok(RetentionStats {
@@ -120,17 +113,18 @@ async fn delete_empty_operations(
 ) -> Result<u64, sqlx::Error> {
     // Bulk result JSON contains counts only; filters contain no delivery IDs.
     // Single-target results are removed with their target above.
-    Ok(sqlx::query("WITH candidates AS (SELECT o.id FROM notification_recovery_operations o JOIN effective_notification_retention e ON e.organization_id=o.organization_id AND e.project_id=o.project_id WHERE e.enabled AND o.target_delivery_id IS NULL AND o.completed_at < now()-make_interval(days=>e.history_days) AND NOT EXISTS (SELECT 1 FROM notification_recovery_operation_deliveries l WHERE l.operation_id=o.id) ORDER BY o.completed_at,o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED) DELETE FROM notification_recovery_operations o USING candidates c WHERE o.id=c.id")
-        .bind(batch_size).execute(&mut **tx).await?.rows_affected())
+    Ok(
+        NotificationRetentionRepository::delete_expired_empty_operations(&mut **tx, batch_size)
+            .await?
+            .rows_affected(),
+    )
 }
 
 async fn select_expired_deliveries(
     tx: &mut Transaction<'_, Postgres>,
     batch_size: i64,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT d.id FROM notification_deliveries d JOIN effective_notification_retention e ON e.organization_id=d.organization_id AND e.project_id=d.project_id WHERE e.enabled AND d.status IN ('succeeded','failed','suppressed','cancelled') AND d.terminal_at < now()-make_interval(days=>e.history_days) ORDER BY d.terminal_at,d.id LIMIT $1 FOR UPDATE OF d SKIP LOCKED",
-    ).bind(batch_size).fetch_all(&mut **tx).await
+    NotificationRetentionRepository::expired_delivery_ids(&mut **tx, batch_size).await
 }
 
 #[cfg(test)]

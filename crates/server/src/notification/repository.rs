@@ -1,3 +1,5 @@
+use crate::repository::notification_deliveries::NotificationDeliveryRepository;
+use crate::repository::webhook_destinations::WebhookDestinationRepository;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{FromRow, PgPool};
@@ -79,8 +81,7 @@ impl DestinationRepository {
         organization_id: Uuid,
         project_id: Uuid,
     ) -> Result<Vec<WebhookDestination>, sqlx::Error> {
-        sqlx::query_as("SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 ORDER BY created_at DESC,id DESC")
-            .bind(organization_id).bind(project_id).fetch_all(&self.pool).await
+        WebhookDestinationRepository::list(&self.pool, organization_id, project_id).await
     }
 
     pub async fn get(
@@ -89,8 +90,7 @@ impl DestinationRepository {
         project_id: Uuid,
         id: Uuid,
     ) -> Result<Option<WebhookDestination>, sqlx::Error> {
-        sqlx::query_as("SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id).bind(project_id).bind(id).fetch_optional(&self.pool).await
+        WebhookDestinationRepository::get(&self.pool, organization_id, project_id, id).await
     }
 
     pub async fn target(
@@ -99,8 +99,7 @@ impl DestinationRepository {
         project_id: Uuid,
         id: Uuid,
     ) -> Result<Option<WebhookTarget>, sqlx::Error> {
-        sqlx::query_as("SELECT id,url,enabled,encrypted_secret,secret_nonce FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id).bind(project_id).bind(id).fetch_optional(&self.pool).await
+        WebhookDestinationRepository::target(&self.pool, organization_id, project_id, id).await
     }
 
     pub async fn create(
@@ -117,10 +116,18 @@ impl DestinationRepository {
         }
         let secret = SecretVault::generate_secret();
         let encrypted = self.vault.encrypt(secret.as_bytes())?;
-        let destination = sqlx::query_as("INSERT INTO webhook_destinations (id,organization_id,project_id,name,url,encrypted_secret,secret_nonce,deliver_backfill) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(Uuid::new_v4()).bind(organization_id).bind(project_id).bind(name.trim()).bind(url)
-            .bind(encrypted.ciphertext).bind(encrypted.nonce.as_slice()).bind(deliver_backfill)
-            .fetch_one(&self.pool).await?;
+        let destination = WebhookDestinationRepository::insert(
+            &self.pool,
+            Uuid::new_v4(),
+            organization_id,
+            project_id,
+            name.trim(),
+            url,
+            encrypted.ciphertext,
+            encrypted.nonce.as_slice(),
+            deliver_backfill,
+        )
+        .await?;
         Ok((destination, secret))
     }
 
@@ -134,9 +141,18 @@ impl DestinationRepository {
         if let Some(name) = update.name {
             validate_name(name)?;
         }
-        let destination = sqlx::query_as("UPDATE webhook_destinations SET name=COALESCE($4,name),url=COALESCE($5,url),deliver_backfill=COALESCE($6,deliver_backfill),enabled=COALESCE($7,enabled),disabled_at=CASE WHEN $7=true THEN NULL WHEN $7=false THEN COALESCE(disabled_at,now()) ELSE disabled_at END,revision=revision+1,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND revision=$8 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id).bind(project_id).bind(id).bind(update.name.map(str::trim)).bind(update.url)
-            .bind(update.deliver_backfill).bind(update.enabled).bind(update.expected_revision).fetch_optional(&self.pool).await?;
+        let destination = WebhookDestinationRepository::update(
+            &self.pool,
+            organization_id,
+            project_id,
+            id,
+            update.name.map(str::trim),
+            update.url,
+            update.deliver_backfill,
+            update.enabled,
+            update.expected_revision,
+        )
+        .await?;
         if let Some(destination) = destination {
             return Ok(destination);
         }
@@ -154,11 +170,17 @@ impl DestinationRepository {
         id: Uuid,
     ) -> Result<WebhookDestination, DestinationError> {
         let mut tx = self.pool.begin().await?;
-        let destination: Option<WebhookDestination> = sqlx::query_as("UPDATE webhook_destinations SET enabled=false,disabled_at=COALESCE(disabled_at,now()),updated_at=now(),revision=revision+1 WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id).bind(project_id).bind(id).fetch_optional(&mut *tx).await?;
+        let destination: Option<WebhookDestination> =
+            WebhookDestinationRepository::disable(&mut *tx, organization_id, project_id, id)
+                .await?;
         let destination = destination.ok_or(DestinationError::NotFound)?;
-        sqlx::query("UPDATE notification_deliveries SET status='cancelled',terminal_at=now(),updated_at=now(),lease_owner=NULL,lease_expires_at=NULL,last_error_class='destination_disabled',last_error='destination disabled before delivery' WHERE organization_id=$1 AND project_id=$2 AND destination_id=$3 AND status IN ('pending','in_flight')")
-            .bind(organization_id).bind(project_id).bind(id).execute(&mut *tx).await?;
+        NotificationDeliveryRepository::cancel_for_destination(
+            &mut *tx,
+            organization_id,
+            project_id,
+            id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(destination)
     }
@@ -171,9 +193,16 @@ impl DestinationRepository {
     ) -> Result<(WebhookDestination, Zeroizing<String>), DestinationError> {
         let secret = SecretVault::generate_secret();
         let encrypted = self.vault.encrypt(secret.as_bytes())?;
-        let destination = sqlx::query_as("UPDATE webhook_destinations SET encrypted_secret=$4,secret_nonce=$5,revision=revision+1,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id).bind(project_id).bind(id).bind(encrypted.ciphertext).bind(encrypted.nonce.as_slice())
-            .fetch_optional(&self.pool).await?.ok_or(DestinationError::NotFound)?;
+        let destination = WebhookDestinationRepository::rotate_secret(
+            &self.pool,
+            organization_id,
+            project_id,
+            id,
+            encrypted.ciphertext,
+            encrypted.nonce.as_slice(),
+        )
+        .await?
+        .ok_or(DestinationError::NotFound)?;
         Ok((destination, secret))
     }
 }

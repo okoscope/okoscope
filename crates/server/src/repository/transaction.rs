@@ -9,6 +9,21 @@ use sqlx::PgExecutor;
 pub struct TransactionRepository;
 
 impl TransactionRepository {
+    /// Makes the rest of the caller's transaction a repeatable-read snapshot
+    /// that may still write.
+    ///
+    /// Must be the first statement of the transaction; pass `&mut *tx`.
+    pub async fn begin_repeatable_read<'e, E>(
+        executor: E,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(executor)
+            .await
+    }
+
     /// When the caller's transaction started, which is the time its snapshot
     /// was taken.
     pub async fn snapshot_time<'e, E>(executor: E) -> Result<DateTime<Utc>, sqlx::Error>

@@ -108,6 +108,47 @@ pub mod aggregates {
 pub struct EventGroupRepository;
 
 impl EventGroupRepository {
+    /// Whether a group's first sighting should be notified under its current
+    /// policy state: `active_suppression`, `evaluation_pending`, `expected`
+    /// or `eligible`, with the winning revision and suppression behind it.
+    ///
+    /// Selects `reason`, `evaluated_at`, `policy_revision_id` and
+    /// `policy_suppression_id`.
+    pub async fn notification_eligibility<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        group_id: Uuid,
+        evaluator_version: i16,
+    ) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT CASE WHEN s.id IS NOT NULL THEN 'active_suppression' WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN 'evaluation_pending' WHEN e.verdict='expected' THEN 'expected' ELSE 'eligible' END reason,now() evaluated_at,CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.winning_revision_id END policy_revision_id,s.id policy_suppression_id FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id LEFT JOIN LATERAL (SELECT x.id FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id AND x.project_id=i.project_id AND x.application_id=i.application_id AND x.identity_version=i.identity_version AND x.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND x.cancelled_at IS NULL AND x.expires_at>now() AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids)) AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces)) AND (cardinality(x.workload_kinds)=0 OR g.workload_kind=ANY(x.workload_kinds)) AND (cardinality(x.workload_names)=0 OR g.workload_name=ANY(x.workload_names)) ORDER BY x.expires_at,x.id LIMIT 1) s ON true WHERE g.organization_id=$1 AND g.id=$2")
+            .bind(organization_id)
+            .bind(group_id)
+            .bind(evaluator_version)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// Up to 20 user labels on the inventory items behind a group, as a JSON
+    /// array ordered by display name.
+    pub async fn user_labels_json<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        group_id: Uuid,
+    ) -> Result<Value, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Value>("SELECT COALESCE(jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at'),'[]'::jsonb) FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=$2 ORDER BY l.display_name,l.id LIMIT 20) labels")
+            .bind(organization_id)
+            .bind(group_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// The user-assigned behaviour labels attached to each of the given
     /// groups through their inventory items, one row per group.
     pub async fn user_labels<'e, E, T>(

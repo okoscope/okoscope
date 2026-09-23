@@ -339,3 +339,38 @@ pub fn restarts(tenant: &Tenant, at: DateTime<Utc>, count: u32) -> Vec<RuntimeEv
         })
         .collect()
 }
+
+/// An enabled webhook destination of the tenant's project, with a dummy
+/// encrypted secret.
+pub async fn destination(pool: &PgPool, tenant: &Tenant, name: &str) -> Uuid {
+    #[derive(sqlx::FromRow)]
+    struct Created {
+        id: Uuid,
+    }
+    let created: Created =
+        crate::repository::webhook_destinations::WebhookDestinationRepository::insert(
+            pool,
+            Uuid::new_v4(),
+            tenant.organization_id,
+            tenant.project_id,
+            name,
+            "https://hooks.example.test/okoscope",
+            vec![1; 48],
+            &[2; 24],
+            false,
+        )
+        .await
+        .unwrap();
+    created.id
+}
+
+/// The tenant's first-seen outbox messages with their groups, oldest first.
+pub async fn first_seen_messages(pool: &PgPool, tenant: &Tenant) -> Vec<(Uuid, Uuid)> {
+    sqlx::query_as(
+        "SELECT id,aggregate_id FROM outbox_messages WHERE project_id=$1 AND topic='runtime_group.first_seen' ORDER BY created_at,id",
+    )
+    .bind(tenant.project_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}

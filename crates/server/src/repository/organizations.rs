@@ -77,6 +77,21 @@ pub struct StoredOrganization {
 pub struct OrganizationRepository;
 
 impl OrganizationRepository {
+    /// Locks the organization row for update. Fails with `RowNotFound` when
+    /// there is no such organization.
+    pub async fn lock_for_update<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+    ) -> Result<sqlx::postgres::PgRow, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE")
+            .bind(organization_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// The first 200 organizations, oldest first.
     ///
     /// Selects `id`, `slug`, `name` and `created_at`.
