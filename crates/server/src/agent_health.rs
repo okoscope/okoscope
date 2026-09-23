@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::agent_health::AgentHealthRepository;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -246,10 +247,16 @@ pub async fn register_application_agent(
     agent_id: Uuid,
     capabilities: &[String],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO application_agents(organization_id,project_id,application_id,cluster_id,agent_id,capabilities) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(organization_id,project_id,application_id,agent_id) DO UPDATE SET cluster_id=EXCLUDED.cluster_id,capabilities=EXCLUDED.capabilities,authenticated_at=now(),last_session_ended_at=NULL")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-        .bind(cluster_id).bind(agent_id).bind(serde_json::json!(capabilities))
-        .execute(pool).await?;
+    AgentHealthRepository::register_agent(
+        pool,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        cluster_id,
+        agent_id,
+        serde_json::json!(capabilities),
+    )
+    .await?;
     Ok(())
 }
 
@@ -298,12 +305,25 @@ async fn record_signal(
     received_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let bucket = minute(received_at);
-    sqlx::query("UPDATE application_agents SET last_heartbeat_at=$5 WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(agent_id).bind(received_at)
-        .execute(&mut **tx).await?;
-    sqlx::query("INSERT INTO application_agent_signal_buckets(organization_id,project_id,application_id,agent_id,bucket_at,first_received_at,last_received_at) VALUES($1,$2,$3,$4,$5,$6,$6) ON CONFLICT(organization_id,project_id,application_id,agent_id,bucket_at) DO UPDATE SET received_count=LEAST(application_agent_signal_buckets.received_count+1,120),last_received_at=GREATEST(application_agent_signal_buckets.last_received_at,EXCLUDED.last_received_at)")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(agent_id).bind(bucket).bind(received_at)
-        .execute(&mut **tx).await?;
+    AgentHealthRepository::touch_heartbeat(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        agent_id,
+        received_at,
+    )
+    .await?;
+    AgentHealthRepository::record_signal(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        agent_id,
+        bucket,
+        received_at,
+    )
+    .await?;
     Ok(())
 }
 
@@ -317,9 +337,16 @@ async fn record_application_diagnostics(
     received_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let current = application_values(snapshot);
-    let previous: Option<(DateTime<Utc>, serde_json::Value)> = sqlx::query_as("SELECT sent_at,counters FROM application_agent_counter_baselines WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND agent_id=$5 FOR UPDATE")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-        .bind(cluster_id).bind(agent_id).fetch_optional(&mut **tx).await?;
+    let previous: Option<(DateTime<Utc>, serde_json::Value)> =
+        AgentHealthRepository::counter_baseline(
+            &mut **tx,
+            scope.organization_id,
+            scope.project_id,
+            scope.application_id,
+            cluster_id,
+            agent_id,
+        )
+        .await?;
     if previous.as_ref().is_some_and(|(at, _)| sent_at <= *at) {
         return Ok(());
     }
@@ -333,10 +360,17 @@ async fn record_application_diagnostics(
         .as_ref()
         .filter(|_| !reset)
         .map(|old| deltas(old, &current));
-    sqlx::query("INSERT INTO application_agent_counter_baselines(organization_id,project_id,application_id,cluster_id,agent_id,sent_at,counters) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id) DO UPDATE SET sent_at=EXCLUDED.sent_at,counters=EXCLUDED.counters")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-        .bind(cluster_id).bind(agent_id).bind(sent_at).bind(serde_json::json!(current))
-        .execute(&mut **tx).await?;
+    AgentHealthRepository::store_counter_baseline(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        cluster_id,
+        agent_id,
+        sent_at,
+        serde_json::json!(current),
+    )
+    .await?;
     upsert_diagnostic_bucket(
         tx,
         scope,
@@ -359,11 +393,26 @@ async fn upsert_diagnostic_bucket(
     deltas: Option<[i64; DIAGNOSTIC_COUNT]>,
 ) -> Result<(), sqlx::Error> {
     let d = deltas.unwrap_or([0; DIAGNOSTIC_COUNT]);
-    sqlx::query("INSERT INTO application_agent_diagnostic_buckets(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at,reset,dropped,rate_limited,decode_failed,attribution_failed,capacity,kernel_lost,correlation,delivery_retry,unsupported) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at) DO UPDATE SET reset=application_agent_diagnostic_buckets.reset OR EXCLUDED.reset,dropped=application_agent_diagnostic_buckets.dropped+EXCLUDED.dropped,rate_limited=application_agent_diagnostic_buckets.rate_limited+EXCLUDED.rate_limited,decode_failed=application_agent_diagnostic_buckets.decode_failed+EXCLUDED.decode_failed,attribution_failed=application_agent_diagnostic_buckets.attribution_failed+EXCLUDED.attribution_failed,capacity=application_agent_diagnostic_buckets.capacity+EXCLUDED.capacity,kernel_lost=application_agent_diagnostic_buckets.kernel_lost+EXCLUDED.kernel_lost,correlation=application_agent_diagnostic_buckets.correlation+EXCLUDED.correlation,delivery_retry=application_agent_diagnostic_buckets.delivery_retry+EXCLUDED.delivery_retry,unsupported=application_agent_diagnostic_buckets.unsupported+EXCLUDED.unsupported")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-        .bind(cluster_id).bind(agent_id).bind(bucket).bind(reset)
-        .bind(d[0]).bind(d[1]).bind(d[2]).bind(d[3]).bind(d[4]).bind(d[5]).bind(d[6]).bind(d[7]).bind(d[8])
-        .execute(&mut **tx).await?;
+    AgentHealthRepository::add_diagnostic_deltas(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        cluster_id,
+        agent_id,
+        bucket,
+        reset,
+        d[0],
+        d[1],
+        d[2],
+        d[3],
+        d[4],
+        d[5],
+        d[6],
+        d[7],
+        d[8],
+    )
+    .await?;
     Ok(())
 }
 
@@ -392,16 +441,7 @@ async fn cleanup(
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let cutoff = now - Duration::hours(HEALTH_RETENTION_HOURS);
-    for table in [
-        "application_agent_signal_buckets",
-        "application_agent_diagnostic_buckets",
-    ] {
-        let query = format!(
-            "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE bucket_at<$1 ORDER BY bucket_at LIMIT 500)"
-        );
-        sqlx::query(&query).bind(cutoff).execute(&mut **tx).await?;
-    }
-    Ok(())
+    AgentHealthRepository::prune_buckets(tx, cutoff).await
 }
 
 pub async fn end_session(
@@ -411,19 +451,21 @@ pub async fn end_session(
     agent_id: Uuid,
 ) {
     let now = Utc::now();
-    if let Err(error) = sqlx::query(
-        "UPDATE agent_sessions SET disconnected_at=$2 WHERE id=$1 AND disconnected_at IS NULL",
-    )
-    .bind(session_id)
-    .bind(now)
-    .execute(pool)
-    .await
-    {
+    if let Err(error) = AgentHealthRepository::end_session(pool, session_id, now).await {
         tracing::warn!(%agent_id, %error, "failed to record agent session termination");
     }
-    if let Err(error) = sqlx::query("UPDATE application_agents SET last_session_ended_at=$5 WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(agent_id).bind(now).execute(pool).await
-    { tracing::warn!(%agent_id, %error, "failed to record Application stream termination"); }
+    if let Err(error) = AgentHealthRepository::record_session_end(
+        pool,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        agent_id,
+        now,
+    )
+    .await
+    {
+        tracing::warn!(%agent_id, %error, "failed to record Application stream termination");
+    }
 }
 
 async fn application_agent_health(
@@ -459,10 +501,16 @@ async fn application_agent_health(
         ));
     }
     if let Some(cursor) = &cursor {
-        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM application_agents WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND authenticated_at=$5)")
-            .bind(organization_id).bind(project_id).bind(application_id)
-            .bind(cursor.agent_id).bind(cursor.authenticated_at).fetch_one(&state.pool).await
-            .map_err(|e| HealthError::database(&e, &request_id))?;
+        let valid: bool = AgentHealthRepository::cursor_is_valid(
+            &state.pool,
+            organization_id,
+            project_id,
+            application_id,
+            cursor.agent_id,
+            cursor.authenticated_at,
+        )
+        .await
+        .map_err(|e| HealthError::database(&e, &request_id))?;
         if !valid {
             return Err(HealthError::invalid(
                 "cursor is outside this scope",
@@ -533,10 +581,16 @@ async fn authorize_application(
                 request_id,
             )
         })?;
-    let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3 AND ($4 OR EXISTS(SELECT 1 FROM project_memberships m WHERE m.organization_id=$1 AND m.project_id=$2 AND m.user_id=$5)))")
-        .bind(principal.organization_id).bind(project_id).bind(application_id)
-        .bind(principal.role.inherits_project_access()).bind(principal.user_id)
-        .fetch_one(&state.pool).await.map_err(|e| HealthError::database(&e, request_id))?;
+    let owned: bool = AgentHealthRepository::application_visible(
+        &state.pool,
+        principal.organization_id,
+        project_id,
+        application_id,
+        principal.role.inherits_project_access(),
+        principal.user_id,
+    )
+    .await
+    .map_err(|e| HealthError::database(&e, request_id))?;
     if !owned {
         return Err(HealthError::new(
             StatusCode::NOT_FOUND,
@@ -556,10 +610,16 @@ async fn fetch_agents(
     cursor: Option<&HealthCursor>,
     limit: i64,
 ) -> Result<Vec<AgentRow>, sqlx::Error> {
-    sqlx::query_as("SELECT aa.organization_id,aa.project_id,aa.application_id,aa.agent_id,aa.cluster_id,c.name cluster_name,a.node_name,a.agent_version,a.architecture,a.kernel_release,aa.capabilities,aa.authenticated_at,aa.history_started_at,aa.last_heartbeat_at,(SELECT min(e.observed_at) FROM runtime_events e WHERE e.organization_id=aa.organization_id AND e.project_id=aa.project_id AND e.application_id=aa.application_id AND e.agent_id=aa.agent_id) first_event_at,(SELECT max(e.observed_at) FROM runtime_events e WHERE e.organization_id=aa.organization_id AND e.project_id=aa.project_id AND e.application_id=aa.application_id AND e.agent_id=aa.agent_id) last_event_at FROM application_agents aa JOIN agents a ON a.organization_id=aa.organization_id AND a.cluster_id=aa.cluster_id AND a.id=aa.agent_id JOIN clusters c ON c.organization_id=aa.organization_id AND c.id=aa.cluster_id WHERE aa.organization_id=$1 AND aa.project_id=$2 AND aa.application_id=$3 AND ($4::timestamptz IS NULL OR (aa.authenticated_at,aa.agent_id)<($4,$5)) ORDER BY aa.authenticated_at DESC,aa.agent_id DESC LIMIT $6")
-        .bind(organization_id).bind(project_id).bind(application_id)
-        .bind(cursor.map(|c| c.authenticated_at)).bind(cursor.map(|c| c.agent_id)).bind(limit + 1)
-        .fetch_all(pool).await
+    AgentHealthRepository::agent_page(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        cursor.map(|c| c.authenticated_at),
+        cursor.map(|c| c.agent_id),
+        limit + 1,
+    )
+    .await
 }
 
 async fn build_agent_health(
@@ -612,10 +672,18 @@ async fn fetch_buckets(
     end: DateTime<Utc>,
 ) -> Result<Vec<BucketRow>, sqlx::Error> {
     let step = range.step_minutes();
-    sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM application_agent_diagnostic_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
-        .bind(row.organization_id).bind(row.project_id).bind(row.application_id).bind(row.agent_id)
-        .bind(row.cluster_id).bind(step).bind(start).bind(end)
-        .fetch_all(pool).await
+    AgentHealthRepository::buckets(
+        pool,
+        row.organization_id,
+        row.project_id,
+        row.application_id,
+        row.agent_id,
+        row.cluster_id,
+        step,
+        start,
+        end,
+    )
+    .await
 }
 
 fn timeline(
