@@ -348,3 +348,450 @@ impl AgentHealthRepository {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use serde_json::json;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::AgentHealthRepository;
+    use crate::repository::memberships::MembershipRepository;
+    use crate::repository::test_support::{Tenant, exec, ingest, tenant, user};
+
+    #[derive(sqlx::FromRow)]
+    struct AgentRow {
+        agent_id: Uuid,
+        cluster_name: String,
+        node_name: String,
+        capabilities: serde_json::Value,
+        authenticated_at: DateTime<Utc>,
+        last_heartbeat_at: Option<DateTime<Utc>>,
+        first_event_at: Option<DateTime<Utc>>,
+        last_event_at: Option<DateTime<Utc>>,
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct Rollup {
+        bucket_at: DateTime<Utc>,
+        received: bool,
+        reset: bool,
+        dropped: i64,
+        unsupported: i64,
+    }
+
+    fn at(minute: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(minute)
+    }
+
+    async fn register(
+        pool: &PgPool,
+        own: &Tenant,
+        agent_id: Uuid,
+        capabilities: serde_json::Value,
+    ) {
+        AgentHealthRepository::register_agent(
+            pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            own.cluster_id,
+            agent_id,
+            capabilities,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn page(
+        pool: &PgPool,
+        own: &Tenant,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Vec<AgentRow> {
+        AgentHealthRepository::agent_page(
+            pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            cursor.map(|c| c.0),
+            cursor.map(|c| c.1),
+            10,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn buckets(pool: &PgPool, own: &Tenant, step_minutes: i64) -> Vec<Rollup> {
+        AgentHealthRepository::buckets(
+            pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            own.agent_id,
+            own.cluster_id,
+            step_minutes,
+            at(0),
+            at(60),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Registration upserts the agent, refreshing its capabilities and
+    /// clearing a recorded session end; heartbeats, session ends and events
+    /// show up on the health page, which pages newest authentication first.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn agents_register_and_page_newest_first(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-page").await;
+        register(&pool, &own, own.agent_id, json!(["exec"])).await;
+        AgentHealthRepository::record_session_end(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            own.agent_id,
+            at(1),
+        )
+        .await
+        .unwrap();
+        register(&pool, &own, own.agent_id, json!(["exec", "dns"])).await;
+        let ended: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT last_session_ended_at FROM application_agents WHERE agent_id=$1",
+        )
+        .bind(own.agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ended, None, "registering again clears the session end");
+
+        AgentHealthRepository::touch_heartbeat(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            own.agent_id,
+            at(5),
+        )
+        .await
+        .unwrap();
+        let observed = Utc::now();
+        ingest(&pool, &own, &[exec(&own, "/bin/a", observed)]).await;
+
+        let other = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-b','test')",
+        )
+        .bind(other)
+        .bind(own.organization_id)
+        .bind(own.cluster_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        register(&pool, &own, other, json!([])).await;
+        sqlx::query("UPDATE application_agents SET authenticated_at=$2 WHERE agent_id=$1")
+            .bind(own.agent_id)
+            .bind(at(10))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE application_agents SET authenticated_at=$2 WHERE agent_id=$1")
+            .bind(other)
+            .bind(at(20))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let first = page(&pool, &own, None).await;
+        assert_eq!(
+            first.iter().map(|a| a.agent_id).collect::<Vec<_>>(),
+            [other, own.agent_id]
+        );
+        assert_eq!(first[0].node_name, "node-b");
+        assert_eq!(first[0].first_event_at, None);
+        let agent = &first[1];
+        assert_eq!(agent.cluster_name, "Cluster");
+        assert_eq!(agent.node_name, "node-a");
+        assert_eq!(agent.capabilities, json!(["exec", "dns"]));
+        assert_eq!(agent.authenticated_at, at(10));
+        assert_eq!(agent.last_heartbeat_at, Some(at(5)));
+        assert!(agent.first_event_at.is_some());
+        assert_eq!(agent.first_event_at, agent.last_event_at);
+
+        let rest = page(&pool, &own, Some((at(20), other))).await;
+        assert_eq!(
+            rest.iter().map(|a| a.agent_id).collect::<Vec<_>>(),
+            [own.agent_id]
+        );
+
+        let stranger = tenant(&pool, "agent-health-stranger").await;
+        assert!(page(&pool, &stranger, None).await.is_empty());
+    }
+
+    /// A cursor is valid only for this application's agent at exactly the
+    /// authentication time it names.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn a_cursor_names_an_exact_authentication(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-cursor").await;
+        register(&pool, &own, own.agent_id, json!([])).await;
+        sqlx::query("UPDATE application_agents SET authenticated_at=$2 WHERE agent_id=$1")
+            .bind(own.agent_id)
+            .bind(at(10))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let valid = |application_id: Uuid, agent_id: Uuid, time: DateTime<Utc>| {
+            let pool = pool.clone();
+            async move {
+                AgentHealthRepository::cursor_is_valid(
+                    &pool,
+                    own.organization_id,
+                    own.project_id,
+                    application_id,
+                    agent_id,
+                    time,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert!(valid(own.application_id, own.agent_id, at(10)).await);
+        assert!(!valid(own.application_id, own.agent_id, at(11)).await);
+        assert!(!valid(own.application_id, Uuid::new_v4(), at(10)).await);
+        assert!(!valid(Uuid::new_v4(), own.agent_id, at(10)).await);
+    }
+
+    /// An application is visible through an inheriting organization role or
+    /// a membership of its project, and never when it does not exist.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn application_visibility_follows_project_access(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-visibility").await;
+        let member = user(&pool).await;
+        MembershipRepository::insert_organization_role(
+            &pool,
+            own.organization_id,
+            member,
+            "member",
+        )
+        .await
+        .unwrap();
+        let visible = |application_id: Uuid, inherits: bool| {
+            let pool = pool.clone();
+            async move {
+                AgentHealthRepository::application_visible(
+                    &pool,
+                    own.organization_id,
+                    own.project_id,
+                    application_id,
+                    inherits,
+                    member,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert!(visible(own.application_id, true).await);
+        assert!(!visible(own.application_id, false).await);
+        assert!(!visible(Uuid::new_v4(), true).await);
+
+        MembershipRepository::insert_project_role(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            member,
+            "member",
+        )
+        .await
+        .unwrap();
+        assert!(visible(own.application_id, false).await);
+    }
+
+    /// The counter baseline is absent until stored, then replaced in place.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_counter_baseline_is_replaced(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-baseline").await;
+        register(&pool, &own, own.agent_id, json!([])).await;
+        let read = || {
+            let pool = pool.clone();
+            async move {
+                AgentHealthRepository::counter_baseline(
+                    &pool,
+                    own.organization_id,
+                    own.project_id,
+                    own.application_id,
+                    own.cluster_id,
+                    own.agent_id,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(read().await, None);
+        for (minute, dropped) in [(1, 3), (2, 7)] {
+            AgentHealthRepository::store_counter_baseline(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                own.cluster_id,
+                own.agent_id,
+                at(minute),
+                json!([dropped]),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(read().await, Some((at(2), json!([7]))));
+    }
+
+    /// Signals count per minute and diagnostics accumulate per minute, with a
+    /// reset sticking to its bucket; the read rolls both up to the step and
+    /// joins them, and pruning removes only buckets before the cutoff.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn buckets_accumulate_roll_up_and_prune(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-buckets").await;
+        register(&pool, &own, own.agent_id, json!([])).await;
+        let signal = |minute: i64, second: i64| {
+            let pool = pool.clone();
+            async move {
+                AgentHealthRepository::record_signal(
+                    &pool,
+                    own.organization_id,
+                    own.project_id,
+                    own.application_id,
+                    own.agent_id,
+                    at(minute),
+                    at(minute) + Duration::seconds(second),
+                )
+                .await
+                .unwrap();
+            }
+        };
+        signal(0, 30).await;
+        signal(0, 10).await;
+        signal(6, 0).await;
+        let counts: (i32, DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+            "SELECT received_count,first_received_at,last_received_at FROM application_agent_signal_buckets WHERE bucket_at=$1",
+        )
+        .bind(at(0))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            counts,
+            (
+                2,
+                at(0) + Duration::seconds(30),
+                at(0) + Duration::seconds(30)
+            ),
+            "the latest receipt wins; the first stays"
+        );
+
+        let deltas = |minute: i64, reset: bool, dropped: i64| {
+            let pool = pool.clone();
+            async move {
+                AgentHealthRepository::add_diagnostic_deltas(
+                    &pool,
+                    own.organization_id,
+                    own.project_id,
+                    own.application_id,
+                    own.cluster_id,
+                    own.agent_id,
+                    at(minute),
+                    reset,
+                    dropped,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                )
+                .await
+                .unwrap();
+            }
+        };
+        deltas(1, true, 2).await;
+        deltas(1, false, 3).await;
+        deltas(12, false, 4).await;
+
+        let minutes = buckets(&pool, &own, 1).await;
+        let shape: Vec<_> = minutes
+            .iter()
+            .map(|b| (b.bucket_at, b.received, b.reset, b.dropped, b.unsupported))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (at(0), true, false, 0, 0),
+                (at(1), false, true, 5, 2),
+                (at(6), true, false, 0, 0),
+                (at(12), false, false, 4, 1),
+            ]
+        );
+        let rolled = buckets(&pool, &own, 5).await;
+        let shape: Vec<_> = rolled
+            .iter()
+            .map(|b| (b.bucket_at, b.received, b.reset, b.dropped, b.unsupported))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (at(0), true, true, 5, 2),
+                (at(5), true, false, 0, 0),
+                (at(10), false, false, 4, 1),
+            ]
+        );
+
+        let mut conn = pool.acquire().await.unwrap();
+        AgentHealthRepository::prune_buckets(&mut conn, at(6))
+            .await
+            .unwrap();
+        drop(conn);
+        let left: Vec<_> = buckets(&pool, &own, 1)
+            .await
+            .iter()
+            .map(|b| b.bucket_at)
+            .collect();
+        assert_eq!(left, [at(6), at(12)]);
+    }
+
+    /// Ending a session sets its disconnect time once; a second end keeps it.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn a_session_ends_once(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-session").await;
+        let session = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO agent_sessions(id,organization_id,cluster_id,agent_id,protocol_version) VALUES($1,$2,$3,$4,1)",
+        )
+        .bind(session)
+        .bind(own.organization_id)
+        .bind(own.cluster_id)
+        .bind(own.agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = AgentHealthRepository::end_session(&pool, session, at(1))
+            .await
+            .unwrap();
+        let second = AgentHealthRepository::end_session(&pool, session, at(2))
+            .await
+            .unwrap();
+        assert_eq!((first.rows_affected(), second.rows_affected()), (1, 0));
+        let disconnected: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT disconnected_at FROM agent_sessions WHERE id=$1")
+                .bind(session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(disconnected, Some(at(1)));
+    }
+}

@@ -201,7 +201,8 @@ impl ReleaseRepository {
 
     /// A page of the runtime-group differences between a baseline and a
     /// target release, after the cursor group when one is given. With no
-    /// baseline, the baseline side of the comparison is empty.
+    /// baseline the baseline side is empty, so every group observed in the
+    /// target is classified `new`.
     #[allow(clippy::too_many_arguments)]
     pub async fn diff_page<'e, E, T>(
         executor: E,
@@ -589,5 +590,383 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod api_statement_tests {
+    use super::ReleaseRepository;
+    use crate::repository::test_support::{
+        exec_in_release, group_ids, ingest, manual_release, observe_revision, tenant,
+    };
+    use chrono::{DateTime, Duration, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    #[derive(Debug, FromRow)]
+    struct Release {
+        id: Uuid,
+        version: String,
+        display_name: String,
+        source: String,
+        deployed_at: DateTime<Utc>,
+        revision_count: i64,
+        active_episode_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Episode {
+        release_id: Uuid,
+        state: String,
+        predecessors: serde_json::Value,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct DiffEntry {
+        group_id: Uuid,
+        classification: String,
+    }
+
+    #[derive(Debug, FromRow, PartialEq)]
+    struct Count {
+        classification: String,
+        item_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Change {
+        group_id: Uuid,
+        occurrence_delta: i64,
+    }
+
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn a_manual_release_is_created_once_per_version(pool: PgPool) {
+        let own = tenant(&pool, "rel-create").await;
+        let created: Release = ReleaseRepository::create_manual(
+            &pool,
+            Uuid::new_v4(),
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            "1.2.3",
+            Some("notes".into()),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                created.version.as_str(),
+                created.source.as_str(),
+                created.revision_count,
+                created.active_episode_count
+            ),
+            ("1.2.3", "manual", 0, 0)
+        );
+        assert!(!created.display_name.is_empty());
+        assert!(
+            ReleaseRepository::create_manual::<_, Release>(
+                &pool,
+                Uuid::new_v4(),
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                "1.2.3",
+                None,
+                Utc::now(),
+            )
+            .await
+            .is_err(),
+            "a version is unique per application"
+        );
+    }
+
+    /// Releases page newest deployment first, a cursor resumes strictly
+    /// before itself, and nothing crosses tenants.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn releases_page_newest_first_and_resolve_within_the_application(pool: PgPool) {
+        let own = tenant(&pool, "rel-page").await;
+        let other = tenant(&pool, "rel-page-other").await;
+        let now = Utc::now();
+        let old = manual_release(&pool, &own, "1", now - Duration::hours(2)).await;
+        let mid = manual_release(&pool, &own, "2", now - Duration::hours(1)).await;
+        let new = manual_release(&pool, &own, "3", now).await;
+        manual_release(&pool, &other, "9", now).await;
+
+        let page: Vec<Release> = ReleaseRepository::page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            page.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![new, mid, old]
+        );
+        let after: Vec<Release> = ReleaseRepository::page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            Some(page[0].deployed_at),
+            Some(page[0].id),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            after.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![mid, old]
+        );
+
+        let found: Release = ReleaseRepository::get(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            mid,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.version, "2");
+        assert!(
+            ReleaseRepository::get::<_, Release>(
+                &pool,
+                other.organization_id,
+                other.project_id,
+                other.application_id,
+                mid
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        let previous: Release = ReleaseRepository::legacy_predecessor(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            page[0].deployed_at,
+            new,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(previous.id, mid, "the release deployed just before");
+        assert!(
+            ReleaseRepository::legacy_predecessor::<_, Release>(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                page[2].deployed_at,
+                old
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "the first release has no predecessor"
+        );
+    }
+
+    /// A second revision replacing the first gives the second release a
+    /// recorded predecessor and each release its own episode.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn episodes_record_which_release_a_rollout_replaced(pool: PgPool) {
+        let own = tenant(&pool, "rel-episodes").await;
+        let now = Utc::now();
+        let first = observe_revision(&pool, &own, &"a1".repeat(32), "rs-a", now).await;
+        let second = observe_revision(
+            &pool,
+            &own,
+            &"b2".repeat(32),
+            "rs-b",
+            now + Duration::seconds(1),
+        )
+        .await;
+
+        assert_eq!(
+            ReleaseRepository::transition_predecessors(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                second
+            )
+            .await
+            .unwrap(),
+            vec![first]
+        );
+        assert!(
+            ReleaseRepository::transition_predecessors(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                first
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+
+        let episodes: Vec<Episode> = ReleaseRepository::deployment_episode_page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            second,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].release_id, second);
+        assert_ne!(episodes[0].state, "inactive");
+        assert_eq!(
+            episodes[0].predecessors.as_array().map(Vec::len),
+            Some(1),
+            "the episode lists the one it replaced"
+        );
+    }
+
+    /// Groups seen only in the baseline disappeared, only in the target are
+    /// new, in both are unchanged; with no baseline everything is new.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_diff_classifies_groups_between_two_releases(pool: PgPool) {
+        let own = tenant(&pool, "rel-diff").await;
+        let now = Utc::now();
+        let baseline = manual_release(&pool, &own, "v1", now - Duration::hours(1)).await;
+        let target = manual_release(&pool, &own, "v2", now).await;
+        ingest(
+            &pool,
+            &own,
+            &[
+                exec_in_release(&own, "/bin/gone", "v1", now),
+                exec_in_release(&own, "/bin/kept", "v1", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/kept", "v2", now),
+                exec_in_release(&own, "/bin/added", "v2", now),
+            ],
+        )
+        .await;
+        let groups = group_ids(&pool, &own).await;
+        assert_eq!(groups.len(), 3);
+
+        let page: Vec<DiffEntry> = ReleaseRepository::diff_page(
+            &pool,
+            Some(baseline),
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        let mut classes: Vec<&str> = page.iter().map(|e| e.classification.as_str()).collect();
+        classes.sort_unstable();
+        assert_eq!(classes, vec!["disappeared", "new", "unchanged"]);
+        assert!(
+            page.windows(2).all(|w| w[0].group_id < w[1].group_id),
+            "ordered by group id"
+        );
+
+        let without_baseline: Vec<DiffEntry> = ReleaseRepository::diff_page(
+            &pool,
+            None,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_baseline.len(), 2);
+        assert!(without_baseline.iter().all(|e| e.classification == "new"));
+
+        let mut tx = pool.begin().await.unwrap();
+        ReleaseRepository::begin_consistent_read(&mut *tx)
+            .await
+            .unwrap();
+        let counts: Vec<Count> = ReleaseRepository::diff_classifications(
+            &mut *tx,
+            baseline,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                Count {
+                    classification: "new".into(),
+                    item_count: 1
+                },
+                Count {
+                    classification: "disappeared".into(),
+                    item_count: 1
+                },
+                Count {
+                    classification: "unchanged".into(),
+                    item_count: 1
+                },
+            ],
+            "ordered new, disappeared, unchanged"
+        );
+        let largest: Vec<Change> = ReleaseRepository::diff_largest_changes(
+            &mut *tx,
+            baseline,
+            target,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(largest.len(), 2, "limited");
+        let kept = page
+            .iter()
+            .find(|e| e.classification == "unchanged")
+            .unwrap()
+            .group_id;
+        assert_eq!(
+            (largest[0].group_id, largest[0].occurrence_delta),
+            (kept, 2),
+            "kept went from one to three"
+        );
+        let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let read_only: String = sqlx::query_scalar("SHOW transaction_read_only")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            (isolation.as_str(), read_only.as_str()),
+            ("repeatable read", "on")
+        );
+        tx.commit().await.unwrap();
     }
 }

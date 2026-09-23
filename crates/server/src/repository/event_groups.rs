@@ -1030,3 +1030,592 @@ mod tests {
         assert_eq!((first_seen, last_seen, count), (at(0), at(0), 2));
     }
 }
+
+#[cfg(test)]
+mod api_statement_tests {
+    use super::EventGroupRepository;
+    use crate::repository::EventRepository;
+    use crate::repository::test_support::{
+        correlated_termination, exec, exec_in_release, group_ids, ingest, manual_release, restarts,
+        tenant, user,
+    };
+    use chrono::{DateTime, Duration, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    #[derive(Debug, FromRow)]
+    struct Summary {
+        id: Uuid,
+        status: String,
+        event_kind: String,
+        last_seen_at: DateTime<Utc>,
+        occurrence_count: i64,
+        status_changed_by: Option<Uuid>,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Occurrence {
+        id: Uuid,
+        received_at: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Labels {
+        group_id: Uuid,
+        user_labels: serde_json::Value,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct PolicyState {
+        group_id: Uuid,
+        policy_evaluation: serde_json::Value,
+        actionable: bool,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Notification {
+        state: String,
+        delivery_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Evidence {
+        id: Uuid,
+        event_kind: String,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn page(
+        pool: &PgPool,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        event_kind: Option<String>,
+        release_id: Option<Uuid>,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        fetch_limit: i64,
+    ) -> Vec<Summary> {
+        EventGroupRepository::summary_page(
+            pool,
+            organization_id,
+            project_id,
+            application_id,
+            event_kind,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            release_id,
+            cursor.map(|c| c.0),
+            cursor.map(|c| c.1),
+            fetch_limit,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The list pages most recently seen first, honours its filters, resumes
+    /// after a cursor, and never crosses tenants.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_group_list_pages_filters_and_scopes(pool: PgPool) {
+        let own = tenant(&pool, "groups-list").await;
+        let other = tenant(&pool, "groups-list-other").await;
+        let now = Utc::now();
+        let release = manual_release(&pool, &own, "v1", now).await;
+        ingest(
+            &pool,
+            &own,
+            &[
+                exec(&own, "/bin/old", now - Duration::minutes(3)),
+                exec(&own, "/bin/mid", now - Duration::minutes(2)),
+                exec_in_release(&own, "/bin/new", "v1", now - Duration::minutes(1)),
+            ],
+        )
+        .await;
+        ingest(&pool, &other, &[exec(&other, "/bin/elsewhere", now)]).await;
+
+        let all = page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            None,
+            None,
+            10,
+        )
+        .await;
+        assert_eq!(all.len(), 3);
+        assert!(
+            all.windows(2)
+                .all(|w| w[0].last_seen_at >= w[1].last_seen_at)
+        );
+
+        let released = page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            Some(release),
+            None,
+            10,
+        )
+        .await;
+        assert_eq!(
+            released.len(),
+            1,
+            "the release filter keeps groups seen in it"
+        );
+
+        let none = page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            Some("network.connect".into()),
+            None,
+            None,
+            10,
+        )
+        .await;
+        assert!(
+            none.is_empty(),
+            "the event kind filter excludes other kinds"
+        );
+
+        let (at, id) = EventGroupRepository::list_cursor(
+            &pool,
+            all[0].id,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(id, all[0].id);
+        let rest = page(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            None,
+            None,
+            Some((at, id)),
+            10,
+        )
+        .await;
+        assert_eq!(
+            rest.iter().map(|s| s.id).collect::<Vec<_>>(),
+            all[1..].iter().map(|s| s.id).collect::<Vec<_>>()
+        );
+
+        assert!(
+            EventGroupRepository::list_cursor(
+                &pool,
+                all[0].id,
+                other.organization_id,
+                other.project_id,
+                other.application_id
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let summary: Summary = EventGroupRepository::summary(&pool, own.organization_id, all[0].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                summary.id,
+                summary.event_kind.as_str(),
+                summary.occurrence_count
+            ),
+            (all[0].id, "process.exec", all[0].occurrence_count)
+        );
+        assert!(
+            EventGroupRepository::summary::<_, Summary>(&pool, other.organization_id, all[0].id)
+                .await
+                .unwrap()
+                .is_none(),
+            "another organization cannot read the group"
+        );
+    }
+
+    /// A transition happens only from an allowed status; setting the status a
+    /// group already has keeps who changed it and when.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn status_changes_only_from_an_allowed_status(pool: PgPool) {
+        let own = tenant(&pool, "groups-status").await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let group = group_ids(&pool, &own).await[0];
+        let actor = user(&pool).await;
+        let other_actor = user(&pool).await;
+
+        assert_eq!(
+            EventGroupRepository::status(&pool, own.organization_id, group)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("open")
+        );
+        assert!(
+            EventGroupRepository::set_status::<_, Summary>(
+                &pool,
+                own.organization_id,
+                group,
+                "resolved",
+                actor,
+                &["acknowledged"]
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "open is not an allowed source for this transition"
+        );
+
+        let acknowledged: Summary = EventGroupRepository::set_status(
+            &pool,
+            own.organization_id,
+            group,
+            "acknowledged",
+            actor,
+            &["open"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (acknowledged.status.as_str(), acknowledged.status_changed_by),
+            ("acknowledged", Some(actor))
+        );
+
+        let repeated: Summary = EventGroupRepository::set_status(
+            &pool,
+            own.organization_id,
+            group,
+            "acknowledged",
+            other_actor,
+            &["open"],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            repeated.status_changed_by,
+            Some(actor),
+            "re-setting the same status keeps the original actor"
+        );
+    }
+
+    /// Occurrences page newest received first and resolve cursors only within
+    /// their group.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn occurrences_page_newest_first_within_their_group(pool: PgPool) {
+        let own = tenant(&pool, "groups-occurrences").await;
+        let now = Utc::now();
+        for minute in 0..3 {
+            ingest(
+                &pool,
+                &own,
+                &[exec(&own, "/bin/a", now - Duration::minutes(minute))],
+            )
+            .await;
+        }
+        let group = group_ids(&pool, &own).await[0];
+
+        let all: Vec<Occurrence> = EventGroupRepository::occurrence_page(
+            &pool,
+            own.organization_id,
+            group,
+            None,
+            None,
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(
+            all.windows(2)
+                .all(|w| (w[0].received_at, w[0].observed_at, w[0].id)
+                    > (w[1].received_at, w[1].observed_at, w[1].id))
+        );
+
+        let (received, observed, id) =
+            EventGroupRepository::occurrence_cursor(&pool, own.organization_id, group, all[0].id)
+                .await
+                .unwrap()
+                .unwrap();
+        let rest: Vec<Occurrence> = EventGroupRepository::occurrence_page(
+            &pool,
+            own.organization_id,
+            group,
+            Some(received),
+            Some(observed),
+            Some(id),
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rest.len(), 2);
+        assert!(
+            EventGroupRepository::occurrence_cursor(
+                &pool,
+                own.organization_id,
+                Uuid::new_v4(),
+                all[0].id
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "an event resolves only within its own group"
+        );
+
+        let single: Occurrence = EventRepository::occurrence(&pool, own.organization_id, all[1].id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(single.id, all[1].id);
+        assert!(
+            EventRepository::occurrence::<_, Occurrence>(&pool, Uuid::new_v4(), all[1].id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Labels attach to a group through its inventory item; the policy state
+    /// reads pending until a current evaluation exists.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn labels_and_policy_state_attach_to_groups(pool: PgPool) {
+        let own = tenant(&pool, "groups-attachments").await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let group = group_ids(&pool, &own).await[0];
+        let actor = user(&pool).await;
+        sqlx::query(
+            "INSERT INTO runtime_behavior_user_labels(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,display_name,created_by_user_id,updated_by_user_id) \
+             SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.identity_digest,'Shell',$2,$2 \
+             FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id WHERE gl.group_id=$1",
+        )
+        .bind(group)
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let labels: Vec<Labels> =
+            EventGroupRepository::user_labels(&pool, own.organization_id, vec![group])
+                .await
+                .unwrap();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].group_id, group);
+        assert_eq!(labels[0].user_labels[0]["display_name"], "Shell");
+        assert!(
+            EventGroupRepository::user_labels::<_, Labels>(&pool, Uuid::new_v4(), vec![group])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let version = crate::policy::POLICY_EVALUATOR_VERSION;
+        let states = |evaluator_version: i16| {
+            let pool = pool.clone();
+            async move {
+                EventGroupRepository::policy_states::<_, PolicyState>(
+                    &pool,
+                    own.organization_id,
+                    &[group],
+                    evaluator_version,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Ingestion evaluates a new group straight away.
+        let current = states(version).await;
+        assert_eq!(current[0].group_id, group);
+        assert_eq!(current[0].policy_evaluation["state"], "current");
+        assert_eq!(current[0].policy_evaluation["verdict"], "unclassified");
+        assert!(
+            current[0].actionable,
+            "an unclassified group needs a reaction"
+        );
+
+        // An evaluation from another evaluator version is not trusted.
+        let stale = states(version + 1).await;
+        assert_eq!(stale[0].policy_evaluation["state"], "evaluation_pending");
+        assert_eq!(
+            stale[0].policy_evaluation["reason_code"],
+            "evaluation_pending"
+        );
+        assert!(stale[0].policy_evaluation["verdict"].is_null());
+        assert!(stale[0].actionable);
+
+        sqlx::query("DELETE FROM runtime_group_policy_evaluations WHERE group_id=$1")
+            .bind(group)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let missing = states(version).await;
+        assert_eq!(missing[0].policy_evaluation["state"], "evaluation_pending");
+        assert!(missing[0].actionable);
+
+        sqlx::query(
+            "INSERT INTO runtime_group_policy_evaluations(organization_id,project_id,application_id,group_id,policy_state_version,evaluator_version,verdict,reason_code,explanation) \
+             VALUES($1,$2,$3,$4,0,$5,'expected','inside_placement','{}'::jsonb)",
+        )
+        .bind(own.organization_id)
+        .bind(own.project_id)
+        .bind(own.application_id)
+        .bind(group)
+        .bind(version)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let expected = states(version).await;
+        assert_eq!(expected[0].policy_evaluation["state"], "current");
+        assert_eq!(expected[0].policy_evaluation["verdict"], "expected");
+        assert_eq!(
+            expected[0].policy_evaluation["reason_code"],
+            "inside_placement"
+        );
+        assert!(
+            !expected[0].actionable,
+            "an expected verdict is not actionable"
+        );
+        assert!(
+            states(version).await.len() == 1
+                && EventGroupRepository::policy_states::<_, PolicyState>(
+                    &pool,
+                    Uuid::new_v4(),
+                    &[group],
+                    version,
+                )
+                .await
+                .unwrap()
+                .is_empty(),
+            "another organization sees nothing"
+        );
+    }
+
+    /// A new group's first-seen notification is pending until the outbox
+    /// processes it, and with no destinations it then reads not configured.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_notification_summary_follows_the_outbox(pool: PgPool) {
+        let own = tenant(&pool, "groups-notification").await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let group = group_ids(&pool, &own).await[0];
+
+        let pending: Notification =
+            EventGroupRepository::notification_summary(&pool, own.organization_id, group)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            (pending.state.as_str(), pending.delivery_count),
+            ("pending", 0)
+        );
+
+        sqlx::query("UPDATE outbox_messages SET processed_at=now() WHERE aggregate_id=$1")
+            .bind(group)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let processed: Notification =
+            EventGroupRepository::notification_summary(&pool, own.organization_id, group)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(processed.state, "not_configured");
+    }
+
+    /// A restart loop's evidence is its restart events; an event's evidence
+    /// is what it was correlated with.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn evidence_follows_projections_and_correlations(pool: PgPool) {
+        let own = tenant(&pool, "groups-evidence").await;
+        let now = Utc::now() - Duration::minutes(10);
+        let [kernel, lifecycle] = correlated_termination(&own, now);
+        ingest(&pool, &own, &[kernel.clone(), lifecycle.clone()]).await;
+        ingest(&pool, &own, &restarts(&own, now, 3)).await;
+
+        let loop_group: Uuid = sqlx::query_scalar(
+            "SELECT id FROM runtime_event_groups WHERE organization_id=$1 AND event_kind='container.restart_loop'",
+        )
+        .bind(own.organization_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let loop_evidence: Vec<Evidence> =
+            EventGroupRepository::related_evidence(&pool, own.organization_id, loop_group, 20)
+                .await
+                .unwrap();
+        assert_eq!(loop_evidence.len(), 3);
+        assert!(
+            loop_evidence
+                .iter()
+                .all(|e| e.event_kind == "container.restart")
+        );
+        let limited: Vec<Evidence> =
+            EventGroupRepository::related_evidence(&pool, own.organization_id, loop_group, 2)
+                .await
+                .unwrap();
+        assert_eq!(limited.len(), 2, "the limit applies");
+        assert!(
+            EventGroupRepository::related_evidence::<_, Evidence>(
+                &pool,
+                Uuid::new_v4(),
+                loop_group,
+                20
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+
+        let raw = |event_id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_events WHERE event_id=$1")
+                    .bind(event_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        let kernel_raw = raw(kernel.id).await;
+        let lifecycle_raw = raw(lifecycle.id).await;
+        let from_kernel: Vec<Evidence> =
+            EventRepository::related_evidence(&pool, own.organization_id, kernel_raw, 20)
+                .await
+                .unwrap();
+        assert_eq!(
+            from_kernel.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![lifecycle_raw]
+        );
+        let from_lifecycle: Vec<Evidence> =
+            EventRepository::related_evidence(&pool, own.organization_id, lifecycle_raw, 20)
+                .await
+                .unwrap();
+        assert_eq!(
+            from_lifecycle.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![kernel_raw],
+            "correlation reads both ways"
+        );
+    }
+}

@@ -216,3 +216,324 @@ impl DnsGroupRepository {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, SubsecRound, Utc};
+    use event_model::DnsQueryType;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::{DnsGroupFilter, DnsGroupRepository};
+    use crate::repository::test_support::{Tenant, dns, ingest, tenant};
+
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct Group {
+        display_name: String,
+        process_command: String,
+        grouping_reason: String,
+        confidence: String,
+        last_seen_at: DateTime<Utc>,
+        observation_count: i64,
+        variant_count: i64,
+        query_types: Vec<String>,
+        total_group_count: i64,
+        total_observation_count: i64,
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct Variant {
+        item_id: Uuid,
+        name: String,
+        query_type: String,
+        observation_count: i64,
+    }
+
+    fn filter(own: &Tenant) -> DnsGroupFilter<'static> {
+        DnsGroupFilter {
+            organization_id: own.organization_id,
+            project_id: own.project_id,
+            application_id: own.application_id,
+            release_id: None,
+            cluster_id: None,
+            namespace: None,
+            workload_kind: None,
+            workload_name: None,
+            container_name: None,
+            observed_from: None,
+            observed_to: None,
+            verdict: None,
+            suppressed: None,
+            evaluation_pending: None,
+        }
+    }
+
+    /// Ingests lookups from one pod: `api` resolves `s3.example.com` directly
+    /// and through a search-domain expansion, and `alone.example.cluster.local`
+    /// with no direct lookup to corroborate it; `worker` resolves
+    /// `s3.example.com` last. Returns the base time.
+    async fn seed(pool: &PgPool, own: &Tenant) -> DateTime<Utc> {
+        let base = (Utc::now() - Duration::hours(1)).trunc_subsecs(0);
+        let lookups = [
+            ("s3.example.com", DnsQueryType::A, "api", 0),
+            ("s3.example.com", DnsQueryType::Aaaa, "api", 1),
+            ("s3.example.com.cluster.local", DnsQueryType::A, "api", 2),
+            ("alone.example.cluster.local", DnsQueryType::A, "api", 3),
+            ("s3.example.com", DnsQueryType::A, "worker", 4),
+        ];
+        let events: Vec<_> = lookups
+            .into_iter()
+            .map(|(name, query_type, command, minute)| {
+                let mut value = dns(own, name, query_type, command);
+                value.observed_at = base + Duration::minutes(minute);
+                value.attribution.pod_uid = "resolver-pod".into();
+                value
+            })
+            .collect();
+        ingest(pool, own, &events).await;
+        base
+    }
+
+    async fn groups(
+        pool: &PgPool,
+        filter: DnsGroupFilter<'_>,
+        pattern: Option<&str>,
+        cursor: Option<&Group>,
+        fetch_limit: i64,
+    ) -> Vec<Group> {
+        DnsGroupRepository::groups(
+            pool,
+            filter,
+            pattern.map(str::to_owned),
+            cursor.map(|g| g.last_seen_at),
+            cursor.map(|g| g.display_name.as_str()),
+            cursor.map(|g| g.process_command.as_str()),
+            fetch_limit,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn keys(rows: &[Group]) -> Vec<(&str, &str)> {
+        rows.iter()
+            .map(|g| (g.display_name.as_str(), g.process_command.as_str()))
+            .collect()
+    }
+
+    /// Groups fold a corroborated search-domain expansion into its name per
+    /// process, page newest sighting first with whole-set totals on every row,
+    /// and the pattern matches display and exact names alike.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn groups_normalize_page_and_search(pool: PgPool) {
+        let own = tenant(&pool, "dns-groups-page").await;
+        let base = seed(&pool, &own).await;
+
+        let all = groups(&pool, filter(&own), None, None, 10).await;
+        assert_eq!(
+            keys(&all),
+            [
+                ("s3.example.com", "worker"),
+                ("alone.example.cluster.local", "api"),
+                ("s3.example.com", "api"),
+            ]
+        );
+        let expanded = &all[2];
+        assert_eq!(expanded.grouping_reason, "kubernetes_search_expansion");
+        assert_eq!(expanded.confidence, "high");
+        assert_eq!((expanded.observation_count, expanded.variant_count), (3, 3));
+        assert_eq!(expanded.query_types, ["A", "AAAA"]);
+        assert_eq!(expanded.last_seen_at, base + Duration::minutes(2));
+        assert_eq!(
+            (all[1].grouping_reason.as_str(), all[1].confidence.as_str()),
+            ("canonical_name", "exact")
+        );
+        assert!(
+            all.iter()
+                .all(|g| (g.total_group_count, g.total_observation_count) == (3, 5))
+        );
+
+        let first = groups(&pool, filter(&own), None, None, 2).await;
+        assert_eq!(keys(&first), keys(&all[..2]));
+        let rest = groups(&pool, filter(&own), None, Some(&first[1]), 2).await;
+        assert_eq!(keys(&rest), keys(&all[2..]));
+        assert_eq!(rest[0].total_group_count, 3, "totals ignore the cursor");
+
+        let searched = groups(&pool, filter(&own), Some("%ALONE%"), None, 10).await;
+        assert_eq!(keys(&searched), [("alone.example.cluster.local", "api")]);
+        assert_eq!(searched[0].total_group_count, 1);
+        let by_exact = groups(&pool, filter(&own), Some("%.cluster.local"), None, 10).await;
+        assert_eq!(
+            keys(&by_exact),
+            [
+                ("alone.example.cluster.local", "api"),
+                ("s3.example.com", "api"),
+            ],
+            "a folded exact name still matches"
+        );
+    }
+
+    /// The tenant path and each dimension filter narrow the observations the
+    /// groups are built from.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn filters_narrow_the_observations(pool: PgPool) {
+        let own = tenant(&pool, "dns-groups-filters").await;
+        let base = seed(&pool, &own).await;
+        let stranger = tenant(&pool, "dns-groups-stranger").await;
+        assert!(
+            groups(&pool, filter(&stranger), None, None, 10)
+                .await
+                .is_empty()
+        );
+
+        let late = DnsGroupFilter {
+            observed_from: Some(base + Duration::minutes(3)),
+            ..filter(&own)
+        };
+        let recent = groups(&pool, late, None, None, 10).await;
+        assert_eq!(
+            keys(&recent),
+            [
+                ("s3.example.com", "worker"),
+                ("alone.example.cluster.local", "api"),
+            ]
+        );
+        let early = DnsGroupFilter {
+            observed_to: Some(base + Duration::minutes(1)),
+            ..filter(&own)
+        };
+        let before = groups(&pool, early, None, None, 10).await;
+        assert_eq!(keys(&before), [("s3.example.com", "api")]);
+        assert_eq!(before[0].grouping_reason, "canonical_name");
+
+        for narrowed in [
+            DnsGroupFilter {
+                namespace: Some("staging"),
+                ..filter(&own)
+            },
+            DnsGroupFilter {
+                workload_name: Some("other"),
+                ..filter(&own)
+            },
+            DnsGroupFilter {
+                container_name: Some("sidecar"),
+                ..filter(&own)
+            },
+            DnsGroupFilter {
+                cluster_id: Some(Uuid::new_v4()),
+                ..filter(&own)
+            },
+            DnsGroupFilter {
+                release_id: Some(Uuid::new_v4()),
+                ..filter(&own)
+            },
+            DnsGroupFilter {
+                suppressed: Some(true),
+                ..filter(&own)
+            },
+        ] {
+            assert!(groups(&pool, narrowed, None, None, 10).await.is_empty());
+        }
+        let matching = DnsGroupFilter {
+            namespace: Some("production"),
+            workload_kind: Some("Deployment"),
+            workload_name: Some("app"),
+            container_name: Some("app"),
+            cluster_id: Some(own.cluster_id),
+            suppressed: Some(false),
+            ..filter(&own)
+        };
+        assert_eq!(groups(&pool, matching, None, None, 10).await.len(), 3);
+    }
+
+    /// The distribution ranks groups by observations, then name and process.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn the_distribution_ranks_by_observations(pool: PgPool) {
+        let own = tenant(&pool, "dns-groups-distribution").await;
+        seed(&pool, &own).await;
+        let ranked: Vec<Group> = DnsGroupRepository::distribution(&pool, filter(&own), None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            keys(&ranked),
+            [
+                ("s3.example.com", "api"),
+                ("alone.example.cluster.local", "api"),
+            ]
+        );
+        assert_eq!(ranked[0].total_group_count, 3, "totals ignore the limit");
+        let searched: Vec<Group> =
+            DnsGroupRepository::distribution(&pool, filter(&own), Some("s3%".into()), 10)
+                .await
+                .unwrap();
+        assert_eq!(
+            keys(&searched),
+            [("s3.example.com", "api"), ("s3.example.com", "worker")]
+        );
+    }
+
+    /// A group's variants are its exact name and query-type items, paged by
+    /// item id; an unknown group has none.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn variants_page_by_item(pool: PgPool) {
+        let own = tenant(&pool, "dns-groups-variants").await;
+        seed(&pool, &own).await;
+        let page = |cursor: Option<Uuid>, limit: i64| {
+            let pool = pool.clone();
+            async move {
+                DnsGroupRepository::variants::<_, Variant>(
+                    &pool,
+                    filter(&own),
+                    "s3.example.com",
+                    "api",
+                    cursor,
+                    limit,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let all = page(None, 10).await;
+        let mut shape: Vec<_> = all
+            .iter()
+            .map(|v| (v.name.as_str(), v.query_type.as_str(), v.observation_count))
+            .collect();
+        shape.sort_unstable();
+        assert_eq!(
+            shape,
+            [
+                ("s3.example.com", "A", 1),
+                ("s3.example.com", "AAAA", 1),
+                ("s3.example.com.cluster.local", "A", 1),
+            ]
+        );
+        let ids: Vec<Uuid> = all.iter().map(|v| v.item_id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted);
+        let first = page(None, 2).await;
+        let rest = page(Some(first[1].item_id), 2).await;
+        assert_eq!(
+            first
+                .iter()
+                .chain(&rest)
+                .map(|v| v.item_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+        let worker: Vec<Variant> = DnsGroupRepository::variants(
+            &pool,
+            filter(&own),
+            "s3.example.com",
+            "missing",
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert!(worker.is_empty());
+    }
+}

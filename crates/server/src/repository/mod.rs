@@ -38,6 +38,9 @@ pub mod releases;
 pub mod sessions;
 pub mod users;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use applications::ApplicationRepository;
 pub use event_groups::{EventGroupRepository, GroupKey};
 pub use events::{EventRepository, StoredEvent};
