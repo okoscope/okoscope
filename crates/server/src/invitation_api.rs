@@ -1,7 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::MembershipRepository;
 use crate::repository::UserRepository;
-use crate::repository::users::ACTIVE;
 use std::{fmt, str::FromStr};
 
 use axum::{
@@ -1704,10 +1703,7 @@ async fn activate_first_owner(
     invitation: &InvitationRow,
 ) -> Result<(), sqlx::Error> {
     if invitation.project_id.is_none() && invitation.role == "owner" {
-        sqlx::query(&format!(
-            "UPDATE organizations SET status='active',updated_at=now() WHERE id=$1 AND status='pending_owner' AND EXISTS(SELECT 1 FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.role='owner' AND {ACTIVE})"
-        ))
-            .bind(invitation.organization_id).execute(&mut **tx).await?;
+        OrganizationRepository::activate_when_owned(&mut **tx, invitation.organization_id).await?;
     }
     Ok(())
 }

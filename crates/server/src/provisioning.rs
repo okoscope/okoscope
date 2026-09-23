@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::OrganizationStatus;
 use crate::repository::UserRepository;
 use axum::{
     Extension, Json, Router,
@@ -596,15 +597,23 @@ async fn create_organization(
                 })?;
         return Ok((StatusCode::OK, Json(organization)));
     }
-    let organization: OrganizationResponse = sqlx::query_as(
-        "INSERT INTO organizations(id,slug,name) VALUES($1,$2,$3) RETURNING id,slug,name,created_at",
+    let stored = OrganizationRepository::insert(
+        &mut *tx,
+        Uuid::new_v4(),
+        &input.slug,
+        &input.name,
+        OrganizationStatus::Active,
     )
-    .bind(Uuid::new_v4())
-    .bind(input.slug)
-    .bind(input.name)
-    .fetch_one(&mut *tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id))?;
+    .map_err(|error| {
+        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
+    })?;
+    let organization = OrganizationResponse {
+        id: stored.id,
+        slug: stored.slug,
+        name: stored.name,
+        created_at: stored.created_at,
+    };
     complete_idempotency(&mut tx, &idempotency, organization.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
         ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)

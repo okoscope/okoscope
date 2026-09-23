@@ -15,6 +15,7 @@ use crate::repository::MembershipRepository;
 use crate::repository::ProjectRepository;
 use crate::repository::SessionRepository;
 use crate::repository::event_groups::aggregates;
+use crate::repository::{OrganizationRepository, OrganizationStatus};
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     access_control::{
@@ -595,14 +596,23 @@ async fn create_platform_organization(
         .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
     let organization_id = Uuid::new_v4();
     let status = if matches!(input.ownership, PlatformOwnership::SelfOwner) {
-        "active"
+        OrganizationStatus::Active
     } else {
-        "pending_owner"
+        OrganizationStatus::PendingOwner
     };
-    let organization: PlatformOrganization = sqlx::query_as("INSERT INTO organizations(id,slug,name,status) VALUES($1,$2,$3,$4) RETURNING id,slug,name,status,created_at,updated_at")
-        .bind(organization_id).bind(&input.slug).bind(&input.name).bind(status)
-        .fetch_one(&mut *tx).await
-        .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
+    let stored =
+        OrganizationRepository::insert(&mut *tx, organization_id, &input.slug, &input.name, status)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id).into_response())?;
+    let organization = PlatformOrganization {
+        id: stored.id,
+        slug: stored.slug,
+        name: stored.name,
+        status: stored.status,
+        created_at: stored.created_at,
+        updated_at: stored.updated_at,
+        current_owner_invitation: None,
+    };
     let invitation = match input.ownership {
         PlatformOwnership::SelfOwner => {
             MembershipRepository::insert_organization_role(
@@ -671,8 +681,7 @@ async fn validate_platform_organization(
         ));
     }
     if state.config.organization_mode == OrganizationMode::Single {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations)")
-            .fetch_one(&state.pool)
+        let exists = OrganizationRepository::any_exists(&state.pool)
             .await
             .map_err(|error| AccessError::database(&error, request_id))?;
         if exists {
@@ -697,9 +706,10 @@ async fn delete_platform_organization(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    let deleted = sqlx::query("DELETE FROM organizations WHERE id=$1 AND status='pending_owner' AND NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=$1)")
-        .bind(organization_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
-    if deleted.rows_affected() == 0 {
+    let deleted = OrganizationRepository::discard_unclaimed(&mut *tx, organization_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
+    if !deleted {
         return Err(AccessError::conflict(
             ErrorCode::ORGANIZATION_NOT_DELETABLE,
             &request_id,

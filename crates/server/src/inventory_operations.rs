@@ -300,10 +300,9 @@ async fn lock_project(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT id FROM organizations WHERE id=$1 FOR SHARE")
-        .bind(organization_id)
-        .fetch_one(&mut **tx)
-        .await?;
+    if !crate::repository::OrganizationRepository::lock_shared(&mut **tx, organization_id).await? {
+        return Err(sqlx::Error::RowNotFound);
+    }
     sqlx::query("SELECT id FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE")
         .bind(organization_id)
         .bind(project_id)
