@@ -26,6 +26,25 @@ pub struct StoredEvent {
 pub struct EventRepository;
 
 impl EventRepository {
+    /// When the application's earliest and latest retained events were
+    /// received; both `None` when it has none.
+    pub async fn received_window<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<(Option<DateTime<Utc>>, Option<DateTime<Utc>>), sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>("SELECT min(received_at),max(received_at) FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// One raw event as an occurrence, within the organization.
     pub async fn occurrence<'e, E, T>(
         executor: E,

@@ -45,6 +45,90 @@ pub struct LockedProject {
 pub struct ProjectRepository;
 
 impl ProjectRepository {
+    /// The organization's first 200 projects, oldest first.
+    ///
+    /// Selects `id`, `organization_id`, `slug`, `name` and `created_at`.
+    pub async fn summaries<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,organization_id,slug,name,created_at FROM projects WHERE organization_id=$1 ORDER BY created_at,id LIMIT 200")
+            .bind(organization_id)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// One project of the organization with the columns of
+    /// [`Self::summaries`]. Fails with `RowNotFound` when there is none.
+    pub async fn summary<'e, E, T>(
+        executor: E,
+        project_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,organization_id,slug,name,created_at FROM projects WHERE id=$1 AND organization_id=$2")
+            .bind(project_id)
+            .bind(organization_id)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// Reports whether a project with this id exists in any organization.
+    pub async fn exists<'e, E>(executor: E, project_id: Uuid) -> Result<bool, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1)")
+            .bind(project_id)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// The project's organization and name.
+    pub async fn organization_and_name<'e, E>(
+        executor: E,
+        project_id: Uuid,
+    ) -> Result<Option<(Uuid, String)>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_as::<_, (Uuid, String)>("SELECT organization_id,name FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// A page of the organization's projects by id, after the cursor when
+    /// one is given, for platform administration, with their application and
+    /// runtime group counts.
+    ///
+    /// Selects `id`, `slug`, `name`, `created_at`, `archived_at`,
+    /// `application_count` and `runtime_group_count`.
+    pub async fn platform_page<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        cursor: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, crate::repository::event_groups::aggregates::COUNT_ALL_FOR_PROJECT))
+            .bind(organization_id)
+            .bind(cursor)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
     /// Reports whether the project exists within the organization.
     ///
     /// `false` covers both "no such project" and "belongs to another
@@ -361,6 +445,112 @@ mod tests {
     async fn reports_an_unknown_project_as_absent(pool: PgPool) {
         assert_eq!(
             ProjectRepository::organization_of(&pool, Uuid::new_v4())
+                .await
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod platform_statement_tests {
+    use chrono::Utc;
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    use super::ProjectRepository;
+    use crate::repository::ApplicationRepository;
+    use crate::repository::test_support::{exec, ingest, tenant};
+
+    #[derive(Debug, FromRow)]
+    struct PlatformProject {
+        id: Uuid,
+        slug: String,
+        application_count: i64,
+        runtime_group_count: i64,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Project {
+        id: Uuid,
+        organization_id: Uuid,
+        name: String,
+    }
+
+    /// Platform pages carry application and runtime group counts; the
+    /// summaries list an organization's projects oldest first; single reads
+    /// stay within the organization.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn projects_page_list_and_resolve(pool: PgPool) {
+        let own = tenant(&pool, "projects-platform").await;
+        let other = tenant(&pool, "projects-platform-other").await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let extra =
+            ProjectRepository::insert(&pool, Uuid::new_v4(), own.organization_id, "extra", "Extra")
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+        ApplicationRepository::insert(&pool, Uuid::new_v4(), extra, "one", "One")
+            .await
+            .unwrap();
+        ApplicationRepository::insert(&pool, Uuid::new_v4(), extra, "two", "Two")
+            .await
+            .unwrap();
+        let mut by_id = vec![own.project_id, extra];
+        by_id.sort();
+
+        let page: Vec<PlatformProject> =
+            ProjectRepository::platform_page(&pool, own.organization_id, None, 10)
+                .await
+                .unwrap();
+        assert_eq!(page.iter().map(|p| p.id).collect::<Vec<_>>(), by_id);
+        let counts = |id: Uuid| {
+            let p = page.iter().find(|p| p.id == id).unwrap();
+            (p.slug.as_str(), p.application_count, p.runtime_group_count)
+        };
+        assert_eq!(counts(own.project_id), ("project", 1, 1));
+        assert_eq!(counts(extra), ("extra", 2, 0));
+        let after: Vec<PlatformProject> =
+            ProjectRepository::platform_page(&pool, own.organization_id, Some(by_id[0]), 10)
+                .await
+                .unwrap();
+        assert_eq!(after.iter().map(|p| p.id).collect::<Vec<_>>(), by_id[1..]);
+
+        let listed: Vec<Project> = ProjectRepository::summaries(&pool, own.organization_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.iter().map(|p| p.id).collect::<Vec<_>>(),
+            [own.project_id, extra]
+        );
+        let one: Project = ProjectRepository::summary(&pool, extra, own.organization_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            (one.organization_id, one.name.as_str()),
+            (own.organization_id, "Extra")
+        );
+        assert!(matches!(
+            ProjectRepository::summary::<_, Project>(&pool, extra, other.organization_id).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
+
+        assert!(ProjectRepository::exists(&pool, extra).await.unwrap());
+        assert!(
+            !ProjectRepository::exists(&pool, Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            ProjectRepository::organization_and_name(&pool, extra)
+                .await
+                .unwrap(),
+            Some((own.organization_id, "Extra".to_owned()))
+        );
+        assert_eq!(
+            ProjectRepository::organization_and_name(&pool, Uuid::new_v4())
                 .await
                 .unwrap(),
             None
