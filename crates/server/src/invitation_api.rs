@@ -887,13 +887,7 @@ async fn validate_issue_target(
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
     let target_exists: bool = if let Some(project_id) = request.scope.project_id {
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1 AND organization_id=$2)",
-        )
-        .bind(project_id)
-        .bind(request.scope.organization_id)
-        .fetch_one(&mut **tx)
-        .await
+        ProjectRepository::exists_in(&mut **tx, request.scope.organization_id, project_id).await
     } else {
         OrganizationRepository::exists(&mut **tx, request.scope.organization_id).await
     }

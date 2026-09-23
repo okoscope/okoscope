@@ -525,11 +525,7 @@ async fn ensure_project(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE organization_id=$1 AND id=$2)")
-        .bind(organization_id)
-        .bind(project_id)
-        .fetch_one(pool)
-        .await
+    crate::repository::ProjectRepository::exists_in(pool, organization_id, project_id).await
 }
 
 async fn cursor_position(

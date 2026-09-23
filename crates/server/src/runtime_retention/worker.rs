@@ -42,16 +42,10 @@ pub async fn lock_project(
     org: Uuid,
     project: Uuid,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-    // A missing organization is not an error here: the project lookup below
-    // cannot find a row without one, and reports that itself.
-    crate::repository::OrganizationRepository::lock_shared(&mut **tx, org).await?;
-    sqlx::query_scalar(
-        "SELECT runtime_closed_before FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE",
-    )
-    .bind(org)
-    .bind(project)
-    .fetch_one(&mut **tx)
-    .await
+    crate::repository::ProjectRepository::lock_for_update(tx, org, project)
+        .await?
+        .map(|locked| locked.runtime_closed_before)
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 pub async fn run(pool: PgPool, mut shutdown: tokio::sync::watch::Receiver<bool>) {

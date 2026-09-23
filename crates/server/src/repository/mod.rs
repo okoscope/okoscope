@@ -29,6 +29,6 @@ pub use event_groups::{EventGroupRepository, GroupKey};
 pub use events::{EventRepository, StoredEvent};
 pub use memberships::MembershipRepository;
 pub use organizations::{OrganizationRepository, OrganizationStatus, StoredOrganization};
-pub use projects::ProjectRepository;
+pub use projects::{LockedProject, ProjectRepository, StoredProject};
 pub use sessions::SessionRepository;
 pub use users::UserRepository;

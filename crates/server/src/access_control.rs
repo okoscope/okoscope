@@ -58,13 +58,8 @@ pub async fn resolve_project_access(
     organization_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<EffectiveProjectAccess>, sqlx::Error> {
-    let project_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1 AND organization_id=$2)",
-    )
-    .bind(project_id)
-    .bind(organization_id)
-    .fetch_one(pool)
-    .await?;
+    let project_exists =
+        crate::repository::ProjectRepository::exists_in(pool, organization_id, project_id).await?;
     if !project_exists {
         return Ok(None);
     }

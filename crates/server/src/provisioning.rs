@@ -1,6 +1,6 @@
 use crate::error_code::ErrorCode;
-use crate::repository::OrganizationStatus;
 use crate::repository::UserRepository;
+use crate::repository::{OrganizationStatus, ProjectRepository};
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -671,9 +671,27 @@ async fn create_project(
             &request_id,
         ));
     }
-    let project: ProjectResponse = sqlx::query_as("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,$3,$4) RETURNING id,organization_id,slug,name,created_at")
-        .bind(Uuid::new_v4()).bind(organization_id).bind(input.slug).bind(input.name)
-        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,ErrorCode::PROJECT_SLUG_CONFLICT,&request_id))?;
+    // The existence check above makes `None` a race with a concurrent
+    // deletion, which is reported the same way that check reports it.
+    let stored = ProjectRepository::insert(
+        &mut *tx,
+        Uuid::new_v4(),
+        organization_id,
+        &input.slug,
+        &input.name,
+    )
+    .await
+    .map_err(|error| {
+        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
+    })?
+    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::ORGANIZATION_NOT_FOUND, &request_id))?;
+    let project = ProjectResponse {
+        id: stored.id,
+        organization_id: stored.organization_id,
+        slug: stored.slug,
+        name: stored.name,
+        created_at: stored.created_at,
+    };
     complete_idempotency(&mut tx, &idempotency, project.id, &request_id).await?;
     tx.commit().await.map_err(|error| {
         ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
