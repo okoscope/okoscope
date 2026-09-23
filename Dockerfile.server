@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.91-bookworm AS chef
+RUN rustup toolchain install 1.91.0 --profile minimal
+ENV RUSTUP_TOOLCHAIN=1.91.0
+RUN cargo install cargo-chef --locked --version 0.1.73
+WORKDIR /src
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+ARG OKOSCOPE_GIT_COMMIT=unknown
+ENV OKOSCOPE_GIT_COMMIT=${OKOSCOPE_GIT_COMMIT}
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --locked --release -p server --recipe-path recipe.json
+COPY . .
+RUN cargo build --locked --release -p server \
+    && cp /src/target/release/server /tmp/okoscope-server
+
+FROM debian:bookworm-slim
+RUN useradd --system --uid 10001 okoscope
+COPY --from=builder /tmp/okoscope-server /usr/local/bin/okoscope-server
+USER 10001
+ENTRYPOINT ["/usr/local/bin/okoscope-server"]

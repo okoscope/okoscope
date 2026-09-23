@@ -1,0 +1,56 @@
+enabled: true
+image:
+  repository: ghcr.io/okoscope/okoscope-agent
+  tag: "0000000000000000000000000000000000000000"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+server:
+  endpoint: ""
+  developmentPlaintext: false
+  caSecret:
+    name: ""
+    key: ca.crt
+identity:
+  clusterName: ""
+workloads: []
+observation:
+  processExec: true
+  processExit: true
+  syscalls: []
+  files:
+    enabled: false
+    operations: [create, modify, delete, rename]
+    includePaths: []
+    excludePaths: []
+  network:
+    connect: true
+    listen: true
+    accept: true
+    maxAcceptedEventsPerSecond: 25
+    dns:
+      enabled: false
+      udp: true
+      tcp: true
+  resources:
+    enabled: false
+    sampleIntervalSeconds: 15
+    aggregationIntervalSeconds: 60
+    maxCgroupStates: 4096
+    maxOpenAggregates: 1024
+    queueCapacity: 256
+    batchSize: 64
+safety:
+  queueCapacity: 4096
+  batchSize: 256
+  maxEventsPerSecond: 1000
+  maxApplicationStreams: 32
+resources:
+  requests: {cpu: 100m, memory: 96Mi}
+  limits: {cpu: 500m, memory: 512Mi}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}

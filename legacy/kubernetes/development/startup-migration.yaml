@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-server
+data:
+  OKOSCOPE_MIGRATE: "true"
+

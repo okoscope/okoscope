@@ -1,0 +1,64 @@
+# Dependency policy enforced by `cargo deny check`, in CI on every pull request
+# and again on a weekly schedule. The schedule matters: an advisory is
+# published against dependencies that have not changed, so a pull-request gate
+# alone leaves a quiet week uncovered.
+
+[graph]
+# Check every platform the project ships to rather than only the host, so a
+# Linux-only advisory is not missed by a run on another runner.
+all-features = true
+
+[advisories]
+yanked = "deny"
+# No exemptions. cargo-audit reports two findings this check does not, because
+# it scans Cargo.lock while this walks the resolved dependency graph: rsa
+# (RUSTSEC-2023-0071, no fix available) is reachable only through the
+# unbuilt sqlx-mysql backend, and the yanked chacha20 0.10.1 through a rand
+# version nothing builds. Neither is compiled or shipped, so neither needs
+# excusing here. Add an entry only with a reason that says why the advisory
+# cannot affect this project.
+ignore = []
+
+[licenses]
+# The project ships under Apache-2.0, so every dependency must be permissive.
+# Copyleft is deliberately absent from this list: r-efi offers
+# LGPL-2.1-or-later but is multi-licensed, and resolving it to MIT or
+# Apache-2.0 is what keeps it acceptable. A dependency that offers only a
+# copyleft license will fail this check, which is the intent.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions are reported rather than rejected. The tree currently
+# carries several, most of them transitive and outside this project's control
+# (rand, getrandom, hashbrown, and the windows-* family). Denying them would
+# block unrelated changes; warning keeps the growth visible.
+multiple-versions = "warn"
+# A `*` version requirement on a third-party crate deserves to fail a build,
+# but this cannot be "deny" yet: the workspace crates depend on each other by
+# path, and allow-wildcard-paths does not cover a crate that could be
+# published. None of them sets `publish = false`, though none can be published
+# either, since cargo refuses a path dependency without a version. Marking the
+# internal crates `publish = false` would state that and let this become
+# "deny"; that is a decision about intent, not a lint fix, so it is left alone
+# and this stays a warning.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

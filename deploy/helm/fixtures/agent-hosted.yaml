@@ -1,0 +1,9 @@
+server:
+  endpoint: https://grpc.okoscope.example:443
+identity:
+  clusterName: production
+workloads:
+  - namespace: production
+    kind: Deployment
+    name: payment-api
+    credentialSecret: {name: okoscope-application-credentials, key: payment-api}

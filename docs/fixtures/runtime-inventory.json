@@ -1,0 +1,201 @@
+{
+  "summary": {
+    "identity_version": 1,
+    "item_count": 5,
+    "occurrence_count": 144,
+    "first_seen_at": "2026-08-17T10:00:00Z",
+    "last_seen_at": "2026-08-18T10:00:00Z",
+    "kinds": [
+      {"kind": "process", "item_count": 1, "occurrence_count": 12},
+      {"kind": "destination", "item_count": 1, "occurrence_count": 24},
+      {"kind": "domain", "item_count": 1, "occurrence_count": 30},
+      {"kind": "syscall", "item_count": 1, "occurrence_count": 60},
+      {"kind": "inbound_endpoint", "item_count": 1, "occurrence_count": 18}
+    ]
+  },
+  "page": {
+    "items": [
+      {
+        "id": "10000000-0000-4000-8000-000000000001",
+        "project_id": "20000000-0000-4000-8000-000000000001",
+        "application_id": "30000000-0000-4000-8000-000000000001",
+        "inventory_kind": "process",
+        "identity_version": 1,
+        "semantic_summary": {"executable": "/app/payments"},
+        "first_seen_at": "2026-08-17T10:00:00Z",
+        "last_seen_at": "2026-08-18T10:00:00Z",
+        "occurrence_count": 12,
+        "release_count": 2,
+        "cluster_count": 2,
+        "namespace_count": 2,
+        "workload_count": 2,
+        "pod_count": 8,
+        "container_count": 1,
+        "group_count": 2
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000002",
+        "project_id": "20000000-0000-4000-8000-000000000001",
+        "application_id": "30000000-0000-4000-8000-000000000001",
+        "inventory_kind": "destination",
+        "identity_version": 1,
+        "semantic_summary": {"process_command": "payments", "address_family": "ipv4", "destination_address": "203.0.113.7", "destination_port": 443},
+        "first_seen_at": "2026-08-17T10:01:00Z",
+        "last_seen_at": "2026-08-18T09:59:00Z",
+        "occurrence_count": 24,
+        "release_count": 2,
+        "cluster_count": 2,
+        "namespace_count": 2,
+        "workload_count": 2,
+        "pod_count": 8,
+        "container_count": 1,
+        "group_count": 2
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000003",
+        "project_id": "20000000-0000-4000-8000-000000000001",
+        "application_id": "30000000-0000-4000-8000-000000000001",
+        "inventory_kind": "domain",
+        "identity_version": 1,
+        "semantic_summary": {"process_command": "payments", "name": "api.example.com", "query_type": "A"},
+        "first_seen_at": "2026-08-17T10:01:00Z",
+        "last_seen_at": "2026-08-18T09:59:00Z",
+        "occurrence_count": 30,
+        "release_count": 2,
+        "cluster_count": 2,
+        "namespace_count": 2,
+        "workload_count": 2,
+        "pod_count": 8,
+        "container_count": 1,
+        "group_count": 4
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000004",
+        "project_id": "20000000-0000-4000-8000-000000000001",
+        "application_id": "30000000-0000-4000-8000-000000000001",
+        "inventory_kind": "syscall",
+        "identity_version": 1,
+        "semantic_summary": {"process_command": "payments", "syscall": "epoll_wait"},
+        "first_seen_at": "2026-08-17T10:01:00Z",
+        "last_seen_at": "2026-08-18T09:59:00Z",
+        "occurrence_count": 60,
+        "release_count": 2,
+        "cluster_count": 2,
+        "namespace_count": 2,
+        "workload_count": 2,
+        "pod_count": 8,
+        "container_count": 1,
+        "group_count": 2
+      },
+      {
+        "id": "10000000-0000-4000-8000-000000000005",
+        "project_id": "20000000-0000-4000-8000-000000000001",
+        "application_id": "30000000-0000-4000-8000-000000000001",
+        "inventory_kind": "inbound_endpoint",
+        "identity_version": 1,
+        "semantic_summary": {"transport": "tcp", "address_family": "ipv4", "local_address": "0.0.0.0", "local_port": 8080, "listener_observed": true, "accept_observed": true},
+        "first_seen_at": "2026-08-17T10:01:00Z",
+        "last_seen_at": "2026-08-18T09:59:00Z",
+        "occurrence_count": 18,
+        "release_count": 2,
+        "cluster_count": 2,
+        "namespace_count": 2,
+        "workload_count": 2,
+        "pod_count": 8,
+        "container_count": 1,
+        "group_count": 2
+      }
+    ],
+    "next_cursor": "10000000-0000-4000-8000-000000000005"
+  },
+  "next_page": {"items": [], "next_cursor": null},
+  "empty": {"items": [], "next_cursor": null},
+  "release_presence": {
+    "items": [
+      {"release_id": "40000000-0000-4000-8000-000000000001", "release_display_name": "Payments 2.14.0", "version": "2.14.0", "deployed_at": "2026-08-18T09:00:00Z", "presence": "observed", "occurrence_count": 8, "first_seen_at": "2026-08-18T09:01:00Z", "last_seen_at": "2026-08-18T10:00:00Z", "release_evidence_count": 55},
+      {"release_id": "40000000-0000-4000-8000-000000000002", "release_display_name": "Payments 2.13.0", "version": "2.13.0", "deployed_at": "2026-08-17T09:00:00Z", "presence": "not_observed", "occurrence_count": null, "first_seen_at": null, "last_seen_at": null, "release_evidence_count": 48},
+      {"release_id": "40000000-0000-4000-8000-000000000003", "release_display_name": "Payments 2.12.0", "version": "2.12.0", "deployed_at": "2026-08-16T09:00:00Z", "presence": "unknown", "occurrence_count": null, "first_seen_at": null, "last_seen_at": null, "release_evidence_count": 0}
+    ],
+    "next_cursor": null
+  },
+  "filtered_summary": {
+    "identity_version": 1,
+    "item_count": 1,
+    "occurrence_count": 12,
+    "first_seen_at": "2026-08-17T10:00:00Z",
+    "last_seen_at": "2026-08-18T10:00:00Z",
+    "kinds": [
+      {"kind": "process", "item_count": 1, "occurrence_count": 12},
+      {"kind": "destination", "item_count": 0, "occurrence_count": 0},
+      {"kind": "domain", "item_count": 0, "occurrence_count": 0},
+      {"kind": "syscall", "item_count": 0, "occurrence_count": 0}
+    ]
+  },
+  "item_details": {
+    "process": {
+      "id": "10000000-0000-4000-8000-000000000001", "project_id": "20000000-0000-4000-8000-000000000001", "application_id": "30000000-0000-4000-8000-000000000001", "inventory_kind": "process", "identity_version": 1,
+      "semantic_summary": {"executable": "/app/payments"}, "first_seen_at": "2026-08-17T10:00:00Z", "last_seen_at": "2026-08-18T10:00:00Z", "occurrence_count": 12, "release_count": 2, "cluster_count": 2, "namespace_count": 2, "workload_count": 2, "pod_count": 8, "container_count": 1, "group_count": 2,
+      "evidence": {"releases": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000001/releases", "sightings": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000001/sightings", "groups": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000001/groups", "occurrences": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000001/occurrences"},
+      "policy_placement_summary": {"placement_count": 0, "evaluation_pending": 0, "verdicts": {"expected": 0, "requires_review": 0, "policy_conflict": 0, "unclassified": 0}}
+    },
+    "destination": {"id": "10000000-0000-4000-8000-000000000002", "project_id": "20000000-0000-4000-8000-000000000001", "application_id": "30000000-0000-4000-8000-000000000001", "inventory_kind": "destination", "identity_version": 1, "semantic_summary": {"process_command": "payments", "address_family": "ipv4", "destination_address": "203.0.113.7", "destination_port": 443}, "first_seen_at": "2026-08-17T10:01:00Z", "last_seen_at": "2026-08-18T09:59:00Z", "occurrence_count": 24, "release_count": 2, "cluster_count": 2, "namespace_count": 2, "workload_count": 2, "pod_count": 8, "container_count": 1, "group_count": 2, "evidence": {"releases": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000002/releases", "sightings": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000002/sightings", "groups": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000002/groups", "occurrences": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000002/occurrences"}, "policy_placement_summary": {"placement_count": 0, "evaluation_pending": 0, "verdicts": {"expected": 0, "requires_review": 0, "policy_conflict": 0, "unclassified": 0}}},
+    "domain": {"id": "10000000-0000-4000-8000-000000000003", "project_id": "20000000-0000-4000-8000-000000000001", "application_id": "30000000-0000-4000-8000-000000000001", "inventory_kind": "domain", "identity_version": 1, "semantic_summary": {"process_command": "payments", "name": "api.example.com", "query_type": "A"}, "first_seen_at": "2026-08-17T10:01:00Z", "last_seen_at": "2026-08-18T09:59:00Z", "occurrence_count": 30, "release_count": 2, "cluster_count": 2, "namespace_count": 2, "workload_count": 2, "pod_count": 8, "container_count": 1, "group_count": 4, "evidence": {"releases": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000003/releases", "sightings": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000003/sightings", "groups": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000003/groups", "occurrences": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000003/occurrences"}, "policy_placement_summary": {"placement_count": 0, "evaluation_pending": 0, "verdicts": {"expected": 0, "requires_review": 0, "policy_conflict": 0, "unclassified": 0}}},
+    "syscall": {"id": "10000000-0000-4000-8000-000000000004", "project_id": "20000000-0000-4000-8000-000000000001", "application_id": "30000000-0000-4000-8000-000000000001", "inventory_kind": "syscall", "identity_version": 1, "semantic_summary": {"process_command": "payments", "syscall": "epoll_wait"}, "first_seen_at": "2026-08-17T10:01:00Z", "last_seen_at": "2026-08-18T09:59:00Z", "occurrence_count": 60, "release_count": 2, "cluster_count": 2, "namespace_count": 2, "workload_count": 2, "pod_count": 8, "container_count": 1, "group_count": 2, "evidence": {"releases": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000004/releases", "sightings": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000004/sightings", "groups": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000004/groups", "occurrences": "/api/v1/projects/20000000-0000-4000-8000-000000000001/applications/30000000-0000-4000-8000-000000000001/runtime-inventory/10000000-0000-4000-8000-000000000004/occurrences"}, "policy_placement_summary": {"placement_count": 0, "evaluation_pending": 0, "verdicts": {"expected": 0, "requires_review": 0, "policy_conflict": 0, "unclassified": 0}}}
+  },
+  "sightings": {"items": [{"cluster_id": "70000000-0000-4000-8000-000000000001", "namespace": "payments", "workload_kind": "Deployment", "workload_name": "payments-api", "pod_uid": "pod-uid-a", "pod_name": "payments-abc", "container_name": "api", "occurrence_count": 12, "first_seen_at": "2026-08-17T10:00:00Z", "last_seen_at": "2026-08-18T10:00:00Z", "policy_evaluation": {"state": "current", "verdict": "unclassified", "reason_code": "no_matching_policy", "explanation": {}}, "active_suppression": null, "actionable": true}], "next_cursor": "opaque-sighting-cursor"},
+  "groups": {"items": [{"id": "80000000-0000-4000-8000-000000000001", "cluster_id": "70000000-0000-4000-8000-000000000001", "namespace": "payments", "workload_kind": "Deployment", "workload_name": "payments-api", "event_kind": "process.exec", "status": "open", "first_seen_at": "2026-08-17T10:00:00Z", "last_seen_at": "2026-08-18T10:00:00Z", "occurrence_count": 12}], "next_cursor": null},
+  "occurrences": {"items": [{"id": "50000000-0000-4000-8000-000000000002", "event_id": "60000000-0000-4000-8000-000000000002", "observed_at": "2026-08-18T10:00:00Z", "cluster_id": "70000000-0000-4000-8000-000000000001", "node_name": "worker-a", "namespace": "payments", "pod_uid": "pod-uid-a", "pod_name": "payments-abc", "container_name": "api", "process_command": "payments", "event_kind": "process.exec", "payload": {"type": "ProcessExec", "data": {"executable": "/app/payments"}}, "release_id": "40000000-0000-4000-8000-000000000001", "release_version": "2.14.0", "release_display_name": "Payments 2.14.0"}], "next_cursor": null},
+  "facets": {
+    "cluster": {"items": [{"value": "70000000-0000-4000-8000-000000000001", "label": "Production EU", "item_count": 5, "occurrence_count": 144}], "next_cursor": null},
+    "namespace": {"items": [{"value": "payments", "label": "payments", "item_count": 5, "occurrence_count": 144}], "next_cursor": "opaque-namespace-cursor"},
+    "workload_kind": {"items": [{"value": "Deployment", "label": "Deployment", "item_count": 5, "occurrence_count": 144}], "next_cursor": null},
+    "workload_name": {"items": [{"value": "payments-api", "label": "payments-api", "item_count": 5, "occurrence_count": 144}], "next_cursor": null},
+    "container_name": {"items": [{"value": "api", "label": "api", "item_count": 5, "occurrence_count": 144}], "next_cursor": null}
+  },
+  "terminal_pages": {"sightings": {"items": [], "next_cursor": null}, "groups": {"items": [], "next_cursor": null}, "occurrences": {"items": [], "next_cursor": null}, "facets": {"items": [], "next_cursor": null}},
+  "errors": {
+    "invalid_cursor": {"error": "invalid_request", "message": "facet cursor is invalid for this scope", "request_id": "90000000-0000-4000-8000-000000000001"},
+    "unauthorized": {"error": "unauthorized", "message": "invalid or missing bearer credential", "request_id": "90000000-0000-4000-8000-000000000002"},
+    "not_found": {"error": "not_found", "message": "runtime inventory resource not found", "request_id": "90000000-0000-4000-8000-000000000003"},
+    "server_error": {"error": "internal_error", "message": "internal server error", "request_id": "90000000-0000-4000-8000-000000000004"}
+  },
+  "unsafe_display_text": {
+    "semantic_summary": {"executable": "<img src=x onerror=alert('inventory')>", "process_command": "javascript:alert('process')", "destination_address": "https://evil.example/", "name": "<svg onload=alert('domain')>", "syscall": "[click](https://evil.example)", "operation": "rename", "path": "../../etc/passwd", "new_path": "%2fapi%2fv1"},
+    "cluster_label": "//evil.example/cluster",
+    "namespace": "<script>alert('scope')</script>",
+    "workload_kind": "<iframe src=javascript:alert(1)>",
+    "workload_name": "javascript:alert('workload')",
+    "pod_uid": "../pod",
+    "pod_name": "<b>pod</b>",
+    "container_name": "%2e%2e%2fcontainer",
+    "node_name": "https://evil.example/node",
+    "inbound_endpoint": {"transport": "tcp", "address_family": "ipv4", "local_address": "0.0.0.0", "local_port": 65535, "listener_observed": true, "accept_observed": true}
+  },
+  "inbound_group": {
+    "event_kind": "network.accept",
+    "semantic_summary": {"process_command": "payments", "transport": "tcp", "address_family": "ipv4", "local_address": "0.0.0.0", "local_port": 8080},
+    "occurrence_count": 17
+  },
+  "inbound_occurrences": {
+    "items": [
+      {
+        "id": "50000000-0000-4000-8000-000000000001",
+        "event_id": "60000000-0000-4000-8000-000000000001",
+        "observed_at": "2026-08-18T09:59:00Z",
+        "cluster_id": "70000000-0000-4000-8000-000000000001",
+        "node_name": "worker-a",
+        "namespace": "payments",
+        "pod_uid": "pod-uid-a",
+        "pod_name": "payments-abc",
+        "container_name": "api",
+        "process_command": "payments",
+        "event_kind": "network.accept",
+        "payload": {"type": "NetworkAccept", "data": {"transport": "tcp", "address_family": "ipv4", "local_address": "0.0.0.0", "local_port": 8080, "remote_address": "203.0.113.9", "remote_port": 51234}},
+        "release_id": "40000000-0000-4000-8000-000000000001",
+        "release_version": "2.14.0",
+        "release_display_name": "Payments 2.14.0"
+      }
+    ],
+    "next_cursor": null
+  }
+}

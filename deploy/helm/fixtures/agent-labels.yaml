@@ -1,0 +1,15 @@
+server:
+  endpoint: https://okoscope-grpc.example:443
+  caSecret: {name: okoscope-agent-ca, key: ca.crt}
+identity:
+  clusterName: staging
+workloads:
+  - namespace: staging
+    kind: Deployment
+    labels: {app.kubernetes.io/name: payments, tier: backend}
+    credentialSecret: {name: payments-observability, key: token}
+  - namespace: staging
+    kind: Deployment
+    name: worker
+    credentialSecret: {name: worker-observability, key: token}
+imagePullSecrets: [{name: registry-credentials}]

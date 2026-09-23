@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"name":"normal-exit","source":"kernel","termination":{"type":"exited","status":0},"raw_wait_status":0},
+    {"name":"sigsegv","source":"kernel","termination":{"type":"signaled","signal":11,"signal_name":"SIGSEGV","core_dump_flag":true},"raw_wait_status":139},
+    {"name":"sigkill-unknown-cause","source":"kernel","termination":{"type":"signaled","signal":9,"signal_name":"SIGKILL","core_dump_flag":false},"raw_wait_status":9,"conventional_exit_code":137,"cause":null},
+    {"name":"qualified-oom","kernel":{"signal":9,"signal_name":"SIGKILL"},"kubernetes":{"reason":"OOMKilled","exit_code":137},"correlation":"qualified"},
+    {"name":"restart-loop","source":"derived","projection_version":1,"threshold":3,"window_seconds":600,"observed_restart_count":3,"waiting_reason":"CrashLoopBackOff"}
+  ]
+}

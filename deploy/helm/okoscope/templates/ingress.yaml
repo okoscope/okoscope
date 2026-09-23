@@ -1,0 +1,52 @@
+{{- if .Values.ingress.web.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "okoscope.fullname" . }}-web
+  labels:
+    {{- include "okoscope.labels" . | nindent 4 }}
+  {{- with .Values.ingress.web.annotations }}
+  annotations: {{ toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.web.className }}
+  {{- if .Values.ingress.web.tlsSecret }}
+  tls: [{hosts: [{{ .Values.ingress.web.host | quote }}], secretName: {{ .Values.ingress.web.tlsSecret }} }]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.web.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: {service: {name: {{ include "okoscope.fullname" . }}-server, port: {name: health}}}
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: {{ include "okoscope.fullname" . }}-web, port: {name: http}}}
+{{- end }}
+{{- if and .Values.ingress.web.enabled .Values.ingress.grpc.enabled }}
+---
+{{- end }}
+{{- if .Values.ingress.grpc.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "okoscope.fullname" . }}-grpc
+  labels:
+    {{- include "okoscope.labels" . | nindent 4 }}
+  annotations:
+    {{- if eq .Values.ingress.grpc.className "nginx" }}
+    nginx.ingress.kubernetes.io/backend-protocol: GRPC
+    {{- end }}
+    {{- with .Values.ingress.grpc.annotations }}{{ toYaml . | nindent 4 }}{{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.grpc.className }}
+  tls: [{hosts: [{{ .Values.ingress.grpc.host | quote }}], secretName: {{ .Values.ingress.grpc.tlsSecret }} }]
+  rules:
+    - host: {{ .Values.ingress.grpc.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: {service: {name: {{ include "okoscope.fullname" . }}-server, port: {name: grpc}}}
+{{- end }}

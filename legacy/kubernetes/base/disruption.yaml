@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: okoscope-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: okoscope-server
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: okoscope-web
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: okoscope-web
