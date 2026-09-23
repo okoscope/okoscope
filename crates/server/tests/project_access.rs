@@ -20,7 +20,6 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
         "/runtime-inventory/dns-groups",
     ),
     (include_str!("../src/policy_api.rs"), "/policies"),
-    (include_str!("../src/releases.rs"), "/releases"),
     (include_str!("../src/resources.rs"), "/resources"),
     (
         include_str!("../src/notification/api.rs"),
@@ -36,6 +35,14 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Route families whose use cases live in a service: the route is in the
+/// handler, the project access check in the service it calls.
+const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[(
+    include_str!("../src/releases.rs"),
+    include_str!("../src/service/releases.rs"),
+    "/releases",
+)];
+
 #[test]
 fn every_descendant_route_family_has_a_project_access_seam() {
     for (source, route_family) in ROUTE_SOURCES {
@@ -45,6 +52,16 @@ fn every_descendant_route_family_has_a_project_access_seam() {
         );
         assert!(
             source.contains("resolve_project_access"),
+            "{route_family} bypasses the common project resolver"
+        );
+    }
+    for (handler, service, route_family) in SERVICE_ROUTE_SOURCES {
+        assert!(
+            handler.contains(route_family),
+            "missing route family {route_family}"
+        );
+        assert!(
+            service.contains("resolve_project_access"),
             "{route_family} bypasses the common project resolver"
         );
     }
