@@ -2,6 +2,7 @@ use crate::error_code::ErrorCode;
 use crate::repository::MembershipRepository;
 use crate::repository::SessionRepository;
 use crate::repository::UserRepository;
+use crate::repository::email_actions::EmailActionRepository;
 use crate::repository::{OrganizationRepository, OrganizationStatus};
 use axum::{
     Extension, Json, Router,
@@ -89,14 +90,11 @@ pub async fn recover_super_admin(
     crate::admin_auth::AdminAuthenticator::new(credential).map_err(anyhow::Error::msg)?;
     let email = normalize_email(email).map_err(anyhow::Error::msg)?;
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(1869373292)")
-        .execute(&mut *tx)
-        .await?;
+    MembershipRepository::lock_authority(&mut *tx).await?;
     let user_id = UserRepository::active_id_by_email_for_update(&mut *tx, &email)
         .await?
         .ok_or_else(|| anyhow::anyhow!("eligible verified user does not exist"))?;
-    sqlx::query("INSERT INTO platform_role_assignments(user_id,role,revoked_at) VALUES($1,'super_admin',NULL) ON CONFLICT(user_id) DO UPDATE SET role='super_admin',revoked_at=NULL,granted_at=now(),granted_by_user_id=NULL")
-        .bind(user_id).execute(&mut *tx).await?;
+    UserRepository::recover_super_admin(&mut *tx, user_id).await?;
     write_access_audit(
         &mut tx,
         AccessAuditEvent {
@@ -423,14 +421,19 @@ async fn issue_action(
     issue: ActionIssue<'_>,
     data: impl FnOnce(String) -> TemplateData,
 ) -> Result<(), crate::transactional_mail::MailError> {
-    sqlx::query("UPDATE user_email_actions SET revoked_at=now() WHERE user_id=$1 AND purpose=$2 AND consumed_at IS NULL AND revoked_at IS NULL")
-        .bind(issue.user_id).bind(issue.purpose).execute(&mut **tx).await?;
+    EmailActionRepository::revoke_pending(&mut **tx, issue.user_id, issue.purpose).await?;
     let action_id = Uuid::new_v4();
     let token = generate_action(issue.purpose);
     let expires_at = Utc::now() + Duration::minutes(issue.ttl_minutes);
-    sqlx::query("INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at) VALUES($1,$2,$3,$4,$5)")
-        .bind(action_id).bind(issue.user_id).bind(issue.purpose).bind(token.digest.to_vec()).bind(expires_at)
-        .execute(&mut **tx).await?;
+    EmailActionRepository::insert(
+        &mut **tx,
+        action_id,
+        issue.user_id,
+        issue.purpose,
+        token.digest.to_vec(),
+        expires_at,
+    )
+    .await?;
     let route = if issue.purpose == "verify_email" {
         "/verify-email"
     } else {
@@ -570,8 +573,7 @@ async fn create_registration(
 }
 
 async fn lookup_user(pool: &PgPool, email: &str) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND (SELECT count(*) FROM organization_memberships mx JOIN organizations ox ON ox.id=mx.organization_id WHERE mx.user_id=u.id AND ox.status='active')=1 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.email=$1 LIMIT 1")
-        .bind(email).fetch_optional(pool).await
+    UserRepository::sign_in_by_email(pool, email).await
 }
 
 async fn login(
@@ -673,12 +675,8 @@ async fn response_from_user(
     locale: Locale,
     privileged_until: Option<chrono::DateTime<Utc>>,
 ) -> Result<AuthResponse, sqlx::Error> {
-    let organizations: Vec<(Uuid, String, String, String)> = sqlx::query_as(
-        "SELECT o.id,o.slug,o.name,m.role FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=$1 AND o.status='active' ORDER BY m.created_at,o.id LIMIT 200",
-    )
-    .bind(user.user_id)
-    .fetch_all(pool)
-    .await?;
+    let organizations: Vec<(Uuid, String, String, String)> =
+        MembershipRepository::active_organizations_of(pool, user.user_id).await?;
     let organizations = organizations
         .into_iter()
         .filter_map(|(id, slug, name, value)| {
@@ -770,13 +768,14 @@ async fn enqueue_requested_action(
 ) -> Result<(), crate::transactional_mail::MailError> {
     let mut tx = state.pool.begin().await?;
     let locale = user.preferred_locale.parse().unwrap_or(Locale::En);
-    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
-        .bind(user.user_id)
-        .execute(&mut *tx)
-        .await?;
-    let cooling_down: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_email_actions WHERE user_id=$1 AND purpose=$2 AND created_at>now()-make_interval(secs=>$3))")
-        .bind(user.user_id).bind(purpose).bind(f64::from(ACTION_COOLDOWN_SECONDS))
-        .fetch_one(&mut *tx).await?;
+    UserRepository::lock(&mut *tx, user.user_id).await?;
+    let cooling_down: bool = EmailActionRepository::cooling_down(
+        &mut *tx,
+        user.user_id,
+        purpose,
+        f64::from(ACTION_COOLDOWN_SECONDS),
+    )
+    .await?;
     if cooling_down {
         tx.commit().await?;
         return Ok(());
@@ -847,10 +846,12 @@ async fn confirm_verification(
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?
         .ok_or_else(|| unusable_action(&request_id))?;
-    sqlx::query("UPDATE users SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now() WHERE id=$1")
-        .bind(user_id).execute(&mut *tx).await.map_err(|error| AuthError::internal(&error, &request_id))?;
-    sqlx::query("UPDATE user_email_actions SET revoked_at=now() WHERE user_id=$1 AND purpose='verify_email' AND consumed_at IS NULL AND revoked_at IS NULL")
-        .bind(user_id).execute(&mut *tx).await.map_err(|error| AuthError::internal(&error, &request_id))?;
+    UserRepository::mark_email_verified(&mut *tx, user_id)
+        .await
+        .map_err(|error| AuthError::internal(&error, &request_id))?;
+    EmailActionRepository::revoke_pending_verifications(&mut *tx, user_id)
+        .await
+        .map_err(|error| AuthError::internal(&error, &request_id))?;
     tx.commit()
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
@@ -871,8 +872,7 @@ async fn consume_action(
     digest: [u8; 32],
     purpose: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("UPDATE user_email_actions SET consumed_at=now() WHERE id=(SELECT id FROM user_email_actions WHERE token_digest=$1 AND purpose=$2 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>now() FOR UPDATE) RETURNING user_id")
-        .bind(digest.to_vec()).bind(purpose).fetch_optional(&mut **tx).await
+    EmailActionRepository::consume(&mut **tx, digest.to_vec(), purpose).await
 }
 
 async fn complete_password_reset(
@@ -895,10 +895,7 @@ async fn complete_password_reset(
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?
         .ok_or_else(|| unusable_action(&request_id))?;
-    sqlx::query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1")
-        .bind(user_id)
-        .bind(password_hash)
-        .execute(&mut *tx)
+    UserRepository::set_password_hash(&mut *tx, user_id, password_hash)
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
     revoke_security_state(&mut tx, user_id, None)
@@ -965,10 +962,7 @@ async fn change_password(
         .begin()
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
-    sqlx::query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1")
-        .bind(user.user_id)
-        .bind(password_hash)
-        .execute(&mut *tx)
+    UserRepository::set_password_hash(&mut *tx, user.user_id, password_hash)
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
     revoke_security_state(&mut tx, user.user_id, Some(principal.session_id))
@@ -1016,8 +1010,7 @@ async fn revoke_security_state(
     except_session: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     SessionRepository::revoke_all_for_user(&mut **tx, user_id, except_session).await?;
-    sqlx::query("UPDATE user_email_actions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL")
-        .bind(user_id).execute(&mut **tx).await?;
+    EmailActionRepository::revoke_all_pending(&mut **tx, user_id).await?;
     Ok(())
 }
 
@@ -1027,10 +1020,7 @@ async fn enqueue_password_changed(
     user_id: Uuid,
 ) -> Result<(), crate::transactional_mail::MailError> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT email,preferred_locale FROM users WHERE id=$1")
-            .bind(user_id)
-            .fetch_optional(&mut **tx)
-            .await?;
+        UserRepository::email_and_locale(&mut **tx, user_id).await?;
     if let Some((email, locale)) = row {
         enqueue(
             tx,
@@ -1064,13 +1054,14 @@ async fn update_preferences(
             &request_id,
         ));
     }
-    sqlx::query("UPDATE users SET preferred_locale=$2,display_name=coalesce($3,display_name),updated_at=now() WHERE id=$1")
-        .bind(principal.user_id)
-        .bind(input.locale.as_str())
-        .bind(input.display_name)
-        .execute(&state.pool)
-        .await
-        .map_err(|error| AuthError::internal(&error, &request_id))?;
+    UserRepository::update_preferences(
+        &state.pool,
+        principal.user_id,
+        input.locale.as_str(),
+        input.display_name,
+    )
+    .await
+    .map_err(|error| AuthError::internal(&error, &request_id))?;
     let user = lookup_user_by_id(
         &state.pool,
         principal.user_id,
@@ -1096,8 +1087,7 @@ async fn lookup_user_by_id(
     user_id: Uuid,
     organization_id: Option<Uuid>,
 ) -> Result<Option<AuthenticatedUser>, sqlx::Error> {
-    sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND m.organization_id=$2 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.id=$1")
-        .bind(user_id).bind(organization_id).fetch_optional(pool).await
+    UserRepository::sign_in_by_id(pool, user_id, organization_id).await
 }
 
 fn unusable_session(request_id: &RequestId) -> AuthError {

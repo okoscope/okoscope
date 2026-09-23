@@ -77,6 +77,71 @@ pub struct StoredOrganization {
 pub struct OrganizationRepository;
 
 impl OrganizationRepository {
+    /// The first 200 organizations, oldest first.
+    ///
+    /// Selects `id`, `slug`, `name` and `created_at`.
+    pub async fn summaries<'e, E, T>(executor: E) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as(
+            "SELECT id,slug,name,created_at FROM organizations ORDER BY created_at,id LIMIT 200",
+        )
+        .fetch_all(executor)
+        .await
+    }
+
+    /// One organization with the columns of [`Self::summaries`]. Fails with
+    /// `RowNotFound` when there is none.
+    pub async fn summary<'e, E, T>(executor: E, organization_id: Uuid) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,slug,name,created_at FROM organizations WHERE id=$1")
+            .bind(organization_id)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// A page of all organizations by id, after the cursor when one is
+    /// given, for platform administration.
+    ///
+    /// Selects `id`, `slug`, `name`, `status`, `created_at` and `updated_at`.
+    pub async fn platform_page<'e, E, T>(
+        executor: E,
+        cursor: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,slug,name,status,created_at,updated_at FROM organizations WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id LIMIT $2")
+            .bind(cursor)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// One organization with the columns of [`Self::platform_page`].
+    pub async fn platform_get<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as(
+            "SELECT id,slug,name,status,created_at,updated_at FROM organizations WHERE id=$1",
+        )
+        .bind(organization_id)
+        .fetch_optional(executor)
+        .await
+    }
+
     /// Creates an organization in the given state and returns the stored row.
     ///
     /// A duplicate slug fails on the unique index; callers report that as a
@@ -441,5 +506,83 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod platform_statement_tests {
+    use chrono::{DateTime, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    use super::OrganizationRepository;
+    use crate::repository::test_support::tenant;
+
+    #[derive(Debug, FromRow)]
+    struct Organization {
+        id: Uuid,
+        slug: String,
+        status: String,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Summary {
+        id: Uuid,
+        slug: String,
+        created_at: DateTime<Utc>,
+    }
+
+    /// The platform page orders organizations by id after a cursor; the
+    /// summaries list them oldest first; both read one by id.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn organizations_page_and_list(pool: PgPool) {
+        let names = ["orgs-a", "orgs-b", "orgs-c"];
+        let mut created = Vec::new();
+        for name in names {
+            created.push(tenant(&pool, name).await.organization_id);
+        }
+        let mut by_id = created.clone();
+        by_id.sort();
+
+        let page: Vec<Organization> = OrganizationRepository::platform_page(&pool, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(page.iter().map(|o| o.id).collect::<Vec<_>>(), by_id[..2]);
+        let rest: Vec<Organization> =
+            OrganizationRepository::platform_page(&pool, Some(by_id[1]), 2)
+                .await
+                .unwrap();
+        assert_eq!(rest.iter().map(|o| o.id).collect::<Vec<_>>(), by_id[2..]);
+        let one: Organization = OrganizationRepository::platform_get(&pool, created[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (one.slug.as_str(), one.status.as_str()),
+            ("orgs-a", "active")
+        );
+        assert!(
+            OrganizationRepository::platform_get::<_, Organization>(&pool, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let listed: Vec<Summary> = OrganizationRepository::summaries(&pool).await.unwrap();
+        assert_eq!(listed.iter().map(|o| o.id).collect::<Vec<_>>(), created);
+        assert!(
+            listed
+                .windows(2)
+                .all(|w| w[0].created_at <= w[1].created_at)
+        );
+        let summary: Summary = OrganizationRepository::summary(&pool, created[1])
+            .await
+            .unwrap();
+        assert_eq!(summary.slug, "orgs-b");
+        assert!(matches!(
+            OrganizationRepository::summary::<_, Summary>(&pool, Uuid::new_v4()).await,
+            Err(sqlx::Error::RowNotFound)
+        ));
     }
 }

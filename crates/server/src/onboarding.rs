@@ -1,5 +1,8 @@
 use crate::error_code::ErrorCode;
 use crate::repository::UserRepository;
+use crate::repository::application_credentials::ApplicationCredentialRepository;
+use crate::repository::events::EventRepository;
+use crate::repository::installations::InstallationRepository;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -200,8 +203,7 @@ async fn complete_setup(
     let email = validate_setup(&input, state.setup_digest, state.setup_expires_at)?;
     let password_hash = hash_password(&input.password).map_err(|_| ApiError::internal())?;
     let mut tx = state.pool.begin().await.map_err(ApiError::database)?;
-    sqlx::query("SELECT pg_advisory_xact_lock(1869373291)")
-        .execute(&mut *tx)
+    UserRepository::lock_setup(&mut *tx)
         .await
         .map_err(ApiError::database)?;
     let has_super_admin = UserRepository::active_super_admin_exists(&mut *tx)
@@ -290,9 +292,7 @@ async fn insert_setup_rows(
     )
     .await
     .map_err(ApiError::database)?;
-    sqlx::query("INSERT INTO platform_role_assignments(user_id,role) VALUES($1,'super_admin')")
-        .bind(user_id)
-        .execute(&mut **tx)
+    UserRepository::assign_super_admin(&mut **tx, user_id)
         .await
         .map_err(ApiError::database)?;
     write_access_audit(
@@ -528,7 +528,19 @@ async fn find_idempotent(
     organization_id: Uuid,
     key: &str,
 ) -> Result<Option<(Installation, Vec<u8>)>, ApiError> {
-    sqlx::query_as::<_, InstallationWithHash>("SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at,request_hash FROM application_installations WHERE organization_id=$1 AND idempotency_key=$2").bind(organization_id).bind(key).fetch_optional(pool).await.map_err(ApiError::database).map(|v| v.map(|r| { let hash=r.request_hash.clone(); (r.installation(),hash) }))
+    InstallationRepository::by_idempotency_key::<_, InstallationWithHash>(
+        pool,
+        organization_id,
+        key,
+    )
+    .await
+    .map_err(ApiError::database)
+    .map(|v| {
+        v.map(|r| {
+            let hash = r.request_hash.clone();
+            (r.installation(), hash)
+        })
+    })
 }
 
 #[derive(FromRow)]
@@ -604,8 +616,29 @@ async fn issue_installation(
     )
     .await
     .map_err(ApiError::database)?;
-    let installation = sqlx::query_as::<_, Installation>("INSERT INTO application_installations(id,organization_id,project_id,application_id,credential_id,idempotency_key,request_hash,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-        .bind(id).bind(organization_id).bind(project_id).bind(application_id).bind(issued.summary.id).bind(key).bind(hash.as_slice()).bind(&input.cluster_name).bind(&input.workload.namespace).bind(&input.workload.kind).bind(&input.workload.name).bind(input.workload.labels.as_ref().map(|v| serde_json::to_value(v).expect("labels serialize"))).bind(&metadata.chart_version).bind(metadata.configuration_schema_version).fetch_one(&mut *tx).await.map_err(ApiError::database)?;
+    let installation = InstallationRepository::insert::<_, Installation>(
+        &mut *tx,
+        id,
+        organization_id,
+        project_id,
+        application_id,
+        issued.summary.id,
+        key,
+        hash.as_slice(),
+        &input.cluster_name,
+        &input.workload.namespace,
+        &input.workload.kind,
+        input.workload.name.as_deref(),
+        input
+            .workload
+            .labels
+            .as_ref()
+            .map(|v| serde_json::to_value(v).expect("labels serialize")),
+        &metadata.chart_version,
+        metadata.configuration_schema_version,
+    )
+    .await
+    .map_err(ApiError::database)?;
     tx.commit().await.map_err(ApiError::database)?;
     let body = IssuedInstallation {
         command: command_model(&metadata),
@@ -634,8 +667,6 @@ fn command_model(metadata: &AgentInstallationMetadata) -> CommandModel {
     }
 }
 
-const INSTALL_SELECT: &str = "SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at FROM application_installations";
-
 async fn list_installations(
     State(state): State<OnboardingState>,
     Path((project_id, application_id)): Path<(Uuid, Uuid)>,
@@ -643,16 +674,14 @@ async fn list_installations(
 ) -> Result<Json<InstallationPage>, ApiError> {
     let user = principal(&headers, &state).await?;
     owned_application(&state, user, project_id, application_id).await?;
-    let query = format!(
-        "{INSTALL_SELECT} WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 ORDER BY created_at,id"
-    );
-    let items = sqlx::query_as(&query)
-        .bind(user.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .fetch_all(&state.pool)
-        .await
-        .map_err(ApiError::database)?;
+    let items = InstallationRepository::for_application(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
     Ok(Json(InstallationPage { items }))
 }
 
@@ -662,19 +691,17 @@ async fn get_installation(
     headers: HeaderMap,
 ) -> Result<Json<Installation>, ApiError> {
     let user = principal(&headers, &state).await?;
-    let query = format!(
-        "{INSTALL_SELECT} WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4"
-    );
-    sqlx::query_as(&query)
-        .bind(user.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .bind(installation_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(ApiError::database)?
-        .map(Json)
-        .ok_or_else(ApiError::not_found)
+    InstallationRepository::get(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+        installation_id,
+    )
+    .await
+    .map_err(ApiError::database)?
+    .map(Json)
+    .ok_or_else(ApiError::not_found)
 }
 
 async fn update_installation(
@@ -692,27 +719,26 @@ async fn update_installation(
         workload: input.workload,
     };
     validate_installation(&validated)?;
-    sqlx::query_as::<_, Installation>("UPDATE application_installations SET cluster_name=$5,workload_namespace=$6,workload_kind=$7,workload_name=$8,workload_labels=$9,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-        .bind(user.organization_id)
-        .bind(project_id)
-        .bind(application_id)
-        .bind(installation_id)
-        .bind(&validated.cluster_name)
-        .bind(&validated.workload.namespace)
-        .bind(&validated.workload.kind)
-        .bind(&validated.workload.name)
-        .bind(
-            validated
-                .workload
-                .labels
-                .as_ref()
-                .map(|labels| serde_json::to_value(labels).expect("bounded labels serialize")),
-        )
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(ApiError::database)?
-        .map(Json)
-        .ok_or_else(ApiError::not_found)
+    InstallationRepository::update::<_, Installation>(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+        installation_id,
+        &validated.cluster_name,
+        &validated.workload.namespace,
+        &validated.workload.kind,
+        validated.workload.name.as_deref(),
+        validated
+            .workload
+            .labels
+            .as_ref()
+            .map(|labels| serde_json::to_value(labels).expect("bounded labels serialize")),
+    )
+    .await
+    .map_err(ApiError::database)?
+    .map(Json)
+    .ok_or_else(ApiError::not_found)
 }
 
 async fn replace_credential(
@@ -725,9 +751,19 @@ async fn replace_credential(
         return Err(ApiError::not_found());
     }
     let mut tx = state.pool.begin().await.map_err(ApiError::database)?;
-    let old: Option<Uuid>=sqlx::query_scalar("SELECT credential_id FROM application_installations WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 FOR UPDATE").bind(user.organization_id).bind(project_id).bind(application_id).bind(installation_id).fetch_optional(&mut *tx).await.map_err(ApiError::database)?;
+    let old: Option<Uuid> = InstallationRepository::credential_for_update(
+        &mut *tx,
+        user.organization_id,
+        project_id,
+        application_id,
+        installation_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
     let old = old.ok_or_else(ApiError::not_found)?;
-    sqlx::query("UPDATE application_ingestion_credentials SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1").bind(old).execute(&mut *tx).await.map_err(ApiError::database)?;
+    ApplicationCredentialRepository::revoke(&mut *tx, old)
+        .await
+        .map_err(ApiError::database)?;
     let issued = application_credentials::issue(
         &mut tx,
         user.organization_id,
@@ -737,14 +773,9 @@ async fn replace_credential(
     )
     .await
     .map_err(ApiError::database)?;
-    sqlx::query(
-        "UPDATE application_installations SET credential_id=$1,updated_at=now() WHERE id=$2",
-    )
-    .bind(issued.summary.id)
-    .bind(installation_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(ApiError::database)?;
+    InstallationRepository::set_credential(&mut *tx, issued.summary.id, installation_id)
+        .await
+        .map_err(ApiError::database)?;
     tx.commit().await.map_err(ApiError::database)?;
     Ok(Json(IssuedCredential {
         id: issued.summary.id,
@@ -775,9 +806,30 @@ async fn connection_readiness(
 ) -> Result<Json<Readiness>, ApiError> {
     let user = principal(&headers, &state).await?;
     owned_application(&state, user, project_id, application_id).await?;
-    let events:(Option<DateTime<Utc>>,Option<DateTime<Utc>>)=sqlx::query_as("SELECT min(received_at),max(received_at) FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3").bind(user.organization_id).bind(project_id).bind(application_id).fetch_one(&state.pool).await.map_err(ApiError::database)?;
-    let cred: CredentialEvidence=sqlx::query_as("SELECT c.last_used_at,c.revoked_at FROM application_installations i JOIN application_ingestion_credentials c ON c.id=i.credential_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1").bind(user.organization_id).bind(project_id).bind(application_id).fetch_optional(&state.pool).await.map_err(ApiError::database)?;
-    let status: StatusEvidence=sqlx::query_as("SELECT s.state,s.reason,max(s.observed_at),count(*) FROM application_installation_status s JOIN application_installations i ON i.id=s.installation_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 GROUP BY s.state,s.reason ORDER BY max(s.observed_at) DESC LIMIT 1").bind(user.organization_id).bind(project_id).bind(application_id).fetch_optional(&state.pool).await.map_err(ApiError::database)?;
+    let events: (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = EventRepository::received_window(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
+    let cred: CredentialEvidence = InstallationRepository::latest_credential_use(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
+    let status: StatusEvidence = InstallationRepository::latest_status(
+        &state.pool,
+        user.organization_id,
+        project_id,
+        application_id,
+    )
+    .await
+    .map_err(ApiError::database)?;
     Ok(Json(derive_readiness(events, cred, status)))
 }
 
