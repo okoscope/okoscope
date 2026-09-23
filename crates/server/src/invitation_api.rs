@@ -1,6 +1,7 @@
 use crate::error_code::ErrorCode;
 use crate::repository::MembershipRepository;
 use crate::repository::UserRepository;
+use crate::repository::invitations::InvitationRepository;
 use std::{fmt, str::FromStr};
 
 use axum::{
@@ -494,17 +495,11 @@ fn no_store<T: Serialize>(status: StatusCode, value: T) -> Response {
     response
 }
 
-const INVITATION_SELECT: &str = "SELECT i.id,i.organization_id,o.name organization_name,i.project_id,p.name project_name,i.recipient_email,i.role,u.display_name inviter_display_name,i.locale,i.created_at,i.expires_at,i.accepted_at,i.accepted_by_user_id,i.revoked_at,i.replaced_at FROM invitations i JOIN organizations o ON o.id=i.organization_id LEFT JOIN projects p ON p.id=i.project_id JOIN users u ON u.id=i.inviter_user_id";
-
 async fn load_invitation_by_digest(
     tx: &mut Transaction<'_, Postgres>,
     digest: [u8; 32],
 ) -> Result<Option<InvitationRow>, sqlx::Error> {
-    let query = format!("{INVITATION_SELECT} WHERE i.token_digest=$1 FOR UPDATE OF i");
-    sqlx::query_as(&query)
-        .bind(digest.to_vec())
-        .fetch_optional(&mut **tx)
-        .await
+    InvitationRepository::by_token_digest_for_update(&mut **tx, digest.to_vec()).await
 }
 
 fn is_live(row: &InvitationRow) -> bool {
@@ -534,13 +529,7 @@ async fn list_platform(
 ) -> Result<Response, InvitationError> {
     platform_identity(&state, &headers, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let sql = format!(
-        "{INVITATION_SELECT} WHERE ($1::uuid IS NULL OR (i.created_at,i.id)<(SELECT created_at,id FROM invitations WHERE id=$1)) ORDER BY i.created_at DESC,i.id DESC LIMIT $2"
-    );
-    let rows = sqlx::query_as(&sql)
-        .bind(query.cursor)
-        .bind(limit + 1)
-        .fetch_all(&state.pool)
+    let rows = InvitationRepository::page(&state.pool, query.cursor, limit + 1)
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?;
     Ok(no_store(StatusCode::OK, page(rows, limit)))
@@ -591,16 +580,14 @@ async fn list_organization(
 ) -> Result<Response, InvitationError> {
     organization_actor(&state, &headers, organization_id, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let sql = format!(
-        "{INVITATION_SELECT} WHERE i.organization_id=$1 AND i.project_id IS NULL AND ($2::uuid IS NULL OR (i.created_at,i.id)<(SELECT created_at,id FROM invitations WHERE id=$2 AND organization_id=$1 AND project_id IS NULL)) ORDER BY i.created_at DESC,i.id DESC LIMIT $3"
-    );
-    let rows = sqlx::query_as(&sql)
-        .bind(organization_id)
-        .bind(query.cursor)
-        .bind(limit + 1)
-        .fetch_all(&state.pool)
-        .await
-        .map_err(|error| InvitationError::database(&error, &request_id))?;
+    let rows = InvitationRepository::organization_page(
+        &state.pool,
+        organization_id,
+        query.cursor,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| InvitationError::database(&error, &request_id))?;
     Ok(no_store(StatusCode::OK, page(rows, limit)))
 }
 
@@ -613,14 +600,7 @@ async fn list_project(
 ) -> Result<Response, InvitationError> {
     project_actor(&state, &headers, project_id, &request_id).await?;
     let limit = page_limit(query.limit, &request_id)?;
-    let sql = format!(
-        "{INVITATION_SELECT} WHERE i.project_id=$1 AND ($2::uuid IS NULL OR (i.created_at,i.id)<(SELECT created_at,id FROM invitations WHERE id=$2 AND project_id=$1)) ORDER BY i.created_at DESC,i.id DESC LIMIT $3"
-    );
-    let rows = sqlx::query_as(&sql)
-        .bind(project_id)
-        .bind(query.cursor)
-        .bind(limit + 1)
-        .fetch_all(&state.pool)
+    let rows = InvitationRepository::project_page(&state.pool, project_id, query.cursor, limit + 1)
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?;
     Ok(no_store(StatusCode::OK, page(rows, limit)))
@@ -802,11 +782,20 @@ async fn issue_in_transaction(
     let lifetime = Duration::from_std(invitation_config.lifetime)
         .map_err(|_| invalid("invitation lifetime is invalid", request_id))?;
     let expires_at = Utc::now() + lifetime;
-    sqlx::query("INSERT INTO invitations(id,organization_id,project_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9+interval '365 days')")
-        .bind(id).bind(request.scope.organization_id).bind(request.scope.project_id)
-        .bind(&request.recipient_email).bind(&request.role).bind(request.inviter_user_id)
-        .bind(request.locale.as_str()).bind(token.digest.to_vec()).bind(expires_at)
-        .execute(&mut **tx).await.map_err(|error| map_issue_error(&error, request_id))?;
+    InvitationRepository::insert(
+        &mut **tx,
+        id,
+        request.scope.organization_id,
+        request.scope.project_id,
+        &request.recipient_email,
+        &request.role,
+        request.inviter_user_id,
+        request.locale.as_str(),
+        token.digest.to_vec(),
+        expires_at,
+    )
+    .await
+    .map_err(|error| map_issue_error(&error, request_id))?;
     if let Some(expired_id) = expired_equivalent {
         finalize_replacement(tx, expired_id, id, request_id).await?;
     }
@@ -896,12 +885,21 @@ async fn validate_issue_target(
         return Err(not_found(ErrorCode::INVITATION_SCOPE_NOT_FOUND, request_id));
     }
     let membership_exists: bool = if let Some(project_id) = request.scope.project_id {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u JOIN project_memberships m ON m.user_id=u.id WHERE u.email=$1 AND m.project_id=$2)")
-            .bind(&request.recipient_email).bind(project_id).fetch_one(&mut **tx).await
+        InvitationRepository::recipient_is_project_member(
+            &mut **tx,
+            &request.recipient_email,
+            project_id,
+        )
+        .await
     } else {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u JOIN organization_memberships m ON m.user_id=u.id WHERE u.email=$1 AND m.organization_id=$2)")
-            .bind(&request.recipient_email).bind(request.scope.organization_id).fetch_one(&mut **tx).await
-    }.map_err(|error| InvitationError::database(&error, request_id))?;
+        InvitationRepository::recipient_is_organization_member(
+            &mut **tx,
+            &request.recipient_email,
+            request.scope.organization_id,
+        )
+        .await
+    }
+    .map_err(|error| InvitationError::database(&error, request_id))?;
     if membership_exists {
         return Err(conflict(ErrorCode::MEMBERSHIP_EXISTS, request_id));
     }
@@ -914,13 +912,9 @@ async fn enforce_create_rate(
     inviter_user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM invitations WHERE inviter_user_id=$1 AND created_at>now()-interval '1 hour'",
-    )
-    .bind(inviter_user_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| InvitationError::database(&error, request_id))?;
+    let count: i64 = InvitationRepository::created_last_hour(&mut **tx, inviter_user_id)
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
     if count >= i64::from(config.create_limit_per_hour) {
         Err(InvitationError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -938,22 +932,20 @@ async fn reserve_expired_equivalent(
     request: &IssueRequest,
     request_id: &RequestId,
 ) -> Result<Option<Uuid>, InvitationError> {
-    let existing: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id,expires_at FROM invitations WHERE organization_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND recipient_email=$3 AND accepted_at IS NULL AND revoked_at IS NULL AND replaced_at IS NULL FOR UPDATE",
-    )
-    .bind(request.scope.organization_id)
-    .bind(request.scope.project_id)
-    .bind(&request.recipient_email)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| InvitationError::database(&error, request_id))?;
+    let existing: Option<(Uuid, DateTime<Utc>)> =
+        InvitationRepository::unresolved_equivalent_for_update(
+            &mut **tx,
+            request.scope.organization_id,
+            request.scope.project_id,
+            &request.recipient_email,
+        )
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
     if let Some((id, expires_at)) = existing {
         if expires_at > Utc::now() {
             return Err(conflict(ErrorCode::INVITATION_EXISTS, request_id));
         }
-        sqlx::query("UPDATE invitations SET revoked_at=now() WHERE id=$1")
-            .bind(id)
-            .execute(&mut **tx)
+        InvitationRepository::revoke(&mut **tx, id)
             .await
             .map_err(|error| InvitationError::database(&error, request_id))?;
         return Ok(Some(id));
@@ -967,8 +959,8 @@ async fn finalize_replacement(
     replacement_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    sqlx::query("UPDATE invitations SET revoked_at=NULL,replaced_at=now(),replaced_by_invitation_id=$2 WHERE id=$1")
-        .bind(expired_id).bind(replacement_id).execute(&mut **tx).await
+    InvitationRepository::mark_replaced(&mut **tx, expired_id, replacement_id)
+        .await
         .map_err(|error| InvitationError::database(&error, request_id))?;
     Ok(())
 }
@@ -982,13 +974,12 @@ async fn enqueue_issue_mail(
     expires_at: DateTime<Utc>,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    let context: (String, Option<String>, String) = sqlx::query_as(
-        "SELECT o.name,p.name,u.display_name FROM organizations o LEFT JOIN projects p ON p.id=$2 JOIN users u ON u.id=$3 WHERE o.id=$1",
+    let context: (String, Option<String>, String) = InvitationRepository::mail_context(
+        &mut **tx,
+        request.scope.organization_id,
+        request.scope.project_id,
+        request.inviter_user_id,
     )
-    .bind(request.scope.organization_id)
-    .bind(request.scope.project_id)
-    .bind(request.inviter_user_id)
-    .fetch_one(&mut **tx)
     .await
     .map_err(|error| InvitationError::database(&error, request_id))?;
     let action_url = format!(
@@ -1071,11 +1062,7 @@ async fn load_invitation_by_id(
     tx: &mut Transaction<'_, Postgres>,
     invitation_id: Uuid,
 ) -> Result<Option<InvitationRow>, sqlx::Error> {
-    let query = format!("{INVITATION_SELECT} WHERE i.id=$1");
-    sqlx::query_as(&query)
-        .bind(invitation_id)
-        .fetch_optional(&mut **tx)
-        .await
+    InvitationRepository::get(&mut **tx, invitation_id).await
 }
 
 fn map_issue_error(error: &sqlx::Error, request_id: &RequestId) -> InvitationError {
@@ -1094,24 +1081,15 @@ async fn load_invitation(
     pool: &PgPool,
     invitation_id: Uuid,
 ) -> Result<Option<InvitationRow>, sqlx::Error> {
-    let query = format!("{INVITATION_SELECT} WHERE i.id=$1");
-    sqlx::query_as(&query)
-        .bind(invitation_id)
-        .fetch_optional(pool)
-        .await
+    InvitationRepository::get(pool, invitation_id).await
 }
 
 pub(crate) async fn current_organization_owner_invitation(
     pool: &PgPool,
     organization_id: Uuid,
 ) -> Result<Option<InvitationView>, sqlx::Error> {
-    let query = format!(
-        "{INVITATION_SELECT} WHERE i.organization_id=$1 AND i.project_id IS NULL AND i.role='owner' AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.replaced_at IS NULL ORDER BY i.created_at DESC,i.id DESC LIMIT 1"
-    );
-    let row: Option<InvitationRow> = sqlx::query_as(&query)
-        .bind(organization_id)
-        .fetch_optional(pool)
-        .await?;
+    let row: Option<InvitationRow> =
+        InvitationRepository::pending_owner_invitation(pool, organization_id).await?;
     Ok(row.map(InvitationView::from))
 }
 
@@ -1236,9 +1214,7 @@ async fn resend(
     }
     enforce_resend_rate(&mut tx, state, principal.user_id, request_id).await?;
     let replacement_id = Uuid::new_v4();
-    sqlx::query("UPDATE invitations SET revoked_at=now() WHERE id=$1")
-        .bind(locked.id)
-        .execute(&mut *tx)
+    InvitationRepository::revoke(&mut *tx, locked.id)
         .await
         .map_err(|error| InvitationError::database(&error, request_id))?;
     let request = IssueRequest {
@@ -1303,11 +1279,20 @@ async fn insert_replacement(
     expires_at: DateTime<Utc>,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    sqlx::query("INSERT INTO invitations(id,organization_id,project_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9+interval '365 days')")
-        .bind(id).bind(request.scope.organization_id).bind(request.scope.project_id)
-        .bind(&request.recipient_email).bind(&request.role).bind(request.inviter_user_id)
-        .bind(request.locale.as_str()).bind(token.digest.to_vec()).bind(expires_at)
-        .execute(&mut **tx).await.map_err(|error| map_issue_error(&error, request_id))?;
+    InvitationRepository::insert(
+        &mut **tx,
+        id,
+        request.scope.organization_id,
+        request.scope.project_id,
+        &request.recipient_email,
+        &request.role,
+        request.inviter_user_id,
+        request.locale.as_str(),
+        token.digest.to_vec(),
+        expires_at,
+    )
+    .await
+    .map_err(|error| map_issue_error(&error, request_id))?;
     Ok(())
 }
 
@@ -1317,8 +1302,8 @@ async fn enforce_resend_rate(
     actor_user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM access_audit_records WHERE actor_user_id=$1 AND action='invitation.resent' AND created_at>now()-interval '1 hour'")
-        .bind(actor_user_id).fetch_one(&mut **tx).await
+    let count: i64 = InvitationRepository::resent_last_hour(&mut **tx, actor_user_id)
+        .await
         .map_err(|error| InvitationError::database(&error, request_id))?;
     if count >= i64::from(state.invitations.resend_limit_per_hour) {
         return Err(InvitationError::new(
@@ -1335,11 +1320,7 @@ async fn load_invitation_by_id_for_update(
     tx: &mut Transaction<'_, Postgres>,
     invitation_id: Uuid,
 ) -> Result<Option<InvitationRow>, sqlx::Error> {
-    let query = format!("{INVITATION_SELECT} WHERE i.id=$1 FOR UPDATE OF i");
-    sqlx::query_as(&query)
-        .bind(invitation_id)
-        .fetch_optional(&mut **tx)
-        .await
+    InvitationRepository::get_for_update(&mut **tx, invitation_id).await
 }
 
 async fn revoke_organization(
@@ -1412,9 +1393,7 @@ async fn revoke(
         return Err(conflict(ErrorCode::INVITATION_NOT_PENDING, request_id));
     }
     if locked.revoked_at.is_none() {
-        sqlx::query("UPDATE invitations SET revoked_at=now() WHERE id=$1")
-            .bind(locked.id)
-            .execute(&mut *tx)
+        InvitationRepository::revoke(&mut *tx, locked.id)
             .await
             .map_err(|error| InvitationError::database(&error, request_id))?;
         audit(
@@ -1462,10 +1441,7 @@ async fn inspect(
 ) -> Result<Response, InvitationError> {
     let digest =
         invitation_digest(&input.token).ok_or_else(|| InvitationError::unusable(&request_id))?;
-    let query = format!("{INVITATION_SELECT} WHERE i.token_digest=$1");
-    let row: InvitationRow = sqlx::query_as(&query)
-        .bind(digest.to_vec())
-        .fetch_optional(&state.pool)
+    let row: InvitationRow = InvitationRepository::by_token_digest(&state.pool, digest.to_vec())
         .await
         .map_err(|error| InvitationError::database(&error, &request_id))?
         .filter(is_live)
@@ -1612,13 +1588,10 @@ async fn accept_existing_user(
     if !is_live(&row) {
         return Err(InvitationError::unusable(&request_id));
     }
-    let identity: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT email,email_verified_at FROM users WHERE id=$1 AND disabled_at IS NULL FOR UPDATE",
-    )
-    .bind(principal.user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|error| InvitationError::database(&error, &request_id))?;
+    let identity: Option<(String, Option<DateTime<Utc>>)> =
+        UserRepository::active_email_for_update(&mut *tx, principal.user_id)
+            .await
+            .map_err(|error| InvitationError::database(&error, &request_id))?;
     let matches = identity
         .is_some_and(|(email, verified)| verified.is_some() && email == row.recipient_email);
     if !matches {
@@ -1640,8 +1613,8 @@ async fn grant_and_consume(
     user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<(), InvitationError> {
-    let consumed = sqlx::query("UPDATE invitations SET accepted_at=now(),accepted_by_user_id=$2 WHERE id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND replaced_at IS NULL AND expires_at>now()")
-        .bind(invitation.id).bind(user_id).execute(&mut **tx).await
+    let consumed = InvitationRepository::consume(&mut **tx, invitation.id, user_id)
+        .await
         .map_err(|error| InvitationError::database(&error, request_id))?;
     if consumed.rows_affected() != 1 {
         return Err(InvitationError::unusable(request_id));

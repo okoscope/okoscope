@@ -25,15 +25,21 @@
 //! method documents the columns it selects, because that list is the contract
 //! between the two.
 
+pub mod access_audit;
 pub mod agent_health;
+pub mod application_credentials;
 pub mod applications;
 pub mod dns_groups;
+pub mod email_actions;
 pub mod event_groups;
 pub mod events;
+pub mod installations;
+pub mod invitations;
 pub mod memberships;
 pub mod navigation;
 pub mod organizations;
 pub mod projects;
+pub mod provisioning;
 pub mod releases;
 pub mod sessions;
 pub mod users;
