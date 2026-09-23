@@ -21,6 +21,7 @@ pub mod events;
 pub mod memberships;
 pub mod organizations;
 pub mod projects;
+pub mod sessions;
 pub mod users;
 
 pub use applications::ApplicationRepository;
@@ -29,4 +30,5 @@ pub use events::{EventRepository, StoredEvent};
 pub use memberships::MembershipRepository;
 pub use organizations::OrganizationRepository;
 pub use projects::ProjectRepository;
+pub use sessions::SessionRepository;
 pub use users::UserRepository;
