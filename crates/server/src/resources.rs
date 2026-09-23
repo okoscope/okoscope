@@ -87,7 +87,19 @@ async fn cleanup_project_inner(
     limit: i64,
 ) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let (detail, rollup): (i32, i32) = sqlx::query_as("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days),COALESCE(p.resource_rollup_retention_days,o.resource_rollup_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1 FOR UPDATE")
+    // Lock order for project-scoped work is organization FOR SHARE, then
+    // project FOR UPDATE; see OrganizationRepository::lock_shared. A single
+    // `JOIN … FOR UPDATE` locked the project first and then took an exclusive
+    // lock on the organization, which deadlocked against the retention worker
+    // and inventory operations. A project never changes organization, so the
+    // unlocked read below is only used to find which row to lock.
+    let organization_id: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    crate::repository::OrganizationRepository::lock_shared(&mut *tx, organization_id).await?;
+    let (detail, rollup): (i32, i32) = sqlx::query_as("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days),COALESCE(p.resource_rollup_retention_days,o.resource_rollup_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1 FOR UPDATE OF p")
         .bind(project_id).fetch_one(&mut *tx).await?;
     let detail_before = now - Duration::days(i64::from(detail));
     let rollup_before = now - Duration::days(i64::from(rollup));
@@ -1608,6 +1620,69 @@ fn finding_id(release_id: Uuid, reason: &str, metric: &str) -> Uuid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every path that locks a project for update takes the organization's
+    /// share lock first — see `OrganizationRepository::lock_shared`. Resource
+    /// cleanup used to lock both rows in one `JOIN … FOR UPDATE`, which took the
+    /// project first and then an exclusive lock on the organization. Against the
+    /// retention worker or an inventory operation on the same project, which
+    /// hold the organization and then ask for the project, that is a deadlock,
+    /// and `PostgreSQL` aborts one side.
+    ///
+    /// This holds the organization the way those paths do, lets cleanup start,
+    /// then asks for the project. Both must finish.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn cleanup_takes_locks_in_the_shared_order(pool: sqlx::PgPool) {
+        let organization = Uuid::new_v4();
+        let project = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,$2,'Locks')")
+            .bind(organization)
+            .bind(organization.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,'p','P')")
+            .bind(project)
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut holder = pool.begin().await.unwrap();
+        assert!(
+            crate::repository::OrganizationRepository::lock_shared(&mut *holder, organization)
+                .await
+                .unwrap()
+        );
+
+        let cleanup_pool = pool.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_project_inner(&cleanup_pool, project, Utc::now(), 10).await
+        });
+        // Let cleanup reach its locks before the holder asks for the project.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let project_lock =
+            sqlx::query("SELECT id FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE")
+                .bind(organization)
+                .bind(project)
+                .fetch_one(&mut *holder)
+                .await;
+        let holder_result = match project_lock {
+            Ok(_) => holder.commit().await,
+            Err(error) => Err(error),
+        };
+
+        assert!(
+            holder_result.is_ok(),
+            "the organization-then-project path must not be aborted: {holder_result:?}"
+        );
+        assert!(
+            cleanup.await.unwrap().is_ok(),
+            "resource cleanup must not be aborted"
+        );
+    }
 
     #[test]
     fn metric_semantics_keep_pressure_and_throttling_separate() {
