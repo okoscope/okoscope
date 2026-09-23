@@ -1,5 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::UserRepository;
+use crate::repository::provisioning::ProvisioningKeyRepository;
 use crate::repository::{ApplicationRepository, OrganizationStatus, ProjectRepository};
 use axum::{
     Extension, Json, Router,
@@ -415,27 +416,26 @@ async fn reserve_idempotency(
     }
     let fingerprint = fingerprint.finalize();
     let reservation_id = Uuid::new_v4();
-    let inserted = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO provisioning_idempotency_keys(id,operation,key_hash,request_fingerprint) VALUES($1,$2,$3,$4) ON CONFLICT(operation,key_hash) DO NOTHING RETURNING id",
+    let inserted = ProvisioningKeyRepository::reserve(
+        &mut **tx,
+        reservation_id,
+        operation,
+        key_hash.as_slice(),
+        fingerprint.as_slice(),
     )
-    .bind(reservation_id)
-    .bind(operation)
-    .bind(key_hash.as_slice())
-    .bind(fingerprint.as_slice())
-    .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id))?;
+    .map_err(|error| {
+        ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
+    })?;
     if inserted.is_some() {
         return Ok(Idempotency::Fresh(reservation_id));
     }
-    let existing: (Vec<u8>, Option<Uuid>) = sqlx::query_as(
-        "SELECT request_fingerprint,resource_id FROM provisioning_idempotency_keys WHERE operation=$1 AND key_hash=$2",
-    )
-    .bind(operation)
-    .bind(key_hash.as_slice())
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id))?;
+    let existing: (Vec<u8>, Option<Uuid>) =
+        ProvisioningKeyRepository::reservation(&mut **tx, operation, key_hash.as_slice())
+            .await
+            .map_err(|error| {
+                ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
+            })?;
     if existing.0.as_slice() != fingerprint.as_slice() {
         return Err(ProvisioningError::idempotency_reused(request_id));
     }
@@ -452,10 +452,7 @@ async fn complete_idempotency(
     request_id: &RequestId,
 ) -> Result<(), ProvisioningError> {
     if let Idempotency::Fresh(reservation_id) = state {
-        sqlx::query("UPDATE provisioning_idempotency_keys SET resource_id=$1 WHERE id=$2")
-            .bind(resource_id)
-            .bind(reservation_id)
-            .execute(&mut **tx)
+        ProvisioningKeyRepository::complete(&mut **tx, resource_id, *reservation_id)
             .await
             .map_err(|error| {
                 ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
@@ -470,14 +467,11 @@ async fn list_organizations(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<OrganizationPage>, ProvisioningError> {
     authorize_platform_admin(&state, &headers, &request_id).await?;
-    let items = sqlx::query_as(
-        "SELECT id,slug,name,created_at FROM organizations ORDER BY created_at,id LIMIT 200",
-    )
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
-    })?;
+    let items = OrganizationRepository::summaries(&state.pool)
+        .await
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
+        })?;
     Ok(Json(OrganizationPage { items }))
 }
 
@@ -499,13 +493,11 @@ async fn list_projects(
             &request_id,
         ));
     }
-    let items = sqlx::query_as(
-        "SELECT id,organization_id,slug,name,created_at FROM projects WHERE organization_id=$1 ORDER BY created_at,id LIMIT 200",
-    )
-    .bind(organization_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|error| ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id))?;
+    let items = ProjectRepository::summaries(&state.pool, organization_id)
+        .await
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
+        })?;
     Ok(Json(ProjectPage { items }))
 }
 
@@ -516,9 +508,7 @@ async fn list_applications(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationPage>, ProvisioningError> {
     authorize_platform_admin(&state, &headers, &request_id).await?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=$1)")
-        .bind(project_id)
-        .fetch_one(&state.pool)
+    let exists: bool = ProjectRepository::exists(&state.pool, project_id)
         .await
         .map_err(|error| {
             ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
@@ -529,15 +519,11 @@ async fn list_applications(
             &request_id,
         ));
     }
-    let items = sqlx::query_as(
-        "SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 ORDER BY created_at,id LIMIT 200",
-    )
-    .bind(project_id)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-    })?;
+    let items = ApplicationRepository::summaries(&state.pool, project_id)
+        .await
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
+        })?;
     Ok(Json(ApplicationPage { items }))
 }
 
@@ -548,17 +534,14 @@ async fn get_application(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationResponse>, ProvisioningError> {
     authorize_platform_admin(&state, &headers, &request_id).await?;
-    let application = sqlx::query_as(
-        "SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 AND id=$2",
-    )
-    .bind(project_id)
-    .bind(application_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-    })?
-    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, &request_id))?;
+    let application = ApplicationRepository::summary(&state.pool, project_id, application_id)
+        .await
+        .map_err(|error| {
+            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
+        })?
+        .ok_or_else(|| {
+            ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, &request_id)
+        })?;
     Ok(Json(application))
 }
 
@@ -583,18 +566,15 @@ async fn create_organization(
     )
     .await?;
     if let Idempotency::Replay(resource_id) = idempotency {
-        let organization =
-            sqlx::query_as("SELECT id,slug,name,created_at FROM organizations WHERE id=$1")
-                .bind(resource_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|error| {
-                    ProvisioningError::database(
-                        &error,
-                        ErrorCode::ORGANIZATION_SLUG_CONFLICT,
-                        &request_id,
-                    )
-                })?;
+        let organization = OrganizationRepository::summary(&mut *tx, resource_id)
+            .await
+            .map_err(|error| {
+                ProvisioningError::database(
+                    &error,
+                    ErrorCode::ORGANIZATION_SLUG_CONFLICT,
+                    &request_id,
+                )
+            })?;
         return Ok((StatusCode::OK, Json(organization)));
     }
     let stored = OrganizationRepository::insert(
@@ -650,14 +630,11 @@ async fn create_project(
     )
     .await?;
     if let Idempotency::Replay(resource_id) = idempotency {
-        let project = sqlx::query_as(
-            "SELECT id,organization_id,slug,name,created_at FROM projects WHERE id=$1 AND organization_id=$2",
-        )
-        .bind(resource_id)
-        .bind(organization_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id))?;
+        let project = ProjectRepository::summary(&mut *tx, resource_id, organization_id)
+            .await
+            .map_err(|error| {
+                ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
+            })?;
         return Ok((StatusCode::OK, Json(project)));
     }
     let exists: bool = OrganizationRepository::exists(&mut *tx, organization_id)
@@ -713,9 +690,7 @@ async fn create_application(
         ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
     })?;
     let (organization_id, project_name): (Uuid, String) =
-        sqlx::query_as("SELECT organization_id,name FROM projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(&mut *tx)
+        ProjectRepository::organization_and_name(&mut *tx, project_id)
             .await
             .map_err(|error| {
                 ProvisioningError::database(
@@ -871,10 +846,7 @@ async fn owned_application(
     application_id: Uuid,
     request_id: &RequestId,
 ) -> Result<Uuid, ProvisioningError> {
-    sqlx::query_scalar("SELECT organization_id FROM applications WHERE project_id=$1 AND id=$2")
-        .bind(project_id)
-        .bind(application_id)
-        .fetch_optional(&state.pool)
+    ApplicationRepository::organization_of(&state.pool, project_id, application_id)
         .await
         .map_err(|error| {
             ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)

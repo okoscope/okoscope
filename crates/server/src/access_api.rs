@@ -1,4 +1,6 @@
 use crate::error_code::ErrorCode;
+use crate::repository::access_audit::AccessAuditRepository;
+use crate::repository::users::UserRepository;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -15,7 +17,6 @@ use crate::repository::ApplicationRepository;
 use crate::repository::MembershipRepository;
 use crate::repository::ProjectRepository;
 use crate::repository::SessionRepository;
-use crate::repository::event_groups::aggregates;
 use crate::repository::{OrganizationRepository, OrganizationStatus};
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
@@ -379,9 +380,7 @@ async fn confirm_privilege(
     Json(input): Json<PrivilegeConfirmation>,
 ) -> Result<Response, AccessError> {
     let principal = platform(&state, &headers, &request_id, false).await?;
-    let password_hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=$1")
-        .bind(principal.user_id)
-        .fetch_one(&state.pool)
+    let password_hash: String = UserRepository::password_hash(&state.pool, principal.user_id)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     if !crate::auth::verify_password(&input.current_password, &password_hash) {
@@ -475,8 +474,10 @@ async fn list_platform_users(
 ) -> Result<Json<UserPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<UserSummary> = sqlx::query_as("SELECT u.id,u.email,u.display_name,(u.email_verified_at IS NOT NULL) email_verified,(u.disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.revoked_at IS NULL) is_super_admin,u.created_at FROM users u WHERE ($1::uuid IS NULL OR u.id>$1) ORDER BY u.id LIMIT $2")
-        .bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    let mut items: Vec<UserSummary> =
+        UserRepository::platform_page(&state.pool, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id))?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(100) {
         items.pop();
         items.last().map(|item| item.id)
@@ -533,9 +534,10 @@ async fn list_platform_organizations(
 ) -> Result<Json<PlatformOrganizationPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformOrganization> = sqlx::query_as("SELECT id,slug,name,status,created_at,updated_at FROM organizations WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id LIMIT $2")
-        .bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
-        .map_err(|error| AccessError::database(&error, &request_id))?;
+    let mut items: Vec<PlatformOrganization> =
+        OrganizationRepository::platform_page(&state.pool, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id))?;
     let next_cursor = trim_page(&mut items, limit, |item| item.id);
     Ok(Json(PlatformOrganizationPage { items, next_cursor }))
 }
@@ -561,21 +563,17 @@ async fn platform_organization_by_id(
     organization_id: Uuid,
     request_id: &RequestId,
 ) -> Result<PlatformOrganization, AccessError> {
-    sqlx::query_as(
-        "SELECT id,slug,name,status,created_at,updated_at FROM organizations WHERE id=$1",
-    )
-    .bind(organization_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| AccessError::database(&error, request_id))?
-    .ok_or_else(|| {
-        AccessError::new(
-            StatusCode::NOT_FOUND,
-            ErrorCode::ORGANIZATION_NOT_FOUND,
-            "resource not found",
-            request_id,
-        )
-    })
+    OrganizationRepository::platform_get(pool, organization_id)
+        .await
+        .map_err(|error| AccessError::database(&error, request_id))?
+        .ok_or_else(|| {
+            AccessError::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::ORGANIZATION_NOT_FOUND,
+                "resource not found",
+                request_id,
+            )
+        })
 }
 
 async fn create_platform_organization(
@@ -805,9 +803,10 @@ async fn list_platform_projects(
 ) -> Result<Json<PlatformProjectPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformProject> = sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
-        .bind(organization_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
-        .map_err(|error| AccessError::database(&error, &request_id))?;
+    let mut items: Vec<PlatformProject> =
+        ProjectRepository::platform_page(&state.pool, organization_id, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
         item.effective_project_role = Some(ProjectRole::Admin);
         item.effective_access_source = Some(EffectiveAccessSource::Platform);
@@ -943,9 +942,10 @@ async fn list_platform_applications(
 ) -> Result<Json<PlatformApplicationPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformApplication> = sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_ALL_FOR_APPLICATION,aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
-        .bind(project_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
-        .map_err(|error| AccessError::database(&error, &request_id))?;
+    let mut items: Vec<PlatformApplication> =
+        ApplicationRepository::platform_page(&state.pool, project_id, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
         item.effective_project_role = Some(ProjectRole::Admin);
         item.effective_access_source = Some(EffectiveAccessSource::Platform);
@@ -1081,9 +1081,17 @@ async fn set_user_status(
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     lock_authority(&mut tx, &request_id).await?;
-    let item: UserSummary = sqlx::query_as("UPDATE users SET disabled_at=CASE WHEN $2 THEN coalesce(disabled_at,now()) ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING id,email,display_name,(email_verified_at IS NOT NULL) email_verified,(disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=users.id AND p.revoked_at IS NULL) is_super_admin,created_at")
-        .bind(user_id).bind(disabled).fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", &request_id))?;
+    let item: UserSummary = UserRepository::set_disabled(&mut *tx, user_id, disabled)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?
+        .ok_or_else(|| {
+            AccessError::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::USER_NOT_FOUND,
+                "resource not found",
+                &request_id,
+            )
+        })?;
     SessionRepository::revoke_all_for_user(&mut *tx, user_id, None)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
@@ -1131,8 +1139,9 @@ async fn grant_super_admin(
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     lock_authority(&mut tx, &request_id).await?;
-    let eligible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND disabled_at IS NULL AND email_verified_at IS NOT NULL)")
-        .bind(user_id).fetch_one(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    let eligible: bool = UserRepository::eligible_for_super_admin(&mut *tx, user_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
     if !eligible {
         return Err(AccessError::new(
             StatusCode::CONFLICT,
@@ -1141,8 +1150,9 @@ async fn grant_super_admin(
             &request_id,
         ));
     }
-    sqlx::query("INSERT INTO platform_role_assignments(user_id,role,granted_by_user_id) VALUES($1,'super_admin',$2) ON CONFLICT(user_id) DO UPDATE SET revoked_at=NULL,granted_at=now(),granted_by_user_id=$2")
-        .bind(user_id).bind(actor.user_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    UserRepository::grant_super_admin(&mut *tx, user_id, actor.user_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
         &mut tx,
         actor.user_id,
@@ -1175,8 +1185,7 @@ async fn revoke_super_admin(
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     lock_authority(&mut tx, &request_id).await?;
-    let result = sqlx::query("UPDATE platform_role_assignments SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL")
-        .bind(user_id).execute(&mut *tx).await;
+    let result = UserRepository::revoke_super_admin(&mut *tx, user_id).await;
     if let Err(error) = result {
         return if error
             .as_database_error()
@@ -1242,10 +1251,13 @@ async fn list_organization_members(
 ) -> Result<Json<OrganizationMemberPage>, AccessError> {
     let actor = organization_admin(&state, &headers, organization_id, &request_id).await?;
     let limit = page.limit();
-    let rows: Vec<OrganizationMemberRow> = sqlx::query_as(
-        "SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND ($2::uuid IS NULL OR u.id>$2) ORDER BY u.id LIMIT $3",
+    let rows: Vec<OrganizationMemberRow> = MembershipRepository::organization_member_page(
+        &state.pool,
+        organization_id,
+        page.cursor,
+        limit + 1,
     )
-    .bind(organization_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
+    .await
     .map_err(|error| AccessError::database(&error, &request_id))?;
     let mut items = rows
         .into_iter()
@@ -1328,13 +1340,12 @@ async fn update_organization_member(
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     lock_authority(&mut tx, &request_id).await?;
-    let result = sqlx::query(
-        "UPDATE organization_memberships SET role=$3 WHERE organization_id=$1 AND user_id=$2",
+    let result = MembershipRepository::set_organization_role(
+        &mut *tx,
+        organization_id,
+        user_id,
+        role_name(input.role),
     )
-    .bind(organization_id)
-    .bind(user_id)
-    .bind(role_name(input.role))
-    .execute(&mut *tx)
     .await;
     map_authority_result(
         result,
@@ -1426,10 +1437,17 @@ async fn organization_member_by_id(
     user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<OrganizationMember, AccessError> {
-    let row = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2")
-        .bind(organization_id).bind(user_id).fetch_optional(pool).await
+    let row = MembershipRepository::organization_member(pool, organization_id, user_id)
+        .await
         .map_err(|error| AccessError::database(&error, request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", request_id))?;
+        .ok_or_else(|| {
+            AccessError::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::USER_NOT_FOUND,
+                "resource not found",
+                request_id,
+            )
+        })?;
     organization_member(row).ok_or_else(|| {
         AccessError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1507,8 +1525,10 @@ async fn list_project_members(
 ) -> Result<Json<ProjectMemberPage>, AccessError> {
     let (actor, _, actor_role) = project_actor(&state, &headers, project_id, &request_id).await?;
     let limit = page.limit();
-    let rows: Vec<(Uuid, String, String, String, DateTime<Utc>)> = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,m.created_at FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 AND ($2::uuid IS NULL OR u.id>$2) ORDER BY u.id LIMIT $3")
-        .bind(project_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    let rows: Vec<(Uuid, String, String, String, DateTime<Utc>)> =
+        MembershipRepository::project_member_page(&state.pool, project_id, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, &request_id))?;
     let mut items = rows
         .into_iter()
         .filter_map(project_member)
@@ -1536,9 +1556,15 @@ async fn list_eligible_project_members(
 ) -> Result<Json<OrganizationMemberPage>, AccessError> {
     let (_, organization_id, _) = project_actor(&state, &headers, project_id, &request_id).await?;
     let limit = page.limit();
-    let rows: Vec<OrganizationMemberRow> = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND u.disabled_at IS NULL AND NOT EXISTS(SELECT 1 FROM project_memberships pm WHERE pm.project_id=$2 AND pm.user_id=u.id) AND ($3::uuid IS NULL OR u.id>$3) ORDER BY u.id LIMIT $4")
-        .bind(organization_id).bind(project_id).bind(page.cursor).bind(limit + 1)
-        .fetch_all(&state.pool).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    let rows: Vec<OrganizationMemberRow> = MembershipRepository::eligible_project_member_page(
+        &state.pool,
+        organization_id,
+        project_id,
+        page.cursor,
+        limit + 1,
+    )
+    .await
+    .map_err(|error| AccessError::database(&error, &request_id))?;
     let mut items = rows.into_iter().filter_map(organization_member).collect();
     let next_cursor = trim_page(&mut items, limit, |item| item.user_id);
     Ok(Json(OrganizationMemberPage { items, next_cursor }))
@@ -1664,8 +1690,14 @@ async fn update_project_member(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    sqlx::query("UPDATE project_memberships SET role=$3,updated_at=now() WHERE project_id=$1 AND user_id=$2")
-        .bind(project_id).bind(user_id).bind(project_role_name(input.role)).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    MembershipRepository::set_project_role(
+        &mut *tx,
+        project_id,
+        user_id,
+        project_role_name(input.role),
+    )
+    .await
+    .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
         &mut tx,
         actor.user_id,
@@ -1742,9 +1774,17 @@ async fn project_member_by_id(
     user_id: Uuid,
     request_id: &RequestId,
 ) -> Result<ProjectMember, AccessError> {
-    let row = sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,m.created_at FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 AND m.user_id=$2")
-        .bind(project_id).bind(user_id).fetch_optional(pool).await.map_err(|error| AccessError::database(&error, request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", request_id))?;
+    let row = MembershipRepository::project_member(pool, project_id, user_id)
+        .await
+        .map_err(|error| AccessError::database(&error, request_id))?
+        .ok_or_else(|| {
+            AccessError::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::USER_NOT_FOUND,
+                "resource not found",
+                request_id,
+            )
+        })?;
     project_member(row).ok_or_else(|| {
         AccessError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1812,8 +1852,7 @@ async fn lock_authority(
     tx: &mut Transaction<'_, Postgres>,
     request_id: &RequestId,
 ) -> Result<(), AccessError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(1869373292)")
-        .execute(&mut **tx)
+    MembershipRepository::lock_authority(&mut **tx)
         .await
         .map(|_| ())
         .map_err(|error| AccessError::database(&error, request_id))
@@ -1882,8 +1921,10 @@ async fn query_audit(
     request_id: &RequestId,
 ) -> Result<AuditPage, AccessError> {
     let limit = page.limit();
-    let mut items: Vec<AuditRecord> = sqlx::query_as("SELECT id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,created_at FROM access_audit_records WHERE ($1::uuid IS NULL OR organization_id=$1) AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3")
-        .bind(organization_id).bind(page.cursor).bind(limit + 1).fetch_all(pool).await.map_err(|error| AccessError::database(&error, request_id))?;
+    let mut items: Vec<AuditRecord> =
+        AccessAuditRepository::page(pool, organization_id, page.cursor, limit + 1)
+            .await
+            .map_err(|error| AccessError::database(&error, request_id))?;
     let next_cursor = trim_page(&mut items, limit, |item| item.id);
     Ok(AuditPage { items, next_cursor })
 }

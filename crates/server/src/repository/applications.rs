@@ -44,6 +44,81 @@ pub struct StoredApplication {
 pub struct ApplicationRepository;
 
 impl ApplicationRepository {
+    /// The project's first 200 applications, oldest first.
+    ///
+    /// Selects `id`, `organization_id`, `project_id`, `slug`, `name` and
+    /// `created_at`.
+    pub async fn summaries<'e, E, T>(executor: E, project_id: Uuid) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 ORDER BY created_at,id LIMIT 200")
+            .bind(project_id)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// One application of the project with the columns of
+    /// [`Self::summaries`].
+    pub async fn summary<'e, E, T>(
+        executor: E,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 AND id=$2")
+            .bind(project_id)
+            .bind(application_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// The organization of an application of the project.
+    pub async fn organization_of<'e, E>(
+        executor: E,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<Option<Uuid>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT organization_id FROM applications WHERE project_id=$1 AND id=$2",
+        )
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
+    }
+
+    /// A page of the project's applications by id, after the cursor when one
+    /// is given, for platform administration, with their release and runtime
+    /// group counts and latest observation.
+    ///
+    /// Selects `id`, `project_id`, `slug`, `name`, `created_at`,
+    /// `release_count`, `runtime_group_count` and `latest_observed_at`.
+    pub async fn platform_page<'e, E, T>(
+        executor: E,
+        project_id: Uuid,
+        cursor: Option<Uuid>,
+        fetch_limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, crate::repository::event_groups::aggregates::COUNT_ALL_FOR_APPLICATION,crate::repository::event_groups::aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
+            .bind(project_id)
+            .bind(cursor)
+            .bind(fetch_limit)
+            .fetch_all(executor)
+            .await
+    }
+
     /// Creates an application in a project, returning the stored row, or
     /// `None` when the project does not exist.
     ///
@@ -299,6 +374,102 @@ mod tests {
             !ApplicationRepository::exists(&pool, organization, project, Uuid::new_v4())
                 .await
                 .unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod platform_statement_tests {
+    use chrono::{DateTime, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    use super::ApplicationRepository;
+    use crate::repository::test_support::{exec, ingest, manual_release, tenant};
+
+    #[derive(Debug, FromRow)]
+    struct PlatformApplication {
+        id: Uuid,
+        release_count: i64,
+        runtime_group_count: i64,
+        latest_observed_at: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Debug, FromRow)]
+    struct Application {
+        id: Uuid,
+        organization_id: Uuid,
+        slug: String,
+    }
+
+    /// Platform pages carry release and runtime group counts and the latest
+    /// observation; the summaries list a project's applications oldest first;
+    /// single reads stay within the project.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn applications_page_list_and_resolve(pool: PgPool) {
+        let own = tenant(&pool, "applications-platform").await;
+        let other = tenant(&pool, "applications-platform-other").await;
+        manual_release(&pool, &own, "v1", Utc::now()).await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let quiet =
+            ApplicationRepository::insert(&pool, Uuid::new_v4(), own.project_id, "quiet", "Quiet")
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+        let mut by_id = vec![own.application_id, quiet];
+        by_id.sort();
+
+        let page: Vec<PlatformApplication> =
+            ApplicationRepository::platform_page(&pool, own.project_id, None, 10)
+                .await
+                .unwrap();
+        assert_eq!(page.iter().map(|a| a.id).collect::<Vec<_>>(), by_id);
+        let busy = page.iter().find(|a| a.id == own.application_id).unwrap();
+        assert_eq!((busy.release_count, busy.runtime_group_count), (1, 1));
+        assert!(busy.latest_observed_at.is_some());
+        let idle = page.iter().find(|a| a.id == quiet).unwrap();
+        assert_eq!((idle.release_count, idle.runtime_group_count), (0, 0));
+        assert!(idle.latest_observed_at.is_none());
+        let after: Vec<PlatformApplication> =
+            ApplicationRepository::platform_page(&pool, own.project_id, Some(by_id[0]), 10)
+                .await
+                .unwrap();
+        assert_eq!(after.iter().map(|a| a.id).collect::<Vec<_>>(), by_id[1..]);
+
+        let listed: Vec<Application> = ApplicationRepository::summaries(&pool, own.project_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            listed.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [own.application_id, quiet]
+        );
+        let one: Application = ApplicationRepository::summary(&pool, own.project_id, quiet)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (one.organization_id, one.slug.as_str()),
+            (own.organization_id, "quiet")
+        );
+        assert!(
+            ApplicationRepository::summary::<_, Application>(&pool, other.project_id, quiet)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            ApplicationRepository::organization_of(&pool, own.project_id, quiet)
+                .await
+                .unwrap(),
+            Some(own.organization_id)
+        );
+        assert_eq!(
+            ApplicationRepository::organization_of(&pool, other.project_id, quiet)
+                .await
+                .unwrap(),
+            None
         );
     }
 }
