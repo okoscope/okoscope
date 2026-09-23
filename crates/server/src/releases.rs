@@ -372,9 +372,19 @@ async fn list_releases(
         return Err(ReleaseError::NotFound);
     }
     let cursor = if let Some(id) = query.cursor {
-        Some(sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT deployed_at,id FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-            .bind(organization_id).bind(project_id).bind(application_id).bind(id)
-            .fetch_optional(&state.pool).await?.ok_or_else(|| ReleaseError::Invalid("cursor does not exist in this scope".into()))?)
+        Some(
+            crate::repository::ReleaseRepository::cursor(
+                &state.pool,
+                crate::repository::ApplicationScope {
+                    organization_id,
+                    project_id,
+                    application_id,
+                },
+                id,
+            )
+            .await?
+            .ok_or_else(|| ReleaseError::Invalid("cursor does not exist in this scope".into()))?,
+        )
     } else {
         None
     };

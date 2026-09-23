@@ -262,10 +262,17 @@ async fn resolve_release(
     let Some(identity) = &aggregate.release_identity else {
         return Ok(None);
     };
-    sqlx::query_scalar("SELECT id FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4 AND identity_digest=$5")
-        .bind(application.organization_id).bind(application.project_id).bind(application.application_id)
-        .bind(i16::try_from(identity.version).unwrap_or(i16::MAX)).bind(identity.digest.as_slice())
-        .fetch_optional(pool).await
+    crate::repository::ReleaseRepository::id_by_identity(
+        pool,
+        crate::repository::ApplicationScope {
+            organization_id: application.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+        },
+        i16::try_from(identity.version).unwrap_or(i16::MAX),
+        identity.digest.as_slice(),
+    )
+    .await
 }
 
 async fn insert_contribution(

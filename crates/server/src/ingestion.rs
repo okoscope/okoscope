@@ -306,14 +306,15 @@ async fn resolve_release(
     let Some(version) = event.attribution.release.as_deref() else {
         return Ok(None);
     };
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM releases WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND version=$4",
+    Ok(crate::repository::ReleaseRepository::id_by_version(
+        &mut **tx,
+        crate::repository::ApplicationScope {
+            organization_id: context.scope.organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+        },
+        version,
     )
-    .bind(context.scope.organization_id)
-    .bind(event.attribution.project_id)
-    .bind(event.attribution.application_id)
-    .bind(version)
-    .fetch_optional(&mut **tx)
     .await?)
 }
 
