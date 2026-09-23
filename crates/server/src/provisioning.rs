@@ -1,6 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::UserRepository;
-use crate::repository::{OrganizationStatus, ProjectRepository};
+use crate::repository::{ApplicationRepository, OrganizationStatus, ProjectRepository};
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -745,9 +745,28 @@ async fn create_application(
     if matches!(idempotency, Idempotency::Replay(_)) {
         return Err(ProvisioningError::completed(&request_id));
     }
-    let application: ApplicationResponse = sqlx::query_as("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,$4,$5) RETURNING id,organization_id,project_id,slug,name,created_at")
-        .bind(Uuid::new_v4()).bind(organization_id).bind(project_id).bind(input.slug).bind(input.name)
-        .fetch_one(&mut *tx).await.map_err(|error| ProvisioningError::database(&error,ErrorCode::APPLICATION_SLUG_CONFLICT,&request_id))?;
+    // The project was resolved above; `None` is a race with its deletion and
+    // is reported the way that lookup reports a missing project.
+    let stored = ApplicationRepository::insert(
+        &mut *tx,
+        Uuid::new_v4(),
+        project_id,
+        &input.slug,
+        &input.name,
+    )
+    .await
+    .map_err(|error| {
+        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
+    })?
+    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::PROJECT_NOT_FOUND, &request_id))?;
+    let application = ApplicationResponse {
+        id: stored.id,
+        organization_id: stored.organization_id,
+        project_id: stored.project_id,
+        slug: stored.slug,
+        name: stored.name,
+        created_at: stored.created_at,
+    };
     let credential = issue(
         &mut tx,
         organization_id,
