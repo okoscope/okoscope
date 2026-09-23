@@ -1,3 +1,4 @@
+use crate::repository::schema::SchemaRepository;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 
@@ -36,10 +37,7 @@ fn schema_is_compatible(actual: Option<i64>, required: i64) -> bool {
 }
 
 async fn current_migration(pool: &PgPool) -> Result<Option<i64>, sqlx::Error> {
-    let row =
-        sqlx::query("SELECT max(version) AS version FROM _sqlx_migrations WHERE success = true")
-            .fetch_one(pool)
-            .await?;
+    let row = SchemaRepository::current_migration(pool).await?;
     row.try_get("version")
 }
 

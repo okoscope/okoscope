@@ -68,6 +68,321 @@ fn bind_scope<'q, T>(
 pub struct InventoryRepository;
 
 impl InventoryRepository {
+    /// Grouped raw events of the project, or one application, after `cursor`
+    /// up to `upper_bound` by id, that are not yet projected into the
+    /// inventory under `identity_version`, at most `limit`.
+    ///
+    /// Selects the event row with its `group_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn projection_backfill_page<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Option<Uuid>,
+        identity_version: i16,
+        cursor: Option<Uuid>,
+        upper_bound: Uuid,
+        limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT e.id,e.event_id,e.organization_id,e.project_id,e.cluster_id,e.application_id,e.release_id,m.group_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=1 LEFT JOIN runtime_inventory_event_memberships im ON im.event_id=e.id AND im.identity_version=$4 WHERE e.organization_id=$1 AND e.project_id=$2 AND ($3::uuid IS NULL OR e.application_id=$3) AND im.event_id IS NULL AND ($5::uuid IS NULL OR e.id>$5) AND e.id<=$6 ORDER BY e.id LIMIT $7")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(identity_version)
+            .bind(cursor)
+            .bind(upper_bound)
+            .bind(limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// Compares the application's grouped raw events with its inventory
+    /// projection under `identity_version`.
+    ///
+    /// Selects `source_event_count`, `membership_count`,
+    /// `item_occurrence_count`, and the source and projected first and last
+    /// seen times.
+    pub async fn reconciliation<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        identity_version: i16,
+    ) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT (SELECT count(*) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_event_count,(SELECT count(*) FROM runtime_inventory_event_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) membership_count,(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) item_occurrence_count,(SELECT min(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_first_seen_at,(SELECT min(first_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_first_seen_at,(SELECT max(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_last_seen_at,(SELECT max(last_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_last_seen_at")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(identity_version)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// How many inventory items exist, and how many seconds ago the most
+    /// recently updated one changed (0 when there are none).
+    pub async fn item_count_and_staleness<'e, E>(executor: E) -> Result<(i64, i64), sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_as::<_, (i64, i64)>("SELECT count(*)::bigint,COALESCE(EXTRACT(EPOCH FROM (now()-max(updated_at)))::bigint,0) FROM runtime_inventory_items")
+            .fetch_one(executor)
+            .await
+    }
+
+    /// An item's identity version and digest.
+    pub async fn identity_key<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<(i16, Vec<u8>), sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_as::<_, (i16, Vec<u8>)>("SELECT identity_version,identity_digest FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(item_id)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// Records a new inventory item for an identity, returning its id; `None`
+    /// when the application already has that identity.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_item<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        inventory_kind: &str,
+        identity_version: i16,
+        identity_digest: &[u8],
+        semantic_summary: &serde_json::Value,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Option<Uuid>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1) ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO NOTHING RETURNING id")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(inventory_kind)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .bind(semantic_summary)
+            .bind(observed_at)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// The id of the application's item with this identity.
+    pub async fn item_id_by_identity<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        inventory_kind: &str,
+        identity_version: i16,
+        identity_digest: &[u8],
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND inventory_kind=$4 AND identity_version=$5 AND identity_digest=$6 FOR UPDATE")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(inventory_kind)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// Makes an event an occurrence of an item under `identity_version`,
+    /// once; `None` when it already was.
+    pub async fn add_event_membership<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        event_id: Uuid,
+        item_id: Uuid,
+        identity_version: i16,
+    ) -> Result<Option<Uuid>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id,identity_version) DO NOTHING RETURNING event_id")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(event_id)
+            .bind(item_id)
+            .bind(identity_version)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// Counts an occurrence of an inbound endpoint item, widening its seen
+    /// window and remembering whether a listener or an accept was observed.
+    pub async fn record_inbound_occurrence<'e, E>(
+        executor: E,
+        item_id: Uuid,
+        observed_at: DateTime<Utc>,
+        listener_observed: bool,
+        accept_observed: bool,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,semantic_summary=jsonb_set(jsonb_set(semantic_summary,'{listener_observed}',to_jsonb(COALESCE((semantic_summary->>'listener_observed')::boolean,false) OR $3)),'{accept_observed}',to_jsonb(COALESCE((semantic_summary->>'accept_observed')::boolean,false) OR $4)),updated_at=now() WHERE id=$1")
+            .bind(item_id)
+            .bind(observed_at)
+            .bind(listener_observed)
+            .bind(accept_observed)
+            .execute(executor)
+            .await
+    }
+
+    /// Counts an occurrence of an item and widens its seen window.
+    pub async fn record_occurrence<'e, E>(
+        executor: E,
+        item_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,updated_at=now() WHERE id=$1")
+            .bind(item_id)
+            .bind(observed_at)
+            .execute(executor)
+            .await
+    }
+
+    /// Links an item to a runtime group, once.
+    pub async fn link_group<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        item_id: Uuid,
+        group_id: Uuid,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_inventory_group_links(organization_id,project_id,application_id,item_id,group_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT (item_id,group_id) DO NOTHING")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(item_id)
+            .bind(group_id)
+            .execute(executor)
+            .await
+    }
+
+    /// Counts an occurrence of an item in a release.
+    pub async fn record_release_occurrence<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        item_id: Uuid,
+        release_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_inventory_releases(organization_id,project_id,application_id,item_id,release_id,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,1,$6,$6) ON CONFLICT (item_id,release_id) DO UPDATE SET occurrence_count=runtime_inventory_releases.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(item_id)
+            .bind(release_id)
+            .bind(observed_at)
+            .execute(executor)
+            .await
+    }
+
+    /// Counts an occurrence of an item at one placement.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_sighting<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        item_id: Uuid,
+        cluster_id: Uuid,
+        namespace: &str,
+        workload_kind: &str,
+        workload_name: &str,
+        pod_uid: &str,
+        pod_name: &str,
+        container_name: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12,$12) ON CONFLICT (item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET occurrence_count=runtime_inventory_sightings.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_sightings.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_sightings.last_seen_at,EXCLUDED.last_seen_at),pod_name=EXCLUDED.pod_name,updated_at=now()")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(item_id)
+            .bind(cluster_id)
+            .bind(namespace)
+            .bind(workload_kind)
+            .bind(workload_name)
+            .bind(pod_uid)
+            .bind(pod_name)
+            .bind(container_name)
+            .bind(observed_at)
+            .execute(executor)
+            .await
+    }
+
+    /// Links the inventory items an event belongs to under `identity_version`
+    /// to a group, once.
+    pub async fn link_event_items_to_group<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        group_id: Uuid,
+        event_id: Uuid,
+        identity_version: i16,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_inventory_group_links (organization_id,project_id,application_id,item_id,group_id) SELECT $1,$2,$3,m.item_id,$4 FROM runtime_inventory_event_memberships m WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.event_id=$5 AND m.identity_version=$6 ON CONFLICT (item_id,group_id) DO NOTHING")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(group_id)
+            .bind(event_id)
+            .bind(identity_version)
+            .execute(executor)
+            .await
+    }
+
     /// Item and occurrence counts and the seen window per inventory kind under
     /// the filter, with the lifecycle kinds folded into `lifecycle`.
     ///

@@ -1,3 +1,4 @@
+use crate::repository::sessions::SessionRepository;
 use std::{fmt, str::FromStr, time::Duration};
 
 use argon2::{
@@ -127,12 +128,8 @@ impl UserSessionAuthenticator {
         let Some(digest) = session_digest(token) else {
             return Ok(None);
         };
-        let identity: Option<SessionIdentityRow> = sqlx::query_as(
-            "UPDATE user_sessions s SET last_used_at=now() FROM users u WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id AND o.status='active')) RETURNING s.id session_id,s.user_id,s.organization_id,(SELECT m.role FROM organization_memberships m WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id) role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=s.user_id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,s.privileged_until",
-        )
-        .bind(digest.to_vec())
-        .fetch_optional(&self.pool)
-        .await?;
+        let identity: Option<SessionIdentityRow> =
+            SessionRepository::authenticate(&self.pool, digest.to_vec()).await?;
         Ok(identity.and_then(|row| {
             Some(IdentityPrincipal {
                 user_id: row.user_id,

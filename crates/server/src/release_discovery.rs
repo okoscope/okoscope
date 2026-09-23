@@ -1,3 +1,5 @@
+use crate::repository::deployments::DeploymentRepository;
+use crate::repository::releases::ReleaseRepository;
 use event_model::{
     ReleaseIdentity, RevisionReadinessSnapshot, WorkloadRevisionEvidence, revision_digest,
 };
@@ -38,15 +40,26 @@ pub async fn persist_revision_evidence(
     )
     .await?;
     let digest = revision_digest(evidence);
-    let revision_id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO kubernetes_workload_revisions(id,organization_id,project_id,application_id,cluster_id,release_id,identity_version,identity_digest,namespace,workload_uid,workload_kind,workload_name,replica_set_uid,replica_set_name,pod_template_hash,first_observed_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16) ON CONFLICT(application_id,cluster_id,workload_uid,replica_set_uid) DO UPDATE SET last_observed_at=GREATEST(kubernetes_workload_revisions.last_observed_at,EXCLUDED.last_observed_at) WHERE kubernetes_workload_revisions.release_id=EXCLUDED.release_id AND kubernetes_workload_revisions.identity_digest=EXCLUDED.identity_digest RETURNING id",
+    let revision_id: Option<Uuid> = DeploymentRepository::insert_revision(
+        &mut *tx,
+        Uuid::new_v4(),
+        scope.organization_id,
+        application.project_id,
+        application.application_id,
+        scope.cluster_id,
+        release_id,
+        i16::try_from(evidence.release_identity.version).unwrap_or(i16::MAX),
+        digest.as_slice(),
+        &evidence.namespace,
+        &evidence.workload_uid,
+        &evidence.workload_kind,
+        &evidence.workload_name,
+        &evidence.replica_set_uid,
+        &evidence.replica_set_name,
+        evidence.pod_template_hash.as_deref(),
+        evidence.observed_at,
     )
-    .bind(Uuid::new_v4()).bind(scope.organization_id).bind(application.project_id)
-    .bind(application.application_id).bind(scope.cluster_id).bind(release_id)
-    .bind(i16::try_from(evidence.release_identity.version).unwrap_or(i16::MAX)).bind(digest.as_slice())
-    .bind(&evidence.namespace).bind(&evidence.workload_uid).bind(&evidence.workload_kind)
-    .bind(&evidence.workload_name).bind(&evidence.replica_set_uid).bind(&evidence.replica_set_name)
-    .bind(&evidence.pod_template_hash).bind(evidence.observed_at).fetch_optional(&mut *tx).await?;
+    .await?;
     let Some(revision_id) = revision_id else {
         return Err(sqlx::Error::Protocol(
             "conflicting immutable identity for Kubernetes ReplicaSet".into(),
@@ -73,16 +86,17 @@ async fn lock_revision(
     application: ApplicationCredentialScope,
     evidence: &WorkloadRevisionEvidence,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!(
+    DeploymentRepository::lock_revision(
+        &mut **tx,
+        format!(
             "{}:{}:{}:{}",
             application.application_id,
             scope.cluster_id,
             evidence.workload_uid,
             evidence.replica_set_uid
-        ))
-        .execute(&mut **tx)
-        .await?;
+        ),
+    )
+    .await?;
     Ok(())
 }
 
@@ -95,13 +109,19 @@ pub(crate) async fn resolve_observed_release(
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let version = format!("sha256:{}", hex::encode(identity.digest));
-    sqlx::query_scalar(
-        "INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at,source,identity_version,identity_digest,identity_components) VALUES($1,$2,$3,$4,$5,$6,'observed',$7,$8,$9) ON CONFLICT(application_id,version) DO UPDATE SET identity_components=EXCLUDED.identity_components WHERE releases.organization_id=EXCLUDED.organization_id AND releases.project_id=EXCLUDED.project_id AND releases.source='observed' AND releases.identity_version=EXCLUDED.identity_version AND releases.identity_digest=EXCLUDED.identity_digest RETURNING id",
-    ).bind(Uuid::new_v4()).bind(organization_id).bind(project_id)
-      .bind(application_id).bind(version).bind(observed_at)
-      .bind(i16::try_from(identity.version).unwrap_or(i16::MAX)).bind(identity.digest.as_slice())
-      .bind(to_value(&identity.containers).expect("release components serialize"))
-      .fetch_one(&mut **tx).await
+    ReleaseRepository::insert_observed(
+        &mut **tx,
+        Uuid::new_v4(),
+        organization_id,
+        project_id,
+        application_id,
+        version,
+        observed_at,
+        i16::try_from(identity.version).unwrap_or(i16::MAX),
+        identity.digest.as_slice(),
+        to_value(&identity.containers).expect("release components serialize"),
+    )
+    .await
 }
 
 async fn open_episode(
@@ -112,36 +132,47 @@ async fn open_episode(
     revision_id: Uuid,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), sqlx::Error> {
-    let prior_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM deployment_episodes WHERE revision_id=$1")
-            .bind(revision_id)
-            .fetch_one(&mut **tx)
-            .await?;
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM deployment_episodes WHERE revision_id=$1 AND state<>'inactive'",
-    )
-    .bind(revision_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let prior_count: i64 = DeploymentRepository::episode_count(&mut **tx, revision_id).await?;
+    let existing: Option<Uuid> = DeploymentRepository::open_episode(&mut **tx, revision_id).await?;
     if let Some(id) = existing {
-        sqlx::query("UPDATE deployment_episodes SET last_observed_at=GREATEST(last_observed_at,$2),state='active',first_ready_at=COALESCE(first_ready_at,$2) WHERE id=$1")
-            .bind(id).bind(observed_at).execute(&mut **tx).await?;
+        DeploymentRepository::touch_episode(&mut **tx, id, observed_at).await?;
         return Ok(());
     }
-    let predecessors: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT id,release_id FROM deployment_episodes WHERE organization_id=$1 AND application_id=$2 AND cluster_id=$3 AND state='active' ORDER BY last_observed_at DESC,id DESC")
-        .bind(scope.organization_id).bind(application.application_id).bind(scope.cluster_id)
-        .fetch_all(&mut **tx).await?;
+    let predecessors: Vec<(Uuid, Uuid)> = DeploymentRepository::active_episodes(
+        &mut **tx,
+        scope.organization_id,
+        application.application_id,
+        scope.cluster_id,
+    )
+    .await?;
     let predecessor_releases: Vec<_> = predecessors.iter().map(|(_, id)| *id).collect();
     let transition = transition_kind(prior_count, release_id, &predecessor_releases);
     let episode_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO deployment_episodes(id,organization_id,project_id,application_id,cluster_id,release_id,revision_id,occurrence_number,state,transition_kind,first_observed_at,first_ready_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$10,$10)")
-        .bind(episode_id).bind(scope.organization_id).bind(application.project_id).bind(application.application_id)
-        .bind(scope.cluster_id).bind(release_id).bind(revision_id).bind(prior_count+1).bind(transition).bind(observed_at)
-        .execute(&mut **tx).await?;
+    DeploymentRepository::insert_episode(
+        &mut **tx,
+        episode_id,
+        scope.organization_id,
+        application.project_id,
+        application.application_id,
+        scope.cluster_id,
+        release_id,
+        revision_id,
+        prior_count + 1,
+        transition,
+        observed_at,
+    )
+    .await?;
     for (predecessor_id, _) in predecessors {
-        sqlx::query("INSERT INTO deployment_episode_predecessors(organization_id,project_id,application_id,episode_id,predecessor_episode_id,observed_at,concurrent) VALUES($1,$2,$3,$4,$5,$6,true) ON CONFLICT DO NOTHING")
-            .bind(scope.organization_id).bind(application.project_id).bind(application.application_id)
-            .bind(episode_id).bind(predecessor_id).bind(observed_at).execute(&mut **tx).await?;
+        DeploymentRepository::link_predecessor(
+            &mut **tx,
+            scope.organization_id,
+            application.project_id,
+            application.application_id,
+            episode_id,
+            predecessor_id,
+            observed_at,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -165,18 +196,35 @@ pub async fn persist_readiness_snapshot(
     snapshot: &RevisionReadinessSnapshot,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let revision_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM kubernetes_workload_revisions WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND identity_digest=$5")
-        .bind(scope.organization_id).bind(application.project_id).bind(application.application_id)
-        .bind(scope.cluster_id).bind(snapshot.revision_digest.as_slice()).fetch_optional(&mut *tx).await?;
+    let revision_id: Option<Uuid> = DeploymentRepository::revision_by_digest(
+        &mut *tx,
+        scope.organization_id,
+        application.project_id,
+        application.application_id,
+        scope.cluster_id,
+        snapshot.revision_digest.as_slice(),
+    )
+    .await?;
     let Some(revision_id) = revision_id else {
         tracing::warn!(application_id=%application.application_id, cluster_id=%scope.cluster_id, "readiness snapshot has no known scoped revision");
         return tx.commit().await;
     };
-    sqlx::query("INSERT INTO kubernetes_revision_snapshots(organization_id,project_id,application_id,cluster_id,revision_id,snapshot_id,observed_at,initialized,continuous,pod_count,ready_pod_count,workload_ready_pod_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING")
-        .bind(scope.organization_id).bind(application.project_id).bind(application.application_id).bind(scope.cluster_id)
-        .bind(revision_id).bind(&snapshot.snapshot_id).bind(snapshot.observed_at).bind(snapshot.initialized).bind(snapshot.continuous)
-        .bind(i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX)).bind(i32::try_from(snapshot.ready_pod_count).unwrap_or(i32::MAX))
-        .bind(i32::try_from(snapshot.workload_ready_pod_count).unwrap_or(i32::MAX)).execute(&mut *tx).await?;
+    DeploymentRepository::insert_snapshot(
+        &mut *tx,
+        scope.organization_id,
+        application.project_id,
+        application.application_id,
+        scope.cluster_id,
+        revision_id,
+        &snapshot.snapshot_id,
+        snapshot.observed_at,
+        snapshot.initialized,
+        snapshot.continuous,
+        i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX),
+        i32::try_from(snapshot.ready_pod_count).unwrap_or(i32::MAX),
+        i32::try_from(snapshot.workload_ready_pod_count).unwrap_or(i32::MAX),
+    )
+    .await?;
     let pod_count = i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX);
     let ready_count = i32::try_from(snapshot.ready_pod_count).unwrap_or(i32::MAX);
     let workload_ready = i32::try_from(snapshot.workload_ready_pod_count).unwrap_or(i32::MAX);
@@ -186,13 +234,24 @@ pub async fn persist_readiness_snapshot(
                 .ok()
                 .as_deref(),
         );
-        sqlx::query("UPDATE deployment_episodes SET pod_count=0,ready_pod_count=0,workload_ready_pod_count=$2,snapshot_observed_at=$3,state='inactive',ended_at=$3 WHERE revision_id=$1 AND state<>'inactive' AND $3>=last_observed_at+($4::double precision*interval '1 second')")
-            .bind(revision_id).bind(workload_ready).bind(snapshot.observed_at).bind(stabilization)
-            .execute(&mut *tx).await?;
+        DeploymentRepository::end_episode(
+            &mut *tx,
+            revision_id,
+            workload_ready,
+            snapshot.observed_at,
+            stabilization,
+        )
+        .await?;
     } else {
-        sqlx::query("UPDATE deployment_episodes SET pod_count=$2,ready_pod_count=$3,workload_ready_pod_count=$4,snapshot_observed_at=$5,last_observed_at=GREATEST(last_observed_at,$5) WHERE revision_id=$1 AND state<>'inactive'")
-            .bind(revision_id).bind(pod_count).bind(ready_count).bind(workload_ready)
-            .bind(snapshot.observed_at).execute(&mut *tx).await?;
+        DeploymentRepository::record_episode_pods(
+            &mut *tx,
+            revision_id,
+            pod_count,
+            ready_count,
+            workload_ready,
+            snapshot.observed_at,
+        )
+        .await?;
     }
     tx.commit().await
 }

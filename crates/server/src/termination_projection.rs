@@ -1,3 +1,6 @@
+use crate::repository::inventory::InventoryRepository;
+use crate::repository::outbox::OutboxRepository;
+use crate::repository::terminations::TerminationRepository;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
@@ -50,38 +53,43 @@ async fn correlate_termination(
     organization_id: Uuid,
     event: &RuntimeEvent,
 ) -> Result<(), sqlx::Error> {
-    let candidates: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND workload_uid=$4 AND pod_uid=$5 AND container_name=$6 AND container_id=$7 AND event_kind='process.exit' AND observed_at BETWEEN $8-$9::interval AND $8+$9::interval ORDER BY observed_at,id LIMIT 2",
+    let candidates: Vec<Uuid> = TerminationRepository::kernel_exit_candidates(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        &event.attribution.workload_uid,
+        &event.attribution.pod_uid,
+        &event.attribution.container_name,
+        &event.attribution.container_id,
+        event.observed_at,
+        format!("{} seconds", CORRELATION_TOLERANCE.num_seconds()),
     )
-    .bind(organization_id)
-    .bind(event.attribution.project_id)
-    .bind(event.attribution.application_id)
-    .bind(&event.attribution.workload_uid)
-    .bind(&event.attribution.pod_uid)
-    .bind(&event.attribution.container_name)
-    .bind(&event.attribution.container_id)
-    .bind(event.observed_at)
-    .bind(format!("{} seconds", CORRELATION_TOLERANCE.num_seconds()))
-    .fetch_all(&mut **tx)
     .await?;
     let status = match candidates.len() {
         0 => "absent",
         1 => "qualified",
         _ => "ambiguous",
     };
-    sqlx::query("INSERT INTO runtime_event_correlation_outcomes (organization_id,project_id,event_id,status,candidate_count,tolerance_seconds) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id) DO UPDATE SET status=EXCLUDED.status,candidate_count=EXCLUDED.candidate_count,tolerance_seconds=EXCLUDED.tolerance_seconds,updated_at=now()")
-        .bind(organization_id).bind(event.attribution.project_id).bind(lifecycle_event_id).bind(status)
-        .bind(i32::try_from(candidates.len()).unwrap_or(i32::MAX))
-        .bind(i32::try_from(CORRELATION_TOLERANCE.num_seconds()).unwrap_or(i32::MAX))
-        .execute(&mut **tx).await?;
+    TerminationRepository::record_outcome(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        lifecycle_event_id,
+        status,
+        i32::try_from(candidates.len()).unwrap_or(i32::MAX),
+        i32::try_from(CORRELATION_TOLERANCE.num_seconds()).unwrap_or(i32::MAX),
+    )
+    .await?;
     if let [kernel_event_id] = candidates.as_slice() {
-        sqlx::query("INSERT INTO runtime_event_correlations (organization_id,project_id,lifecycle_event_id,kernel_event_id,correlation_kind) VALUES ($1,$2,$3,$4,'qualified') ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(event.attribution.project_id)
-            .bind(lifecycle_event_id)
-            .bind(kernel_event_id)
-            .execute(&mut **tx)
-            .await?;
+        TerminationRepository::link(
+            &mut **tx,
+            organization_id,
+            event.attribution.project_id,
+            lifecycle_event_id,
+            *kernel_event_id,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -97,34 +105,72 @@ async fn project_restart_loop(
     let window_start = event.observed_at - RESTART_WINDOW;
     let version = i16::try_from(RESTART_PROJECTION_VERSION).unwrap_or(i16::MAX);
     let delta = i32::try_from(restart.restart_delta).unwrap_or(i32::MAX);
-    let inserted = sqlx::query("INSERT INTO runtime_restart_projection_memberships (organization_id,project_id,projection_version,event_id,window_started_at,window_ended_at,restart_delta) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-        .bind(organization_id).bind(event.attribution.project_id).bind(version).bind(raw_event_id)
-        .bind(window_start).bind(event.observed_at).bind(delta).execute(&mut **tx).await?;
+    let inserted = TerminationRepository::add_restart(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        version,
+        raw_event_id,
+        window_start,
+        event.observed_at,
+        delta,
+    )
+    .await?;
     if inserted.rows_affected() == 0 {
         return Ok(());
     }
-    let projection_end: DateTime<Utc> = sqlx::query_scalar(
-        "SELECT COALESCE(max(e.observed_at),$9) FROM runtime_restart_projection_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND e.application_id=$3 AND e.cluster_id=$4 AND e.pod_uid=$5 AND e.container_name=$6 AND e.container_id=$7 AND m.projection_version=$8 AND e.observed_at BETWEEN $9 AND $10",
+    let projection_end: DateTime<Utc> = TerminationRepository::restart_window_end(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        cluster_id,
+        &event.attribution.pod_uid,
+        &event.attribution.container_name,
+        &event.attribution.container_id,
+        version,
+        event.observed_at,
+        event.observed_at + RESTART_WINDOW,
     )
-    .bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
-    .bind(cluster_id).bind(&event.attribution.pod_uid).bind(&event.attribution.container_name)
-    .bind(&event.attribution.container_id).bind(version).bind(event.observed_at)
-    .bind(event.observed_at + RESTART_WINDOW).fetch_one(&mut **tx).await?;
+    .await?;
     let projection_start = projection_end - RESTART_WINDOW;
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(sum(m.restart_delta),0)::bigint FROM runtime_restart_projection_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND e.application_id=$3 AND e.cluster_id=$4 AND e.pod_uid=$5 AND e.container_name=$6 AND e.container_id=$7 AND m.projection_version=$8 AND e.observed_at BETWEEN $9 AND $10",
+    let count: i64 = TerminationRepository::restarts_in_window(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        cluster_id,
+        &event.attribution.pod_uid,
+        &event.attribution.container_name,
+        &event.attribution.container_id,
+        version,
+        projection_start,
+        projection_end,
     )
-    .bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
-    .bind(cluster_id).bind(&event.attribution.pod_uid).bind(&event.attribution.container_name)
-    .bind(&event.attribution.container_id).bind(version).bind(projection_start).bind(projection_end)
-    .fetch_one(&mut **tx).await?;
+    .await?;
     let observed_count = i32::try_from(count).unwrap_or(i32::MAX);
-    sqlx::query("INSERT INTO runtime_restart_loop_projections (organization_id,project_id,application_id,cluster_id,pod_uid,container_name,runtime_container_id,projection_version,window_started_at,window_ended_at,observed_restart_count,latest_termination,latest_waiting_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (organization_id,project_id,application_id,cluster_id,pod_uid,container_name,runtime_container_id,projection_version) DO UPDATE SET window_started_at=EXCLUDED.window_started_at,window_ended_at=EXCLUDED.window_ended_at,observed_restart_count=EXCLUDED.observed_restart_count,latest_termination=COALESCE(EXCLUDED.latest_termination,runtime_restart_loop_projections.latest_termination),latest_waiting_reason=COALESCE(EXCLUDED.latest_waiting_reason,runtime_restart_loop_projections.latest_waiting_reason),updated_at=now()")
-        .bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
-        .bind(cluster_id).bind(&event.attribution.pod_uid).bind(&event.attribution.container_name)
-        .bind(&event.attribution.container_id).bind(version).bind(projection_start).bind(projection_end)
-        .bind(observed_count).bind(restart.previous_termination.as_ref().map(serde_json::to_value).transpose().map_err(|error| sqlx::Error::Protocol(error.to_string()))?)
-        .bind(&restart.waiting_reason).execute(&mut **tx).await?;
+    TerminationRepository::upsert_restart_loop(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        cluster_id,
+        &event.attribution.pod_uid,
+        &event.attribution.container_name,
+        &event.attribution.container_id,
+        version,
+        projection_start,
+        projection_end,
+        observed_count,
+        restart
+            .previous_termination
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
+        restart.waiting_reason.as_deref(),
+    )
+    .await?;
     if count >= i64::from(RESTART_THRESHOLD_V1) {
         upsert_restart_loop_group(
             tx,
@@ -193,40 +239,58 @@ async fn upsert_restart_loop_group(
     )
     .await?;
     if group_id == candidate {
-        sqlx::query("INSERT INTO outbox_messages (id,organization_id,project_id,topic,aggregate_id,schema_version,source,payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,'live',$5) ON CONFLICT (topic,aggregate_id,schema_version) DO NOTHING")
-            .bind(Uuid::new_v4())
-            .bind(organization_id)
-            .bind(event.attribution.project_id)
-            .bind(group_id)
-            .bind(json!({
+        OutboxRepository::insert_first_seen(
+            &mut **tx,
+            Uuid::new_v4(),
+            organization_id,
+            event.attribution.project_id,
+            group_id,
+            json!({
                 "group_id": group_id,
                 "application_id": event.attribution.application_id,
                 "event_kind": "container.restart_loop",
                 "semantic": summary,
                 "fingerprint_version": DERIVED_GROUP_FINGERPRINT_VERSION,
-            }))
-            .execute(&mut **tx)
-            .await?;
+            }),
+        )
+        .await?;
     }
-    let membership = sqlx::query("INSERT INTO runtime_event_group_memberships (organization_id,project_id,application_id,event_id,group_id,fingerprint_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
-        .bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
-        .bind(raw_event_id).bind(group_id).bind(DERIVED_GROUP_FINGERPRINT_VERSION).execute(&mut **tx).await?;
+    let membership = EventGroupRepository::add_membership(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        raw_event_id,
+        group_id,
+        DERIVED_GROUP_FINGERPRINT_VERSION,
+    )
+    .await?;
     if membership.rows_affected() > 0 && group_id != candidate {
         EventGroupRepository::increment_occurrence(&mut **tx, group_id).await?;
     }
-    sqlx::query("INSERT INTO runtime_inventory_group_links (organization_id,project_id,application_id,item_id,group_id) SELECT $1,$2,$3,m.item_id,$4 FROM runtime_inventory_event_memberships m WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.event_id=$5 AND m.identity_version=$6 ON CONFLICT (item_id,group_id) DO NOTHING")
-        .bind(organization_id)
-        .bind(event.attribution.project_id)
-        .bind(event.attribution.application_id)
-        .bind(group_id)
-        .bind(raw_event_id)
-        .bind(CURRENT_INVENTORY_IDENTITY_VERSION.get())
-        .execute(&mut **tx)
-        .await?;
-    sqlx::query("UPDATE runtime_restart_loop_projections SET group_id=$1 WHERE organization_id=$2 AND project_id=$3 AND application_id=$4 AND cluster_id=$5 AND pod_uid=$6 AND container_name=$7 AND runtime_container_id=$8 AND projection_version=$9")
-        .bind(group_id).bind(organization_id).bind(event.attribution.project_id).bind(event.attribution.application_id)
-        .bind(cluster_id).bind(&event.attribution.pod_uid).bind(&event.attribution.container_name)
-        .bind(&event.attribution.container_id).bind(i16::try_from(RESTART_PROJECTION_VERSION).unwrap_or(i16::MAX)).execute(&mut **tx).await?;
+    InventoryRepository::link_event_items_to_group(
+        &mut **tx,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        group_id,
+        raw_event_id,
+        CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+    )
+    .await?;
+    TerminationRepository::attach_restart_loop_group(
+        &mut **tx,
+        group_id,
+        organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
+        cluster_id,
+        &event.attribution.pod_uid,
+        &event.attribution.container_name,
+        &event.attribution.container_id,
+        i16::try_from(RESTART_PROJECTION_VERSION).unwrap_or(i16::MAX),
+    )
+    .await?;
     Ok(())
 }
 

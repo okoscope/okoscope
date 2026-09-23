@@ -1,3 +1,4 @@
+use crate::repository::outbox::OutboxRepository;
 use std::fmt;
 
 use crate::repository::{EventGroupRepository, GroupKey};
@@ -138,17 +139,16 @@ pub async fn assign_event(
         EventGroupRepository::lock_existing(&mut **tx, key).await?
     };
 
-    let membership_created = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO runtime_event_group_memberships (organization_id, project_id, application_id, event_id, group_id, fingerprint_version, release_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (event_id, fingerprint_version) DO NOTHING RETURNING event_id",
+    let membership_created = EventGroupRepository::add_release_membership(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        raw_event_id,
+        group_id,
+        version,
+        release_id,
     )
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .bind(raw_event_id)
-    .bind(group_id)
-    .bind(version)
-    .bind(release_id)
-    .fetch_optional(&mut **tx)
     .await?
     .is_some();
 
@@ -167,22 +167,21 @@ pub async fn assign_event(
     }
 
     if group_created {
-        sqlx::query(
-            "INSERT INTO outbox_messages (id, organization_id, project_id, topic, aggregate_id, schema_version, source, payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,$5,$6) ON CONFLICT (topic, aggregate_id, schema_version) DO NOTHING",
+        OutboxRepository::insert_first_seen_from(
+            &mut **tx,
+            Uuid::new_v4(),
+            scope.organization_id,
+            scope.project_id,
+            group_id,
+            source.as_str(),
+            json!({
+                "group_id": group_id,
+                "application_id": scope.application_id,
+                "event_kind": fingerprint.summary.event_kind,
+                "semantic": fingerprint.summary.semantic,
+                "fingerprint_version": version,
+            }),
         )
-        .bind(Uuid::new_v4())
-        .bind(scope.organization_id)
-        .bind(scope.project_id)
-        .bind(group_id)
-        .bind(source.as_str())
-        .bind(json!({
-            "group_id": group_id,
-            "application_id": scope.application_id,
-            "event_kind": fingerprint.summary.event_kind,
-            "semantic": fingerprint.summary.semantic,
-            "fingerprint_version": version,
-        }))
-        .execute(&mut **tx)
         .await?;
     }
 
@@ -207,12 +206,17 @@ async fn update_release_summary(
     raw_event_id: Uuid,
     event: &RuntimeEvent,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO runtime_event_group_releases (organization_id,project_id,application_id,release_id,group_id,occurrence_count,first_seen_at,last_seen_at,representative_event_id) VALUES ($1,$2,$3,$4,$5,1,$6,$6,$7) ON CONFLICT (release_id,group_id) DO UPDATE SET representative_event_id=COALESCE(runtime_event_group_releases.representative_event_id,EXCLUDED.representative_event_id),occurrence_count=runtime_event_group_releases.occurrence_count+1,first_seen_at=LEAST(runtime_event_group_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_event_group_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()",
+    EventGroupRepository::record_release_occurrence(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        release_id,
+        group_id,
+        event.observed_at,
+        raw_event_id,
     )
-    .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-    .bind(release_id).bind(group_id).bind(event.observed_at).bind(raw_event_id)
-    .execute(&mut **tx).await?;
+    .await?;
     crate::metrics::record_release_summary();
     Ok(())
 }

@@ -1,3 +1,5 @@
+use crate::repository::events::EventRepository;
+use crate::repository::runtime_retention::RuntimeRetentionRepository;
 use event_model::{EVENT_SCHEMA_VERSION, EventPayload, RuntimeEvent};
 use serde_json::to_value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -119,9 +121,7 @@ pub async fn persist_batch(
     }
     for event in events {
         let closed: Option<chrono::DateTime<chrono::Utc>> =
-            sqlx::query_scalar("SELECT runtime_closed_before FROM projects WHERE id=$1")
-                .bind(event.attribution.project_id)
-                .fetch_one(&mut *tx)
+            RuntimeRetentionRepository::closed_before(&mut *tx, event.attribution.project_id)
                 .await?;
         if closed.is_some_and(|boundary| event.observed_at < boundary) {
             continue;
@@ -132,6 +132,7 @@ pub async fn persist_batch(
     Ok(accepted)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn persist_event(
     tx: &mut Transaction<'_, Postgres>,
     context: IngestionContext,
@@ -165,16 +166,35 @@ async fn persist_event(
     let cgroup_id =
         i64::try_from(event.process.cgroup_id).map_err(|_| IngestionError::CgroupOverflow)?;
     let raw_event_id = Uuid::new_v4();
-    let inserted: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO runtime_events (id, event_id, organization_id, project_id, cluster_id, application_id, agent_id, release_id, observed_at, node_name, namespace, pod_uid, pod_name, container_id, container_name, workload_uid, workload_kind, workload_name, cgroup_id, pid, tgid, process_command, event_kind, event_schema_version, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) ON CONFLICT (agent_id, event_id) DO NOTHING RETURNING id",
+    let inserted: Option<Uuid> = EventRepository::insert(
+        &mut **tx,
+        raw_event_id,
+        event.id,
+        context.scope.organization_id,
+        event.attribution.project_id,
+        context.scope.cluster_id,
+        event.attribution.application_id,
+        context.agent_id,
+        release_id,
+        event.observed_at,
+        &event.attribution.node_name,
+        &event.attribution.namespace,
+        &event.attribution.pod_uid,
+        &event.attribution.pod_name,
+        &event.attribution.container_id,
+        &event.attribution.container_name,
+        &event.attribution.workload_uid,
+        &event.attribution.workload_kind,
+        &event.attribution.workload_name,
+        cgroup_id,
+        i64::from(event.process.pid),
+        i64::from(event.process.tgid),
+        &event.process.command,
+        event.kind(),
+        i32::try_from(event.schema_version).unwrap_or(i32::MAX),
+        to_value(&event.payload)?,
     )
-    .bind(raw_event_id).bind(event.id).bind(context.scope.organization_id).bind(event.attribution.project_id)
-    .bind(context.scope.cluster_id).bind(event.attribution.application_id).bind(context.agent_id).bind(release_id).bind(event.observed_at)
-    .bind(&event.attribution.node_name).bind(&event.attribution.namespace).bind(&event.attribution.pod_uid).bind(&event.attribution.pod_name)
-    .bind(&event.attribution.container_id).bind(&event.attribution.container_name).bind(&event.attribution.workload_uid)
-    .bind(&event.attribution.workload_kind).bind(&event.attribution.workload_name).bind(cgroup_id).bind(i64::from(event.process.pid))
-    .bind(i64::from(event.process.tgid)).bind(&event.process.command).bind(event.kind()).bind(i32::try_from(event.schema_version).unwrap_or(i32::MAX))
-    .bind(to_value(&event.payload)?).fetch_optional(&mut **tx).await?;
+    .await?;
     let Some(raw_event_id) = inserted else {
         crate::metrics::record_duplicate_event();
         return Ok(0);

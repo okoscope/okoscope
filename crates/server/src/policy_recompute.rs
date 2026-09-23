@@ -1,3 +1,4 @@
+use crate::repository::policies::PolicyRepository;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -66,7 +67,8 @@ pub async fn run_one_batch(
         ));
     }
     let mut tx = pool.begin().await?;
-    let operation:Option<Operation>=sqlx::query_as("WITH candidate AS (SELECT id FROM runtime_policy_recomputations WHERE state='pending' OR (state='running' AND lease_expires_at<now()) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE runtime_policy_recomputations o SET state='running',lease_owner=$1,lease_expires_at=now()+interval '30 seconds',attempt_count=attempt_count+1,started_at=COALESCE(started_at,now()),updated_at=now() FROM candidate c WHERE o.id=c.id RETURNING o.id,o.organization_id,o.project_id,o.application_id,o.identity_version,o.identity_digest").bind(owner).fetch_optional(&mut *tx).await?;
+    let operation: Option<Operation> =
+        PolicyRepository::claim_recomputation(&mut *tx, owner).await?;
     let Some(operation) = operation else {
         tx.commit().await?;
         return Ok(false);
@@ -76,7 +78,17 @@ pub async fn run_one_batch(
         project_id: operation.project_id,
         application_id: operation.application_id,
     };
-    let groups:Vec<GroupRow>=sqlx::query_as("SELECT l.item_id,g.id group_id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_inventory_group_links l JOIN runtime_inventory_items i ON i.id=l.item_id JOIN runtime_event_groups g ON g.id=l.group_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states s ON s.organization_id=g.organization_id AND s.project_id=g.project_id AND s.application_id=g.application_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.group_id IS NULL OR e.policy_state_version<COALESCE(s.state_version,0) OR e.evaluator_version<>$6) ORDER BY g.id LIMIT $7").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(operation.identity_version).bind(&operation.identity_digest).bind(POLICY_EVALUATOR_VERSION).bind(batch_size).fetch_all(&mut *tx).await?;
+    let groups: Vec<GroupRow> = PolicyRepository::groups_to_evaluate(
+        &mut *tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        operation.identity_version,
+        &operation.identity_digest,
+        POLICY_EVALUATOR_VERSION,
+        batch_size,
+    )
+    .await?;
     for row in &groups {
         project_existing_group(
             &mut tx,
@@ -94,7 +106,17 @@ pub async fn run_one_batch(
     }
     let remaining = batch_size - i64::try_from(groups.len()).unwrap_or(batch_size);
     let sightings: Vec<SightingRow> = if remaining > 0 {
-        sqlx::query_as("SELECT s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.item_id IS NULL OR e.policy_state_version<COALESCE(ps.state_version,0) OR e.evaluator_version<>$6) ORDER BY s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name LIMIT $7").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(operation.identity_version).bind(&operation.identity_digest).bind(POLICY_EVALUATOR_VERSION).bind(remaining).fetch_all(&mut *tx).await?
+        PolicyRepository::sightings_to_evaluate(
+            &mut *tx,
+            scope.organization_id,
+            scope.project_id,
+            scope.application_id,
+            operation.identity_version,
+            &operation.identity_digest,
+            POLICY_EVALUATOR_VERSION,
+            remaining,
+        )
+        .await?
     } else {
         Vec::new()
     };
@@ -115,9 +137,9 @@ pub async fn run_one_batch(
         .await?;
     }
     if i64::try_from(groups.len() + sightings.len()).unwrap_or(batch_size) < batch_size {
-        sqlx::query("UPDATE runtime_policy_recomputations SET state='completed',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND lease_owner=$2").bind(operation.id).bind(owner).execute(&mut *tx).await?;
+        PolicyRepository::complete_recomputation(&mut *tx, operation.id, owner).await?;
     } else {
-        sqlx::query("UPDATE runtime_policy_recomputations SET state='pending',lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND lease_owner=$2").bind(operation.id).bind(owner).execute(&mut *tx).await?;
+        PolicyRepository::release_recomputation(&mut *tx, operation.id, owner).await?;
     }
     tx.commit().await?;
     Ok(true)
@@ -137,7 +159,13 @@ pub async fn backfill(
     pool: &PgPool,
     options: BackfillOptions,
 ) -> Result<BackfillStats, sqlx::Error> {
-    let rows=sqlx::query("INSERT INTO runtime_policy_recomputations(id,organization_id,project_id,application_id,identity_version,identity_digest) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.identity_version,i.identity_digest FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND ($3::uuid IS NULL OR i.application_id=$3) AND NOT EXISTS(SELECT 1 FROM runtime_policy_recomputations o WHERE o.organization_id=i.organization_id AND o.project_id=i.project_id AND o.application_id=i.application_id AND o.identity_version=i.identity_version AND o.identity_digest=i.identity_digest AND o.state IN ('pending','running')) GROUP BY i.organization_id,i.project_id,i.application_id,i.identity_version,i.identity_digest").bind(options.organization_id).bind(options.project_id).bind(options.application_id).execute(pool).await?;
+    let rows = PolicyRepository::backfill_recomputations(
+        pool,
+        options.organization_id,
+        options.project_id,
+        options.application_id,
+    )
+    .await?;
     Ok(BackfillStats {
         operations_created: rows.rows_affected(),
     })
