@@ -32,6 +32,7 @@
 //! here incrementally; the counts it records only ever go down.
 
 pub mod applications;
+pub mod dns_groups;
 pub mod event_groups;
 pub mod events;
 pub mod memberships;

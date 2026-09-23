@@ -32,7 +32,6 @@ const REMAINING: &[(&str, usize)] = &[
     ("backfill.rs", 2),
     ("bootstrap.rs", 5),
     ("database.rs", 1),
-    ("dns_group_api.rs", 7),
     ("grouping.rs", 3),
     ("ingestion.rs", 2),
     ("inventory.rs", 8),
