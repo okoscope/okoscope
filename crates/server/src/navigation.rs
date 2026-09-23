@@ -314,7 +314,7 @@ async fn projects(
         ));
     }
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4", aggregates::COUNT_ALL_FOR_PROJECT))
+    let mut items = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(principal.organization_id).bind(cursor_time).bind(cursor_id).bind(limit+1).fetch_all(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?;
     let organization_admin = principal.role.inherits_project_access();
     let mut visible = Vec::with_capacity(items.len());
@@ -338,7 +338,7 @@ async fn project(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ProjectSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let mut item = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.organization_id=p.organization_id AND a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2", aggregates::COUNT_ALL_FOR_PROJECT))
+    let mut item = sqlx::query_as::<_, ProjectSummary>(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(principal.organization_id).bind(project_id).fetch_optional(&state.pool).await.map_err(|error| NavigationError::database(&error, &request_id))?.ok_or_else(|| NavigationError::not_found(&request_id))?;
     let (role, source) = effective_project_access(&state.pool, principal, project_id)
         .await
