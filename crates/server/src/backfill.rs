@@ -68,12 +68,12 @@ pub async fn run(pool: &PgPool, options: BackfillOptions) -> Result<BackfillStat
     if !(1..=10_000).contains(&options.batch_size) {
         return Err(BackfillError::InvalidBatchSize);
     }
-    let upper_bound: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 ORDER BY id DESC LIMIT 1",
+    let upper_bound = crate::repository::EventRepository::scan_upper_bound(
+        pool,
+        options.organization_id,
+        options.project_id,
+        None,
     )
-    .bind(options.organization_id)
-    .bind(options.project_id)
-    .fetch_optional(pool)
     .await?;
     let Some(upper_bound) = upper_bound else {
         return Ok(BackfillStats::default());

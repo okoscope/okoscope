@@ -121,13 +121,12 @@ pub async fn backfill(
         closed_before: coverage.closed_before,
         ..Default::default()
     };
-    let upper_bound: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND ($3::uuid IS NULL OR application_id=$3) ORDER BY id DESC LIMIT 1",
+    let upper_bound = crate::repository::EventRepository::scan_upper_bound(
+        pool,
+        options.organization_id,
+        options.project_id,
+        options.application_id,
     )
-    .bind(options.organization_id)
-    .bind(options.project_id)
-    .bind(options.application_id)
-    .fetch_optional(pool)
     .await?;
     let Some(upper_bound) = upper_bound else {
         return Ok(initial);
