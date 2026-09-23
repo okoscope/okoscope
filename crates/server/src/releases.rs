@@ -1,5 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::ReleaseRepository;
+use crate::repository::transaction::TransactionRepository;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -644,7 +645,7 @@ async fn runtime_diff_summary(
         }));
     };
     let mut transaction = state.pool.begin().await?;
-    ReleaseRepository::begin_consistent_read(&mut *transaction).await?;
+    TransactionRepository::begin_consistent_read(&mut *transaction).await?;
     let classifications = ReleaseRepository::diff_classifications::<_, DiffClassificationCount>(
         &mut *transaction,
         baseline_id,

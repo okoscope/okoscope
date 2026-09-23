@@ -45,6 +45,21 @@ pub struct LockedProject {
 pub struct ProjectRepository;
 
 impl ProjectRepository {
+    /// The project's organization. Fails with `RowNotFound` when there is no
+    /// such project; [`Self::organization_of`] reports that as `None`.
+    pub async fn organization_id_of<'e, E>(
+        executor: E,
+        project_id: Uuid,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("SELECT organization_id FROM projects WHERE id=$1")
+            .bind(project_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// The organization's first 200 projects, oldest first.
     ///
     /// Selects `id`, `organization_id`, `slug`, `name` and `created_at`.
