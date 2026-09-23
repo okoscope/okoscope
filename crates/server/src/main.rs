@@ -1,3 +1,4 @@
+use server::repository::webhook_destinations::WebhookDestinationRepository;
 use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
@@ -446,11 +447,9 @@ async fn check_notifications(
     verify_schema(pool)
         .await
         .context("database schema readiness")?;
-    let enabled_destinations: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM webhook_destinations WHERE enabled=true")
-            .fetch_one(pool)
-            .await
-            .context("count enabled webhook destinations")?;
+    let enabled_destinations: i64 = WebhookDestinationRepository::enabled_count(pool)
+        .await
+        .context("count enabled webhook destinations")?;
     tracing::info!(
         enabled = config.enabled,
         concurrency = config.concurrency,

@@ -1,3 +1,7 @@
+use crate::repository::event_groups::EventGroupRepository;
+use crate::repository::inventory::InventoryRepository;
+use crate::repository::outbox::OutboxRepository;
+use crate::repository::transactional_mail::TransactionalMailRepository;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
@@ -367,11 +371,7 @@ pub fn router(pool: PgPool, notification_enabled: bool) -> Router {
 #[allow(clippy::too_many_lines)]
 async fn render(State(state): State<MetricsState>) -> impl IntoResponse {
     let pool = &state.pool;
-    let outbox_depth = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM outbox_messages WHERE processed_at IS NULL",
-    )
-    .fetch_one(pool)
-    .await;
+    let outbox_depth = OutboxRepository::unprocessed_count(pool).await;
     let Ok(outbox_depth) = outbox_depth else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -393,32 +393,21 @@ async fn render(State(state): State<MetricsState>) -> impl IntoResponse {
     if runtime_state == 4 && state.notification_enabled {
         worker_state = crate::notification::health::NotificationHealthState::Failing;
     }
-    let release_summary_count =
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runtime_event_group_releases")
-            .fetch_one(pool)
-            .await;
+    let release_summary_count = EventGroupRepository::release_rollup_count(pool).await;
     let Ok(release_summary_count) = release_summary_count else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database metrics unavailable\n".to_owned(),
         );
     };
-    let inventory_snapshot = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT count(*)::bigint,COALESCE(EXTRACT(EPOCH FROM (now()-max(updated_at)))::bigint,0) FROM runtime_inventory_items",
-    )
-    .fetch_one(pool)
-    .await;
+    let inventory_snapshot = InventoryRepository::item_count_and_staleness(pool).await;
     let Ok((inventory_item_count, inventory_freshness_seconds)) = inventory_snapshot else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "database metrics unavailable\n".to_owned(),
         );
     };
-    let mail_snapshot = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT count(*)::bigint,COALESCE(EXTRACT(EPOCH FROM (now()-min(available_at)))::bigint,0) FROM transactional_mail_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL AND available_at<=now()",
-    )
-    .fetch_one(pool)
-    .await;
+    let mail_snapshot = TransactionalMailRepository::backlog(pool).await;
     let Ok((mail_queue_depth, mail_oldest_due_seconds)) = mail_snapshot else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

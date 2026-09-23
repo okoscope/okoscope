@@ -1,3 +1,4 @@
+use crate::repository::application_credentials::ApplicationCredentialRepository;
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -145,17 +146,16 @@ pub async fn issue(
     name: &str,
 ) -> Result<IssuedApplicationCredential, sqlx::Error> {
     let token = ApplicationToken::generate();
-    let summary = sqlx::query_as::<_, ApplicationCredentialSummary>(
-        "INSERT INTO application_ingestion_credentials(id,organization_id,project_id,application_id,name,credential_hash,token_hint) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,name,token_hint,created_at,last_used_at,revoked_at",
+    let summary = ApplicationCredentialRepository::insert::<_, ApplicationCredentialSummary>(
+        &mut **tx,
+        Uuid::new_v4(),
+        organization_id,
+        project_id,
+        application_id,
+        name,
+        token.digest().as_slice(),
+        token.hint(),
     )
-    .bind(Uuid::new_v4())
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(name)
-    .bind(token.digest().as_slice())
-    .bind(token.hint())
-    .fetch_one(&mut **tx)
     .await?;
     Ok(IssuedApplicationCredential { summary, token })
 }
@@ -166,14 +166,7 @@ pub async fn list(
     project_id: Uuid,
     application_id: Uuid,
 ) -> Result<Vec<ApplicationCredentialSummary>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id,name,token_hint,created_at,last_used_at,revoked_at FROM application_ingestion_credentials WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 ORDER BY created_at,id",
-    )
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .fetch_all(pool)
-    .await
+    ApplicationCredentialRepository::list(pool, organization_id, project_id, application_id).await
 }
 
 pub async fn revoke(
@@ -183,14 +176,13 @@ pub async fn revoke(
     application_id: Uuid,
     credential_id: Uuid,
 ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
-    sqlx::query_scalar(
-        "UPDATE application_ingestion_credentials SET revoked_at=coalesce(revoked_at,now()) WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 RETURNING revoked_at",
+    ApplicationCredentialRepository::revoke_in_application(
+        pool,
+        organization_id,
+        project_id,
+        application_id,
+        credential_id,
     )
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(credential_id)
-    .fetch_optional(pool)
     .await
     .map(Option::flatten)
 }
@@ -200,12 +192,8 @@ pub async fn authenticate(
     plaintext: &str,
 ) -> Result<Option<ApplicationCredentialScope>, ApplicationCredentialError> {
     let token = ApplicationToken::parse(plaintext)?;
-    let scope = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
-        "UPDATE application_ingestion_credentials SET last_used_at=now() WHERE credential_hash=$1 AND revoked_at IS NULL RETURNING id,organization_id,project_id,application_id",
-    )
-    .bind(token.digest().as_slice())
-    .fetch_optional(pool)
-    .await?;
+    let scope =
+        ApplicationCredentialRepository::authenticate(pool, token.digest().as_slice()).await?;
     Ok(scope.map(
         |(credential_id, organization_id, project_id, application_id)| ApplicationCredentialScope {
             credential_id,
@@ -220,14 +208,13 @@ pub async fn remains_active(
     tx: &mut Transaction<'_, Postgres>,
     scope: ApplicationCredentialScope,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM application_ingestion_credentials WHERE id=$1 AND organization_id=$2 AND project_id=$3 AND application_id=$4 AND revoked_at IS NULL)",
+    ApplicationCredentialRepository::is_active(
+        &mut **tx,
+        scope.credential_id,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
     )
-    .bind(scope.credential_id)
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .fetch_one(&mut **tx)
     .await
 }
 

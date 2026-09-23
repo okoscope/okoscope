@@ -23,6 +23,34 @@ const INSTALL_SELECT: &str = "SELECT id,application_id,credential_id,cluster_nam
 pub struct InstallationRepository;
 
 impl InstallationRepository {
+    /// Records the onboarding status a node reports for the application's
+    /// installations.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_status<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        node_name: &str,
+        state: &str,
+        reason: Option<&str>,
+        observed_at: DateTime<Utc>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) SELECT i.id,$4,$5,$6,$7 FROM application_installations i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1 ON CONFLICT(installation_id,node_name) DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,observed_at=EXCLUDED.observed_at,updated_at=now() WHERE application_installation_status.observed_at<=EXCLUDED.observed_at")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(node_name)
+            .bind(state)
+            .bind(reason)
+            .bind(observed_at)
+            .execute(executor)
+            .await
+    }
+
     /// The application's installations, oldest first, with the columns of
     /// [`INSTALL_SELECT`].
     pub async fn for_application<'e, E, T>(

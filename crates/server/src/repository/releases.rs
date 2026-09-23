@@ -45,6 +45,38 @@ pub mod aggregates {
 pub struct ReleaseRepository;
 
 impl ReleaseRepository {
+    /// Records a release discovered from a workload revision, or returns the
+    /// application's release with the same identity.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_observed<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        version: String,
+        deployed_at: DateTime<Utc>,
+        identity_version: i16,
+        identity_digest: &[u8],
+        identity_components: serde_json::Value,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at,source,identity_version,identity_digest,identity_components) VALUES($1,$2,$3,$4,$5,$6,'observed',$7,$8,$9) ON CONFLICT(application_id,version) DO UPDATE SET identity_components=EXCLUDED.identity_components WHERE releases.organization_id=EXCLUDED.organization_id AND releases.project_id=EXCLUDED.project_id AND releases.source='observed' AND releases.identity_version=EXCLUDED.identity_version AND releases.identity_digest=EXCLUDED.identity_digest RETURNING id")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(version)
+            .bind(deployed_at)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .bind(identity_components)
+            .fetch_one(executor)
+            .await
+    }
+
     /// Creates a manual release and returns it with its display name.
     ///
     /// A version already used by the application violates

@@ -1,3 +1,4 @@
+use crate::repository::inventory::InventoryRepository;
 use std::fmt;
 
 use event_model::{
@@ -115,48 +116,45 @@ pub async fn project_event(
         fingerprint(scope, event).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
     let version = fingerprint.version.get();
     let candidate_id = Uuid::new_v4();
-    let created_item_id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1) ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO NOTHING RETURNING id",
+    let created_item_id: Option<Uuid> = InventoryRepository::insert_item(
+        &mut **tx,
+        candidate_id,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        fingerprint.kind.as_str(),
+        version,
+        fingerprint.digest.as_slice(),
+        &fingerprint.semantic_summary,
+        event.observed_at,
     )
-    .bind(candidate_id)
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .bind(fingerprint.kind.as_str())
-    .bind(version)
-    .bind(fingerprint.digest.as_slice())
-    .bind(&fingerprint.semantic_summary)
-    .bind(event.observed_at)
-    .fetch_optional(&mut **tx)
     .await?;
 
     let item_created = created_item_id.is_some();
     let item_id = if let Some(item_id) = created_item_id {
         item_id
     } else {
-        sqlx::query_scalar(
-            "SELECT id FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND inventory_kind=$4 AND identity_version=$5 AND identity_digest=$6 FOR UPDATE",
+        InventoryRepository::item_id_by_identity(
+            &mut **tx,
+            scope.organization_id,
+            scope.project_id,
+            scope.application_id,
+            fingerprint.kind.as_str(),
+            version,
+            fingerprint.digest.as_slice(),
         )
-        .bind(scope.organization_id)
-        .bind(scope.project_id)
-        .bind(scope.application_id)
-        .bind(fingerprint.kind.as_str())
-        .bind(version)
-        .bind(fingerprint.digest.as_slice())
-        .fetch_one(&mut **tx)
         .await?
     };
 
-    let membership_created = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id,identity_version) DO NOTHING RETURNING event_id",
+    let membership_created = InventoryRepository::add_event_membership(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        raw_event_id,
+        item_id,
+        version,
     )
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .bind(raw_event_id)
-    .bind(item_id)
-    .bind(version)
-    .fetch_optional(&mut **tx)
     .await?
     .is_some();
 
@@ -181,67 +179,57 @@ pub async fn project_event(
             _ => None,
         };
         if let Some((listener_observed, accept_observed)) = inbound_evidence {
-            sqlx::query(
-                "UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,semantic_summary=jsonb_set(jsonb_set(semantic_summary,'{listener_observed}',to_jsonb(COALESCE((semantic_summary->>'listener_observed')::boolean,false) OR $3)),'{accept_observed}',to_jsonb(COALESCE((semantic_summary->>'accept_observed')::boolean,false) OR $4)),updated_at=now() WHERE id=$1",
+            InventoryRepository::record_inbound_occurrence(
+                &mut **tx,
+                item_id,
+                event.observed_at,
+                listener_observed,
+                accept_observed,
             )
-            .bind(item_id)
-            .bind(event.observed_at)
-            .bind(listener_observed)
-            .bind(accept_observed)
-            .execute(&mut **tx)
             .await?;
         } else {
-            sqlx::query(
-                "UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,updated_at=now() WHERE id=$1",
-            )
-            .bind(item_id)
-            .bind(event.observed_at)
-            .execute(&mut **tx)
-            .await?;
+            InventoryRepository::record_occurrence(&mut **tx, item_id, event.observed_at).await?;
         }
     }
 
-    sqlx::query(
-        "INSERT INTO runtime_inventory_group_links(organization_id,project_id,application_id,item_id,group_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT (item_id,group_id) DO NOTHING",
+    InventoryRepository::link_group(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        item_id,
+        group_id,
     )
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .bind(item_id)
-    .bind(group_id)
-    .execute(&mut **tx)
     .await?;
 
     if let Some(release_id) = release_id {
-        sqlx::query(
-            "INSERT INTO runtime_inventory_releases(organization_id,project_id,application_id,item_id,release_id,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,1,$6,$6) ON CONFLICT (item_id,release_id) DO UPDATE SET occurrence_count=runtime_inventory_releases.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()",
+        InventoryRepository::record_release_occurrence(
+            &mut **tx,
+            scope.organization_id,
+            scope.project_id,
+            scope.application_id,
+            item_id,
+            release_id,
+            event.observed_at,
         )
-        .bind(scope.organization_id)
-        .bind(scope.project_id)
-        .bind(scope.application_id)
-        .bind(item_id)
-        .bind(release_id)
-        .bind(event.observed_at)
-        .execute(&mut **tx)
         .await?;
     }
 
-    sqlx::query(
-        "INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12,$12) ON CONFLICT (item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET occurrence_count=runtime_inventory_sightings.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_sightings.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_sightings.last_seen_at,EXCLUDED.last_seen_at),pod_name=EXCLUDED.pod_name,updated_at=now()",
+    InventoryRepository::record_sighting(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        item_id,
+        cluster_id,
+        &event.attribution.namespace,
+        &event.attribution.workload_kind,
+        &event.attribution.workload_name,
+        &event.attribution.pod_uid,
+        &event.attribution.pod_name,
+        &event.attribution.container_name,
+        event.observed_at,
     )
-    .bind(scope.organization_id)
-    .bind(scope.project_id)
-    .bind(scope.application_id)
-    .bind(item_id)
-    .bind(cluster_id)
-    .bind(&event.attribution.namespace)
-    .bind(&event.attribution.workload_kind)
-    .bind(&event.attribution.workload_name)
-    .bind(&event.attribution.pod_uid)
-    .bind(&event.attribution.pod_name)
-    .bind(&event.attribution.container_name)
-    .bind(event.observed_at)
-    .execute(&mut **tx)
     .await?;
 
     tracing::debug!(

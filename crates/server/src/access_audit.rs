@@ -1,3 +1,4 @@
+use crate::repository::access_audit::AccessAuditRepository;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -28,10 +29,20 @@ pub async fn write_access_audit(
         AccessAuditActor::User(user_id) => ("user", Some(user_id)),
         AccessAuditActor::SystemRecovery => ("system_recovery", None),
     };
-    sqlx::query("INSERT INTO access_audit_records(id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded',$11,now()+interval '365 days')")
-        .bind(Uuid::new_v4()).bind(actor_kind).bind(actor_user_id).bind(event.action)
-        .bind(event.organization_id).bind(event.project_id).bind(event.target_user_id)
-        .bind(event.invitation_id).bind(event.previous_role).bind(event.new_role)
-        .bind(event.request_id).execute(&mut **tx).await?;
+    AccessAuditRepository::insert(
+        &mut **tx,
+        Uuid::new_v4(),
+        actor_kind,
+        actor_user_id,
+        event.action,
+        event.organization_id,
+        event.project_id,
+        event.target_user_id,
+        event.invitation_id,
+        event.previous_role,
+        event.new_role,
+        event.request_id,
+    )
+    .await?;
     Ok(())
 }

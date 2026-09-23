@@ -16,6 +16,22 @@ use uuid::Uuid;
 pub struct RuntimeRetentionRepository;
 
 impl RuntimeRetentionRepository {
+    /// The project's closed horizon: events observed before it are refused.
+    pub async fn closed_before<'e, E>(
+        executor: E,
+        project_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT runtime_closed_before FROM projects WHERE id=$1",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
+    }
+
     /// The project's closed and history-expired horizons.
     ///
     /// Selects `closed_before` and `history_expired_before`.

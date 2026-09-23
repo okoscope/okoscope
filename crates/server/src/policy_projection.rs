@@ -1,3 +1,5 @@
+use crate::repository::inventory::InventoryRepository;
+use crate::repository::policies::PolicyRepository;
 use event_model::RuntimeEvent;
 use serde_json::{Value, json};
 use sqlx::{FromRow, Postgres, Transaction};
@@ -44,9 +46,30 @@ async fn evaluate_item(
     item_id: Uuid,
     placement: &OwnedPlacement,
 ) -> Result<MaterializedEvaluation, sqlx::Error> {
-    let (identity_version,identity_digest):(i16,Vec<u8>)=sqlx::query_as("SELECT identity_version,identity_digest FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(item_id).fetch_one(&mut **tx).await?;
-    let state_version:Option<i64>=sqlx::query_scalar("SELECT state_version FROM runtime_policy_states WHERE organization_id=$1 AND project_id=$2 AND application_id=$3").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).fetch_optional(&mut **tx).await?;
-    let rows:Vec<CandidateRow>=sqlx::query_as("SELECT r.id revision_id,r.identity_version,r.identity_digest,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect FROM runtime_policies p JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND r.enabled AND r.identity_version=$4 AND r.identity_digest=$5").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(identity_version).bind(&identity_digest).fetch_all(&mut **tx).await?;
+    let (identity_version, identity_digest): (i16, Vec<u8>) = InventoryRepository::identity_key(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        item_id,
+    )
+    .await?;
+    let state_version: Option<i64> = PolicyRepository::state_version(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+    )
+    .await?;
+    let rows: Vec<CandidateRow> = PolicyRepository::enabled_revisions_for_identity(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        identity_version,
+        &identity_digest,
+    )
+    .await?;
     let candidates = rows
         .into_iter()
         .filter_map(|row| {
@@ -109,7 +132,20 @@ async fn store_group(
     group_id: Uuid,
     value: &MaterializedEvaluation,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO runtime_group_policy_evaluations(organization_id,project_id,application_id,group_id,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(group_id) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(group_id).bind(value.state_version).bind(POLICY_EVALUATOR_VERSION).bind(&value.verdict).bind(&value.reason).bind(value.winning_revision_id).bind(&value.explanation).execute(&mut **tx).await?;
+    PolicyRepository::store_group_evaluation(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        group_id,
+        value.state_version,
+        POLICY_EVALUATOR_VERSION,
+        &value.verdict,
+        &value.reason,
+        value.winning_revision_id,
+        &value.explanation,
+    )
+    .await?;
     Ok(())
 }
 
@@ -123,7 +159,26 @@ async fn store_sighting(
     container_name: &str,
     value: &MaterializedEvaluation,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO runtime_sighting_policy_evaluations(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()").bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id).bind(item_id).bind(placement.cluster_id).bind(&placement.namespace).bind(&placement.workload_kind).bind(&placement.workload_name).bind(pod_uid).bind(container_name).bind(value.state_version).bind(POLICY_EVALUATOR_VERSION).bind(&value.verdict).bind(&value.reason).bind(value.winning_revision_id).bind(&value.explanation).execute(&mut **tx).await?;
+    PolicyRepository::store_sighting_evaluation(
+        &mut **tx,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        item_id,
+        placement.cluster_id,
+        &placement.namespace,
+        &placement.workload_kind,
+        &placement.workload_name,
+        pod_uid,
+        container_name,
+        value.state_version,
+        POLICY_EVALUATOR_VERSION,
+        &value.verdict,
+        &value.reason,
+        value.winning_revision_id,
+        &value.explanation,
+    )
+    .await?;
     Ok(())
 }
 

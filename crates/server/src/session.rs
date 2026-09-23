@@ -1,3 +1,5 @@
+use crate::repository::clusters::ClusterRepository;
+use crate::repository::installations::InstallationRepository;
 use std::pin::Pin;
 
 use futures::{Stream, StreamExt};
@@ -267,14 +269,13 @@ async fn resolve_session_scope(
         return Err(Status::invalid_argument("cluster_uid must be canonical"));
     }
     let cluster_name = cluster_display_name(&hello.cluster_name)?;
-    let resolved_cluster_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO clusters(id,organization_id,external_id,name) VALUES($1,$2,$3,COALESCE($4,$3)) ON CONFLICT(organization_id,external_id) DO UPDATE SET name=COALESCE($4,clusters.name) RETURNING id",
+    let resolved_cluster_id: Uuid = ClusterRepository::upsert_by_external_id(
+        pool,
+        Uuid::new_v4(),
+        application.organization_id,
+        canonical_uid,
+        cluster_name,
     )
-    .bind(Uuid::new_v4())
-    .bind(application.organization_id)
-    .bind(canonical_uid)
-    .bind(cluster_name)
-    .fetch_one(pool)
     .await
     .map_err(internal)?;
     Ok(SessionScope {
@@ -316,11 +317,28 @@ async fn register(
 ) -> Result<(Uuid, Uuid), sqlx::Error> {
     let architecture = platform_value(&hello.architecture, 64);
     let kernel_release = platform_value(&hello.kernel_release, 255);
-    let agent_id: Uuid = sqlx::query_scalar("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version, architecture, kernel_release, capabilities) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (cluster_id, node_name) DO UPDATE SET agent_version=EXCLUDED.agent_version, architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release, capabilities=EXCLUDED.capabilities, last_seen_at=now() RETURNING id")
-        .bind(Uuid::new_v4()).bind(scope.organization_id).bind(scope.cluster_id).bind(&hello.node_name).bind(&hello.agent_version).bind(architecture).bind(kernel_release).bind(serde_json::json!(capabilities)).fetch_one(pool).await?;
+    let agent_id: Uuid = ClusterRepository::register_agent(
+        pool,
+        Uuid::new_v4(),
+        scope.organization_id,
+        scope.cluster_id,
+        &hello.node_name,
+        &hello.agent_version,
+        architecture,
+        kernel_release,
+        serde_json::json!(capabilities),
+    )
+    .await?;
     let session_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agent_sessions (id, organization_id, cluster_id, agent_id, protocol_version) VALUES ($1,$2,$3,$4,$5)")
-        .bind(session_id).bind(scope.organization_id).bind(scope.cluster_id).bind(agent_id).bind(i32::try_from(event_model::PROTOCOL_VERSION).unwrap_or(i32::MAX)).execute(pool).await?;
+    ClusterRepository::open_session(
+        pool,
+        session_id,
+        scope.organization_id,
+        scope.cluster_id,
+        agent_id,
+        i32::try_from(event_model::PROTOCOL_VERSION).unwrap_or(i32::MAX),
+    )
+    .await?;
     Ok((agent_id, session_id))
 }
 
@@ -333,10 +351,7 @@ fn platform_value(value: &str, max_len: usize) -> Option<&str> {
 }
 
 async fn touch_agent(pool: &PgPool, agent_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE agents SET last_seen_at=now() WHERE id=$1")
-        .bind(agent_id)
-        .execute(pool)
-        .await?;
+    ClusterRepository::touch_agent(pool, agent_id).await?;
     Ok(())
 }
 
@@ -379,10 +394,18 @@ async fn persist_onboarding_status(
             "onboarding timestamp is outside the accepted window",
         ));
     }
-    sqlx::query("INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) SELECT i.id,$4,$5,$6,$7 FROM application_installations i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1 ON CONFLICT(installation_id,node_name) DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,observed_at=EXCLUDED.observed_at,updated_at=now() WHERE application_installation_status.observed_at<=EXCLUDED.observed_at")
-        .bind(scope.organization_id).bind(scope.project_id).bind(scope.application_id)
-        .bind(node_name).bind(state).bind(reason).bind(observed_at)
-        .execute(pool).await.map_err(internal)?;
+    InstallationRepository::record_status(
+        pool,
+        scope.organization_id,
+        scope.project_id,
+        scope.application_id,
+        node_name,
+        state,
+        reason,
+        observed_at,
+    )
+    .await
+    .map_err(internal)?;
     Ok(())
 }
 
