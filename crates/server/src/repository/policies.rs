@@ -15,6 +15,263 @@ use uuid::Uuid;
 pub struct PolicyRepository;
 
 impl PolicyRepository {
+    /// The application's policy state version, if it has one.
+    pub async fn state_version<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<Option<i64>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, i64>("SELECT state_version FROM runtime_policy_states WHERE organization_id=$1 AND project_id=$2 AND application_id=$3")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// The current, enabled revisions of the application's policies for one
+    /// identity.
+    ///
+    /// Selects `revision_id`, `identity_version`, `identity_digest`, the
+    /// placement lists, `inside_effect` and `outside_effect`.
+    pub async fn enabled_revisions_for_identity<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        identity_version: i16,
+        identity_digest: &[u8],
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT r.id revision_id,r.identity_version,r.identity_digest,r.cluster_ids,r.namespaces,r.workload_kinds,r.workload_names,r.inside_effect,r.outside_effect FROM runtime_policies p JOIN runtime_policy_revisions r ON r.id=p.current_revision_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND r.enabled AND r.identity_version=$4 AND r.identity_digest=$5")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// Records, or replaces, a group's policy evaluation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_group_evaluation<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        group_id: Uuid,
+        policy_state_version: i64,
+        evaluator_version: i16,
+        verdict: &str,
+        reason_code: &str,
+        winning_revision_id: Option<Uuid>,
+        explanation: &serde_json::Value,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_group_policy_evaluations(organization_id,project_id,application_id,group_id,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(group_id) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(group_id)
+            .bind(policy_state_version)
+            .bind(evaluator_version)
+            .bind(verdict)
+            .bind(reason_code)
+            .bind(winning_revision_id)
+            .bind(explanation)
+            .execute(executor)
+            .await
+    }
+
+    /// Records, or replaces, a sighting's policy evaluation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_sighting_evaluation<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        item_id: Uuid,
+        cluster_id: Uuid,
+        namespace: &str,
+        workload_kind: &str,
+        workload_name: &str,
+        pod_uid: &str,
+        container_name: &str,
+        policy_state_version: i64,
+        evaluator_version: i16,
+        verdict: &str,
+        reason_code: &str,
+        winning_revision_id: Option<Uuid>,
+        explanation: &serde_json::Value,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_sighting_policy_evaluations(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(item_id)
+            .bind(cluster_id)
+            .bind(namespace)
+            .bind(workload_kind)
+            .bind(workload_name)
+            .bind(pod_uid)
+            .bind(container_name)
+            .bind(policy_state_version)
+            .bind(evaluator_version)
+            .bind(verdict)
+            .bind(reason_code)
+            .bind(winning_revision_id)
+            .bind(explanation)
+            .execute(executor)
+            .await
+    }
+
+    /// Leases the oldest pending recomputation, or one whose lease expired,
+    /// to `owner`, counting an attempt.
+    ///
+    /// Selects the recomputation's `id`, tenant path, `identity_version` and
+    /// `identity_digest`.
+    pub async fn claim_recomputation<'e, E, T>(
+        executor: E,
+        owner: Uuid,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("WITH candidate AS (SELECT id FROM runtime_policy_recomputations WHERE state='pending' OR (state='running' AND lease_expires_at<now()) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE runtime_policy_recomputations o SET state='running',lease_owner=$1,lease_expires_at=now()+interval '30 seconds',attempt_count=attempt_count+1,started_at=COALESCE(started_at,now()),updated_at=now() FROM candidate c WHERE o.id=c.id RETURNING o.id,o.organization_id,o.project_id,o.application_id,o.identity_version,o.identity_digest")
+            .bind(owner)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// Up to `limit` runtime groups of an identity whose evaluation is not
+    /// current, with their placement.
+    ///
+    /// Selects `item_id`, `group_id`, `cluster_id`, `namespace`,
+    /// `workload_kind` and `workload_name`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn groups_to_evaluate<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        identity_version: i16,
+        identity_digest: &[u8],
+        evaluator_version: i16,
+        limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT l.item_id,g.id group_id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_inventory_group_links l JOIN runtime_inventory_items i ON i.id=l.item_id JOIN runtime_event_groups g ON g.id=l.group_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states s ON s.organization_id=g.organization_id AND s.project_id=g.project_id AND s.application_id=g.application_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.group_id IS NULL OR e.policy_state_version<COALESCE(s.state_version,0) OR e.evaluator_version<>$6) ORDER BY g.id LIMIT $7")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .bind(evaluator_version)
+            .bind(limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// Up to `limit` sightings of an identity whose evaluation is not current.
+    ///
+    /// Selects `item_id`, `cluster_id`, `namespace`, `workload_kind`,
+    /// `workload_name`, `pod_uid` and `container_name`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn sightings_to_evaluate<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        identity_version: i16,
+        identity_digest: &[u8],
+        evaluator_version: i16,
+        limit: i64,
+    ) -> Result<Vec<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.item_id IS NULL OR e.policy_state_version<COALESCE(ps.state_version,0) OR e.evaluator_version<>$6) ORDER BY s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name LIMIT $7")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(identity_version)
+            .bind(identity_digest)
+            .bind(evaluator_version)
+            .bind(limit)
+            .fetch_all(executor)
+            .await
+    }
+
+    /// Completes a recomputation leased to `owner`.
+    pub async fn complete_recomputation<'e, E>(
+        executor: E,
+        recomputation_id: Uuid,
+        owner: Uuid,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("UPDATE runtime_policy_recomputations SET state='completed',completed_at=now(),lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND lease_owner=$2")
+            .bind(recomputation_id)
+            .bind(owner)
+            .execute(executor)
+            .await
+    }
+
+    /// Returns a recomputation leased to `owner` to pending, for the next
+    /// batch.
+    pub async fn release_recomputation<'e, E>(
+        executor: E,
+        recomputation_id: Uuid,
+        owner: Uuid,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("UPDATE runtime_policy_recomputations SET state='pending',lease_owner=NULL,lease_expires_at=NULL,updated_at=now() WHERE id=$1 AND lease_owner=$2")
+            .bind(recomputation_id)
+            .bind(owner)
+            .execute(executor)
+            .await
+    }
+
+    /// Requests a recomputation for every identity of the project, or of one
+    /// application.
+    pub async fn backfill_recomputations<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Option<Uuid>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_policy_recomputations(id,organization_id,project_id,application_id,identity_version,identity_digest) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.identity_version,i.identity_digest FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND ($3::uuid IS NULL OR i.application_id=$3) AND NOT EXISTS(SELECT 1 FROM runtime_policy_recomputations o WHERE o.organization_id=i.organization_id AND o.project_id=i.project_id AND o.application_id=i.application_id AND o.identity_version=i.identity_version AND o.identity_digest=i.identity_digest AND o.state IN ('pending','running')) GROUP BY i.organization_id,i.project_id,i.application_id,i.identity_version,i.identity_digest")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .execute(executor)
+            .await
+    }
+
     /// One recomputation request of the application.
     ///
     /// Selects `id`, `state`, `attempt_count`, `requested_policy_revision_id`,
@@ -1275,5 +1532,225 @@ mod tests {
             .unwrap();
         assert_eq!(first, second, "the snapshot time does not move");
         tx.commit().await.unwrap();
+    }
+
+    /// A recomputation is leased, finds the groups and sightings whose
+    /// evaluation is stale, stores fresh evaluations, and is released or
+    /// completed by its owner; backfill requests one per identity.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn recomputations_reevaluate_stale_placements(pool: PgPool) {
+        #[derive(Debug, FromRow)]
+        struct Leased {
+            id: Uuid,
+            identity_version: i16,
+        }
+        #[derive(Debug, FromRow)]
+        struct GroupTarget {
+            group_id: Uuid,
+        }
+        #[derive(Debug, FromRow)]
+        struct SightingTarget {
+            item_id: Uuid,
+            cluster_id: Uuid,
+            namespace: String,
+            workload_kind: String,
+            workload_name: String,
+            pod_uid: String,
+            container_name: String,
+        }
+        #[derive(Debug, FromRow)]
+        struct EnabledRevision {
+            revision_id: Uuid,
+        }
+
+        let own = tenant(&pool, "policies-recompute").await;
+        ingest(&pool, &own, &[exec(&own, "/bin/a", Utc::now())]).await;
+        let item = identity(&pool, &own).await;
+        let group = group_ids(&pool, &own).await[0];
+        let actor = user(&pool).await;
+        let shell = policy(&pool, &own, actor, "Shell").await;
+        let revision = revise(&pool, &own, actor, shell, 1, None, &item, None).await;
+        let version = PolicyRepository::bump_state_version(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            PolicyRepository::state_version(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id
+            )
+            .await
+            .unwrap(),
+            Some(version)
+        );
+        let enabled: Vec<EnabledRevision> = PolicyRepository::enabled_revisions_for_identity(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            item.identity_version,
+            &item.identity_digest,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            enabled.iter().map(|r| r.revision_id).collect::<Vec<_>>(),
+            [revision]
+        );
+
+        let recomputation = Uuid::new_v4();
+        PolicyRepository::request_recomputation(
+            &pool,
+            recomputation,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            item.identity_version,
+            &item.identity_digest,
+            revision,
+        )
+        .await
+        .unwrap();
+        let owner = Uuid::new_v4();
+        let leased: Leased = PolicyRepository::claim_recomputation(&pool, owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (leased.id, leased.identity_version),
+            (recomputation, item.identity_version)
+        );
+        assert!(
+            PolicyRepository::claim_recomputation::<_, Leased>(&pool, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none(),
+            "leased once"
+        );
+
+        let groups = || {
+            PolicyRepository::groups_to_evaluate::<_, GroupTarget>(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                item.identity_version,
+                &item.identity_digest,
+                crate::policy::POLICY_EVALUATOR_VERSION,
+                10,
+            )
+        };
+        let sightings = || {
+            PolicyRepository::sightings_to_evaluate::<_, SightingTarget>(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                item.identity_version,
+                &item.identity_digest,
+                crate::policy::POLICY_EVALUATOR_VERSION,
+                10,
+            )
+        };
+        assert_eq!(
+            groups()
+                .await
+                .unwrap()
+                .iter()
+                .map(|g| g.group_id)
+                .collect::<Vec<_>>(),
+            [group],
+            "the state moved on, the evaluation is stale"
+        );
+        let stale_sightings = sightings().await.unwrap();
+        assert_eq!(stale_sightings.len(), 1);
+        let explanation = json!({"policy": "Shell"});
+        PolicyRepository::store_group_evaluation(
+            &pool,
+            own.organization_id,
+            own.project_id,
+            own.application_id,
+            group,
+            version,
+            crate::policy::POLICY_EVALUATOR_VERSION,
+            "expected",
+            "inside_placement",
+            Some(revision),
+            &explanation,
+        )
+        .await
+        .unwrap();
+        for s in &stale_sightings {
+            assert_eq!(s.item_id, item.id);
+            PolicyRepository::store_sighting_evaluation(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                s.item_id,
+                s.cluster_id,
+                &s.namespace,
+                &s.workload_kind,
+                &s.workload_name,
+                &s.pod_uid,
+                &s.container_name,
+                version,
+                crate::policy::POLICY_EVALUATOR_VERSION,
+                "expected",
+                "inside_placement",
+                Some(revision),
+                &explanation,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(groups().await.unwrap().is_empty());
+        assert!(sightings().await.unwrap().is_empty());
+
+        let state = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT state FROM runtime_policy_recomputations WHERE id=$1",
+            )
+            .bind(recomputation)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        PolicyRepository::release_recomputation(&pool, recomputation, Uuid::new_v4())
+            .await
+            .unwrap();
+        assert_eq!(state().await, "running", "only the owner releases it");
+        PolicyRepository::release_recomputation(&pool, recomputation, owner)
+            .await
+            .unwrap();
+        assert_eq!(state().await, "pending");
+        let second_owner = Uuid::new_v4();
+        PolicyRepository::claim_recomputation::<_, Leased>(&pool, second_owner)
+            .await
+            .unwrap()
+            .unwrap();
+        PolicyRepository::complete_recomputation(&pool, recomputation, second_owner)
+            .await
+            .unwrap();
+        assert_eq!(state().await, "completed");
+
+        PolicyRepository::backfill_recomputations(&pool, own.organization_id, own.project_id, None)
+            .await
+            .unwrap();
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM runtime_policy_recomputations WHERE project_id=$1 AND state='pending'",
+        )
+        .bind(own.project_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1, "one per identity of the project");
     }
 }

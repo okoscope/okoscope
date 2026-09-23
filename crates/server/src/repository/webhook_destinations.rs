@@ -9,6 +9,16 @@ use uuid::Uuid;
 pub struct WebhookDestinationRepository;
 
 impl WebhookDestinationRepository {
+    /// How many destinations are enabled across all projects.
+    pub async fn enabled_count<'e, E>(executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_destinations WHERE enabled=true")
+            .fetch_one(executor)
+            .await
+    }
+
     /// The project's enabled destinations by id.
     ///
     /// Selects `id` and `deliver_backfill`.

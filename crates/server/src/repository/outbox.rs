@@ -10,6 +10,65 @@ use uuid::Uuid;
 pub struct OutboxRepository;
 
 impl OutboxRepository {
+    /// Announces a new runtime group from a live or backfill source, once
+    /// per group.
+    pub async fn insert_first_seen_from<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        group_id: Uuid,
+        source: &str,
+        payload: serde_json::Value,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO outbox_messages (id, organization_id, project_id, topic, aggregate_id, schema_version, source, payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,$5,$6) ON CONFLICT (topic, aggregate_id, schema_version) DO NOTHING")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(group_id)
+            .bind(source)
+            .bind(payload)
+            .execute(executor)
+            .await
+    }
+
+    /// How many outbox messages are not processed yet.
+    pub async fn unprocessed_count<'e, E>(executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM outbox_messages WHERE processed_at IS NULL",
+        )
+        .fetch_one(executor)
+        .await
+    }
+
+    /// Announces a new runtime group, once per group.
+    pub async fn insert_first_seen<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        group_id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO outbox_messages (id,organization_id,project_id,topic,aggregate_id,schema_version,source,payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,'live',$5) ON CONFLICT (topic,aggregate_id,schema_version) DO NOTHING")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(group_id)
+            .bind(payload)
+            .execute(executor)
+            .await
+    }
+
     /// Locks up to `limit` unprocessed, unmaterialized first-seen messages,
     /// oldest first, skipping ones another worker holds.
     ///

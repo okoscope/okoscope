@@ -25,6 +25,18 @@ const INVITATION_SELECT: &str = "SELECT i.id,i.organization_id,o.name organizati
 pub struct InvitationRepository;
 
 impl InvitationRepository {
+    /// Deletes invitations past their retention.
+    pub async fn delete_retained<'e, E>(
+        executor: E,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("DELETE FROM invitations WHERE retain_until<now()")
+            .execute(executor)
+            .await
+    }
+
     /// The invitation with this id.
     pub async fn get<'e, E, T>(executor: E, invitation_id: Uuid) -> Result<Option<T>, sqlx::Error>
     where

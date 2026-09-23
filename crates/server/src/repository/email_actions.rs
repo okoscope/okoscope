@@ -11,6 +11,19 @@ use uuid::Uuid;
 pub struct EmailActionRepository;
 
 impl EmailActionRepository {
+    /// Deletes actions older than 30 days that expired, were consumed or were
+    /// revoked.
+    pub async fn delete_stale<'e, E>(
+        executor: E,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("DELETE FROM user_email_actions WHERE (expires_at<now() OR consumed_at IS NOT NULL OR revoked_at IS NOT NULL) AND created_at<now()-interval '30 days'")
+            .execute(executor)
+            .await
+    }
+
     /// Revokes the user's live actions of this purpose.
     pub async fn revoke_pending<'e, E>(
         executor: E,

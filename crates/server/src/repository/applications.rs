@@ -44,6 +44,29 @@ pub struct StoredApplication {
 pub struct ApplicationRepository;
 
 impl ApplicationRepository {
+    /// Records an application, or renames the project's one with this slug,
+    /// and returns its id.
+    pub async fn upsert_by_slug<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        project_id: Uuid,
+        slug: &str,
+        name: &str,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO applications (id, organization_id, project_id, slug, name) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (project_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
+            .bind(id)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(slug)
+            .bind(name)
+            .fetch_one(executor)
+            .await
+    }
+
     /// The project's first 200 applications, oldest first.
     ///
     /// Selects `id`, `organization_id`, `project_id`, `slug`, `name` and

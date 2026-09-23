@@ -1,3 +1,7 @@
+use crate::repository::applications::ApplicationRepository;
+use crate::repository::clusters::ClusterRepository;
+use crate::repository::organizations::OrganizationRepository;
+use crate::repository::projects::ProjectRepository;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -58,8 +62,13 @@ async fn upsert_organization(
     tx: &mut Transaction<'_, Postgres>,
     c: &BootstrapConfig,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-        .bind(c.organization_id).bind(&c.organization_slug).bind(&c.organization_name).fetch_one(&mut **tx).await
+    OrganizationRepository::upsert_by_slug(
+        &mut **tx,
+        c.organization_id,
+        &c.organization_slug,
+        &c.organization_name,
+    )
+    .await
 }
 
 async fn upsert_project(
@@ -67,8 +76,14 @@ async fn upsert_project(
     organization_id: Uuid,
     c: &BootstrapConfig,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar("INSERT INTO projects (id, organization_id, slug, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-        .bind(c.project_id).bind(organization_id).bind(&c.project_slug).bind(&c.project_name).fetch_one(&mut **tx).await
+    ProjectRepository::upsert_by_slug(
+        &mut **tx,
+        c.project_id,
+        organization_id,
+        &c.project_slug,
+        &c.project_name,
+    )
+    .await
 }
 
 async fn upsert_cluster(
@@ -76,8 +91,14 @@ async fn upsert_cluster(
     organization_id: Uuid,
     c: &BootstrapConfig,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar("INSERT INTO clusters (id, organization_id, external_id, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, external_id) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-        .bind(c.cluster_id).bind(organization_id).bind(&c.cluster_external_id).bind(&c.cluster_name).fetch_one(&mut **tx).await
+    ClusterRepository::upsert(
+        &mut **tx,
+        c.cluster_id,
+        organization_id,
+        &c.cluster_external_id,
+        &c.cluster_name,
+    )
+    .await
 }
 
 async fn upsert_application(
@@ -86,8 +107,15 @@ async fn upsert_application(
     project_id: Uuid,
     c: &BootstrapConfig,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar("INSERT INTO applications (id, organization_id, project_id, slug, name) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (project_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-        .bind(c.application_id).bind(organization_id).bind(project_id).bind(&c.application_slug).bind(&c.application_name).fetch_one(&mut **tx).await
+    ApplicationRepository::upsert_by_slug(
+        &mut **tx,
+        c.application_id,
+        organization_id,
+        project_id,
+        &c.application_slug,
+        &c.application_name,
+    )
+    .await
 }
 
 async fn upsert_credential(
@@ -97,7 +125,13 @@ async fn upsert_credential(
     credential: &str,
 ) -> Result<(), sqlx::Error> {
     let hash = Sha256::digest(credential.as_bytes()).to_vec();
-    sqlx::query("INSERT INTO cluster_credentials (id, organization_id, cluster_id, credential_hash) VALUES ($1, $2, $3, $4) ON CONFLICT (credential_hash) DO UPDATE SET revoked_at = NULL")
-        .bind(Uuid::new_v4()).bind(organization_id).bind(cluster_id).bind(hash).execute(&mut **tx).await?;
+    ClusterRepository::upsert_credential(
+        &mut **tx,
+        Uuid::new_v4(),
+        organization_id,
+        cluster_id,
+        hash,
+    )
+    .await?;
     Ok(())
 }

@@ -45,6 +45,27 @@ pub struct LockedProject {
 pub struct ProjectRepository;
 
 impl ProjectRepository {
+    /// Records a project, or renames the organization's one with this slug,
+    /// and returns its id.
+    pub async fn upsert_by_slug<'e, E>(
+        executor: E,
+        id: Uuid,
+        organization_id: Uuid,
+        slug: &str,
+        name: &str,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO projects (id, organization_id, slug, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
+            .bind(id)
+            .bind(organization_id)
+            .bind(slug)
+            .bind(name)
+            .fetch_one(executor)
+            .await
+    }
+
     /// Locks the project row for update, without the organization lock
     /// [`Self::lock_for_update`] takes first. Fails with `RowNotFound` when
     /// there is no such project in the organization.
