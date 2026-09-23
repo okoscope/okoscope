@@ -37,11 +37,23 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
 
 /// Route families whose use cases live in a service: the route is in the
 /// handler, the project access check in the service it calls.
-const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[(
-    include_str!("../src/releases.rs"),
-    include_str!("../src/service/releases.rs"),
-    "/releases",
-)];
+const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
+    (
+        include_str!("../src/releases.rs"),
+        include_str!("../src/service/releases.rs"),
+        "/releases",
+    ),
+    (
+        include_str!("../src/access_api.rs"),
+        include_str!("../src/service/access.rs"),
+        "/api/v1/projects/{project_id}/members",
+    ),
+    (
+        include_str!("../src/invitation_api.rs"),
+        include_str!("../src/service/invitations.rs"),
+        "/api/v1/projects/{project_id}/invitations",
+    ),
+];
 
 #[test]
 fn every_descendant_route_family_has_a_project_access_seam() {

@@ -34,4 +34,7 @@
 //! is exactly that result, they also derive `Serialize`, so the transport can
 //! send them as they are.
 
+pub mod access;
+pub mod identity;
+pub mod invitations;
 pub mod releases;

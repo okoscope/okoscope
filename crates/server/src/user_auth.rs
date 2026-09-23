@@ -4,6 +4,7 @@ use crate::repository::SessionRepository;
 use crate::repository::UserRepository;
 use crate::repository::email_actions::EmailActionRepository;
 use crate::repository::{OrganizationRepository, OrganizationStatus};
+use crate::service::identity::{insert_session_with_context, valid_name, valid_slug};
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -23,9 +24,9 @@ use zeroize::Zeroizing;
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
     auth::{
-        AuthenticatedUser, OrganizationRole, SESSION_COOKIE, SessionToken,
-        UserSessionAuthenticator, hash_password, normalize_email, session_digest, session_token,
-        validate_password, verify_password,
+        AuthenticatedUser, OrganizationRole, SESSION_COOKIE, UserSessionAuthenticator,
+        hash_password, normalize_email, session_digest, session_token, validate_password,
+        verify_password,
     },
     transactional_mail::{Locale, MailConfig, TemplateData, enqueue},
     web_api::{RequestId, WebApiConfig},
@@ -306,20 +307,6 @@ struct OrganizationResponse {
     role: OrganizationRole,
 }
 
-pub(crate) fn valid_slug(value: &str) -> bool {
-    (1..=63).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && !value.contains("--")
-}
-
-pub(crate) fn valid_name(value: &str) -> bool {
-    value.trim() == value && (1..=120).contains(&value.chars().count())
-}
-
 pub(crate) fn session_cookie(
     token: &str,
     secure: bool,
@@ -339,39 +326,6 @@ fn expired_cookie(secure: bool) -> HeaderValue {
         "{SESSION_COOKIE}=; HttpOnly{secure}; SameSite=Lax; Path=/; Max-Age=0"
     ))
     .expect("generated expired cookie is valid")
-}
-
-pub(crate) async fn insert_identity_session(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    privileged_until: Option<chrono::DateTime<Utc>>,
-    lifetime: std::time::Duration,
-) -> Result<(Uuid, SessionToken), sqlx::Error> {
-    insert_session_with_context(tx, user_id, None, privileged_until, lifetime).await
-}
-
-pub(crate) async fn insert_session_with_context(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    organization_id: Option<Uuid>,
-    privileged_until: Option<chrono::DateTime<Utc>>,
-    lifetime: std::time::Duration,
-) -> Result<(Uuid, SessionToken), sqlx::Error> {
-    let session_id = Uuid::new_v4();
-    let token = SessionToken::generate();
-    let expires_at =
-        Utc::now() + Duration::from_std(lifetime).unwrap_or_else(|_| Duration::hours(12));
-    SessionRepository::insert(
-        &mut **tx,
-        session_id,
-        user_id,
-        organization_id,
-        token.digest().as_slice(),
-        expires_at,
-        privileged_until,
-    )
-    .await?;
-    Ok((session_id, token))
 }
 
 struct ActionToken {
