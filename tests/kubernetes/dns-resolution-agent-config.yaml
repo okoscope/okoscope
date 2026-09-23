@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: okoscope-agent
+  namespace: okoscope
+data:
+  agent.yaml: |
+    apiVersion: okoscope.io/v1alpha1
+    kind: AgentConfiguration
+    server:
+      endpoint: http://okoscope-server.okoscope.svc:4317
+      developmentPlaintext: true
+    identity:
+      nodeName: overridden-by-downward-api
+      clusterName: local
+    scope:
+      workloads:
+        - applicationCredentialFile: /var/run/secrets/okoscope/applications/payment-api
+          namespace: okoscope-dns-acceptance
+          kind: Job
+          name: selected-dns-fixture
+          release: smoke-v2-20260817
+    observation:
+      processExec: false
+      syscalls: []
+      network:
+        connect: true
+        dns:
+          enabled: true
+          udp: true
+          tcp: true
+          maxCapturedBytes: 1232
+          maxPendingTransactions: 4096
+          maxTcpStreams: 1024
+          maxAnswersPerResponse: 16
+          maxNamesPerAddress: 8
+          maxTtlSeconds: 86400
+          maxEventsPerSecond: 1000
+    safety:
+      queueCapacity: 4096
+      batchSize: 256
+      maxEventsPerSecond: 10000

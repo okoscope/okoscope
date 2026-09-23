@@ -1,0 +1,17 @@
+{{- if .Values.certManager.enabled }}
+{{- range $name, $route := dict "web" .Values.ingress.web "grpc" .Values.ingress.grpc }}
+{{- if $route.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "okoscope.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "okoscope.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ $route.tlsSecret }}
+  dnsNames: [{{ $route.host | quote }}]
+  issuerRef: {kind: ClusterIssuer, name: {{ $.Values.certManager.clusterIssuer }}}
+---
+{{- end }}
+{{- end }}
+{{- end }}

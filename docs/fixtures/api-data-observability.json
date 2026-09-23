@@ -1,0 +1,64 @@
+{
+  "inventory_distribution": {
+    "non_empty_with_other": {
+      "identity_version": 1,
+      "kind": "syscall",
+      "total_item_count": 2,
+      "total_occurrence_count": 12,
+      "entries": [
+        {
+          "identity_token": "<opaque-token>",
+          "semantic_summary": {"process_command": "payments", "syscall": "epoll_wait"},
+          "item_count": 1,
+          "occurrence_count": 10
+        }
+      ],
+      "other": {"item_count": 1, "occurrence_count": 2}
+    },
+    "no_remainder": {
+      "identity_version": 1,
+      "kind": "process",
+      "total_item_count": 1,
+      "total_occurrence_count": 3,
+      "entries": [
+        {
+          "identity_token": "<opaque-token>",
+          "semantic_summary": {"executable": "<script>alert(1)</script>"},
+          "item_count": 1,
+          "occurrence_count": 3
+        }
+      ],
+      "other": null
+    },
+    "empty": {
+      "identity_version": 1,
+      "kind": "domain",
+      "total_item_count": 0,
+      "total_occurrence_count": 0,
+      "entries": [],
+      "other": null
+    }
+  },
+  "runtime_diff_summary": {
+    "no_baseline": {
+      "baseline": null,
+      "target": {
+        "id": "018f4f9c-3f9a-7de1-8000-000000000011",
+        "project_id": "018f4f9c-3f9a-7de1-8000-000000000001",
+        "application_id": "018f4f9c-3f9a-7de1-8000-000000000002",
+        "version": "1.0.0",
+        "description": null,
+        "deployed_at": "2026-08-20T10:00:00Z",
+        "created_at": "2026-08-20T10:00:00Z"
+      },
+      "total_item_count": 0,
+      "classifications": [],
+      "largest_changes": []
+    }
+  },
+  "identity_token_errors": [
+    {"error": "invalid_identity_token", "message": "identity token is invalid for this request", "request_id": "req-example"},
+    {"error": "expired_identity_token", "message": "identity token is invalid for this request", "request_id": "req-example"},
+    {"error": "identity_token_scope_mismatch", "message": "identity token is invalid for this request", "request_id": "req-example"}
+  ]
+}
