@@ -142,13 +142,12 @@ async fn persist_event(
     if event.schema_version != EVENT_SCHEMA_VERSION {
         return Err(IngestionError::UnsupportedSchema(event.schema_version));
     }
-    let owned: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM applications WHERE id = $1 AND project_id = $2 AND organization_id = $3)",
+    let owned = crate::repository::ApplicationRepository::exists(
+        &mut **tx,
+        context.scope.organization_id,
+        event.attribution.project_id,
+        event.attribution.application_id,
     )
-    .bind(event.attribution.application_id)
-    .bind(event.attribution.project_id)
-    .bind(context.scope.organization_id)
-    .fetch_one(&mut **tx)
     .await?;
     if !owned {
         return Err(IngestionError::InvalidOwnership);

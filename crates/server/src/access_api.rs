@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::repository::ApplicationRepository;
 use crate::repository::MembershipRepository;
 use crate::repository::ProjectRepository;
 use crate::repository::SessionRepository;
@@ -804,7 +805,7 @@ async fn list_platform_projects(
 ) -> Result<Json<PlatformProjectPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformProject> = sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,(SELECT count(*) FROM applications a WHERE a.project_id=p.id) application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", aggregates::COUNT_ALL_FOR_PROJECT))
+    let mut items: Vec<PlatformProject> = sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
         .bind(organization_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
@@ -968,10 +969,31 @@ async fn create_platform_application(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    let application: ProvisionedApplication = sqlx::query_as("INSERT INTO applications(id,organization_id,project_id,slug,name) SELECT $1,organization_id,id,$3,$4 FROM projects WHERE id=$2 RETURNING id,organization_id,project_id,slug,name,created_at")
-        .bind(Uuid::new_v4()).bind(project_id).bind(input.slug).bind(input.name)
-        .fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::PROJECT_NOT_FOUND, "resource not found", &request_id))?;
+    let stored = ApplicationRepository::insert(
+        &mut *tx,
+        Uuid::new_v4(),
+        project_id,
+        &input.slug,
+        &input.name,
+    )
+    .await
+    .map_err(|error| AccessError::database(&error, &request_id))?
+    .ok_or_else(|| {
+        AccessError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::PROJECT_NOT_FOUND,
+            "resource not found",
+            &request_id,
+        )
+    })?;
+    let application = ProvisionedApplication {
+        id: stored.id,
+        organization_id: stored.organization_id,
+        project_id: stored.project_id,
+        slug: stored.slug,
+        name: stored.name,
+        created_at: stored.created_at,
+    };
     let issued = issue_application_credential(
         &mut tx,
         application.organization_id,
