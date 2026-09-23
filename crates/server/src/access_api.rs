@@ -812,10 +812,37 @@ async fn create_platform_project(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    let mut project: PlatformProject = sqlx::query_as("INSERT INTO projects(id,organization_id,slug,name) SELECT $1,id,$3,$4 FROM organizations WHERE id=$2 RETURNING id,slug,name,created_at,archived_at,0::bigint application_count,0::bigint runtime_group_count")
-        .bind(Uuid::new_v4()).bind(organization_id).bind(input.slug).bind(input.name)
-        .fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
-        .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::ORGANIZATION_NOT_FOUND, "resource not found", &request_id))?;
+    let stored = ProjectRepository::insert(
+        &mut *tx,
+        Uuid::new_v4(),
+        organization_id,
+        &input.slug,
+        &input.name,
+    )
+    .await
+    .map_err(|error| AccessError::database(&error, &request_id))?
+    .ok_or_else(|| {
+        AccessError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::ORGANIZATION_NOT_FOUND,
+            "resource not found",
+            &request_id,
+        )
+    })?;
+    // A project that was just created has no applications and no runtime
+    // groups yet, so the counts are known without a query.
+    let mut project = PlatformProject {
+        id: stored.id,
+        slug: stored.slug,
+        name: stored.name,
+        created_at: stored.created_at,
+        archived_at: stored.archived_at,
+        application_count: 0,
+        runtime_group_count: 0,
+        effective_project_role: None,
+        effective_access_source: None,
+        capabilities: platform_capabilities(),
+    };
     project.effective_project_role = Some(ProjectRole::Admin);
     project.effective_access_source = Some(EffectiveAccessSource::Platform);
     project.capabilities = platform_capabilities();

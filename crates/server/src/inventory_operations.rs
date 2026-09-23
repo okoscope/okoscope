@@ -210,14 +210,9 @@ pub async fn reconcile(
         return Err(InventoryOperationError::UnsupportedIdentityVersion);
     }
     let mut tx = pool.begin().await?;
-    lock_project(&mut tx, organization_id, project_id).await?;
-    let closed_before = sqlx::query_scalar(
-        "SELECT runtime_closed_before FROM projects WHERE organization_id=$1 AND id=$2",
-    )
-    .bind(organization_id)
-    .bind(project_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let closed_before = lock_project(&mut tx, organization_id, project_id)
+        .await?
+        .runtime_closed_before;
     let row = sqlx::query_as::<_, ReconciliationRow>(
         "SELECT (SELECT count(*) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_event_count,(SELECT count(*) FROM runtime_inventory_event_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) membership_count,(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) item_occurrence_count,(SELECT min(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_first_seen_at,(SELECT min(first_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_first_seen_at,(SELECT max(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_last_seen_at,(SELECT max(last_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_last_seen_at",
     )
@@ -299,14 +294,8 @@ async fn lock_project(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
     project_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    if !crate::repository::OrganizationRepository::lock_shared(&mut **tx, organization_id).await? {
-        return Err(sqlx::Error::RowNotFound);
-    }
-    sqlx::query("SELECT id FROM projects WHERE organization_id=$1 AND id=$2 FOR UPDATE")
-        .bind(organization_id)
-        .bind(project_id)
-        .fetch_one(&mut **tx)
-        .await?;
-    Ok(())
+) -> Result<crate::repository::LockedProject, sqlx::Error> {
+    crate::repository::ProjectRepository::lock_for_update(tx, organization_id, project_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
 }

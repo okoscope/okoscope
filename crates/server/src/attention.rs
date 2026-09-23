@@ -616,10 +616,7 @@ async fn organization_access(
             .organization_role
             .is_some_and(OrganizationRole::inherits_project_access);
     let project_ids = if inherited {
-        sqlx::query_scalar("SELECT id FROM projects WHERE organization_id=$1 ORDER BY id")
-            .bind(organization_id)
-            .fetch_all(&state.pool)
-            .await?
+        crate::repository::ProjectRepository::ids_in(&state.pool, organization_id).await?
     } else {
         MembershipRepository::accessible_project_ids(
             &state.pool,
