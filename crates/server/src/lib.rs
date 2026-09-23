@@ -33,6 +33,7 @@ pub mod release_discovery;
 pub mod releases;
 pub mod repository;
 pub mod resources;
+pub mod service;
 pub mod session;
 pub mod termination_projection;
 pub mod transactional_mail;
