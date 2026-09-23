@@ -52,7 +52,6 @@ const REMAINING: &[(&str, usize)] = &[
     ("policy_recompute.rs", 6),
     ("provisioning.rs", 12),
     ("release_discovery.rs", 13),
-    ("releases.rs", 10),
     ("resources.rs", 16),
     ("runtime_retention/history.rs", 2),
     ("runtime_retention/settings.rs", 7),
