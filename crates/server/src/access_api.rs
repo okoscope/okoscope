@@ -943,7 +943,7 @@ async fn list_platform_applications(
 ) -> Result<Json<PlatformApplicationPage>, AccessError> {
     platform(&state, &headers, &request_id, false).await?;
     let limit = page.limit();
-    let mut items: Vec<PlatformApplication> = sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,(SELECT count(*) FROM releases r WHERE r.application_id=a.id) release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", aggregates::COUNT_ALL_FOR_APPLICATION,aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
+    let mut items: Vec<PlatformApplication> = sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_ALL_FOR_APPLICATION,aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
         .bind(project_id).bind(page.cursor).bind(limit + 1).fetch_all(&state.pool).await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     for item in &mut items {
