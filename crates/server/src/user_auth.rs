@@ -1,5 +1,6 @@
 use crate::error_code::ErrorCode;
 use crate::repository::MembershipRepository;
+use crate::repository::SessionRepository;
 use crate::repository::UserRepository;
 use axum::{
     Extension, Json, Router,
@@ -361,9 +362,16 @@ pub(crate) async fn insert_session_with_context(
     let token = SessionToken::generate();
     let expires_at =
         Utc::now() + Duration::from_std(lifetime).unwrap_or_else(|_| Duration::hours(12));
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(session_id).bind(user_id).bind(organization_id).bind(token.digest().to_vec())
-        .bind(expires_at).bind(privileged_until).execute(&mut **tx).await?;
+    SessionRepository::insert(
+        &mut **tx,
+        session_id,
+        user_id,
+        organization_id,
+        token.digest().as_slice(),
+        expires_at,
+        privileged_until,
+    )
+    .await?;
     Ok((session_id, token))
 }
 
@@ -626,13 +634,9 @@ async fn establish_session(
         .await
         .map_err(|error| AuthError::internal(&error, request_id))?;
     if let Some(old) = session_token(headers).and_then(session_digest) {
-        sqlx::query(
-            "UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE token_hash=$1",
-        )
-        .bind(old.to_vec())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| AuthError::internal(&error, request_id))?;
+        SessionRepository::revoke_by_token_digest(&mut *tx, &old)
+            .await
+            .map_err(|error| AuthError::internal(&error, request_id))?;
     }
     let (_, token) = insert_session_with_context(
         &mut tx,
@@ -967,9 +971,7 @@ async fn change_password(
     revoke_security_state(&mut tx, user.user_id, Some(principal.session_id))
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
-    sqlx::query("UPDATE user_sessions SET revoked_at=now() WHERE id=$1")
-        .bind(principal.session_id)
-        .execute(&mut *tx)
+    SessionRepository::revoke(&mut *tx, principal.session_id)
         .await
         .map_err(|error| AuthError::internal(&error, &request_id))?;
     let (_, token) = insert_session_with_context(
@@ -1010,8 +1012,7 @@ async fn revoke_security_state(
     user_id: Uuid,
     except_session: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND ($2::uuid IS NULL OR id<>$2)")
-        .bind(user_id).bind(except_session).execute(&mut **tx).await?;
+    SessionRepository::revoke_all_for_user(&mut **tx, user_id, except_session).await?;
     sqlx::query("UPDATE user_email_actions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL")
         .bind(user_id).execute(&mut **tx).await?;
     Ok(())
@@ -1138,13 +1139,9 @@ async fn logout(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Response, AuthError> {
     if let Some(digest) = session_token(&headers).and_then(session_digest) {
-        sqlx::query(
-            "UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE token_hash=$1",
-        )
-        .bind(digest.to_vec())
-        .execute(&state.pool)
-        .await
-        .map_err(|error| AuthError::internal(&error, &request_id))?;
+        SessionRepository::revoke_by_token_digest(&state.pool, &digest)
+            .await
+            .map_err(|error| AuthError::internal(&error, &request_id))?;
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::repository::MembershipRepository;
 use crate::repository::ProjectRepository;
+use crate::repository::SessionRepository;
 use crate::repository::event_groups::aggregates;
 use crate::{
     access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit},
@@ -331,8 +332,9 @@ async fn select_organization(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1 AND revoked_at IS NULL")
-        .bind(principal.session_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    SessionRepository::revoke(&mut *tx, principal.session_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
     let (_, token) = insert_session_with_context(
         &mut tx,
         principal.user_id,
@@ -394,9 +396,7 @@ async fn confirm_privilege(
         .begin()
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1")
-        .bind(principal.session_id)
-        .execute(&mut *tx)
+    SessionRepository::revoke(&mut *tx, principal.session_id)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     let (_, token) = insert_session_with_context(
@@ -1007,9 +1007,7 @@ async fn set_user_status(
     let item: UserSummary = sqlx::query_as("UPDATE users SET disabled_at=CASE WHEN $2 THEN coalesce(disabled_at,now()) ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING id,email,display_name,(email_verified_at IS NOT NULL) email_verified,(disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=users.id AND p.revoked_at IS NULL) is_super_admin,created_at")
         .bind(user_id).bind(disabled).fetch_optional(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?
         .ok_or_else(|| AccessError::new(StatusCode::NOT_FOUND, ErrorCode::USER_NOT_FOUND, "resource not found", &request_id))?;
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1")
-        .bind(user_id)
-        .execute(&mut *tx)
+    SessionRepository::revoke_all_for_user(&mut *tx, user_id, None)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
@@ -1115,9 +1113,7 @@ async fn revoke_super_admin(
             Err(AccessError::database(&error, &request_id))
         };
     }
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1")
-        .bind(user_id)
-        .execute(&mut *tx)
+    SessionRepository::revoke_all_for_user(&mut *tx, user_id, None)
         .await
         .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
@@ -1325,8 +1321,9 @@ async fn remove_organization_member(
         ErrorCode::LAST_ORGANIZATION_OWNER_REQUIRED,
         &request_id,
     )?;
-    sqlx::query("UPDATE user_sessions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND organization_id=$2")
-        .bind(user_id).bind(organization_id).execute(&mut *tx).await.map_err(|error| AccessError::database(&error, &request_id))?;
+    SessionRepository::revoke_for_user_in_organization(&mut *tx, user_id, organization_id)
+        .await
+        .map_err(|error| AccessError::database(&error, &request_id))?;
     audit(
         &mut tx,
         actor.user_id,
