@@ -1,3 +1,6 @@
+use crate::repository::event_groups::EventGroupRepository;
+use crate::repository::events::EventRepository;
+use crate::repository::inventory::InventoryRepository;
 use std::time::Duration;
 
 use event_model::{EventPayload, KubernetesAttribution, ProcessIdentity, RuntimeEvent};
@@ -121,13 +124,12 @@ pub async fn backfill(
         closed_before: coverage.closed_before,
         ..Default::default()
     };
-    let upper_bound: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND ($3::uuid IS NULL OR application_id=$3) ORDER BY id DESC LIMIT 1",
+    let upper_bound: Option<Uuid> = EventRepository::latest_id(
+        pool,
+        options.organization_id,
+        options.project_id,
+        options.application_id,
     )
-    .bind(options.organization_id)
-    .bind(options.project_id)
-    .bind(options.application_id)
-    .fetch_optional(pool)
     .await?;
     let Some(upper_bound) = upper_bound else {
         return Ok(initial);
@@ -138,17 +140,16 @@ pub async fn backfill(
     loop {
         let mut tx = pool.begin().await?;
         lock_project(&mut tx, options.organization_id, options.project_id).await?;
-        let rows = sqlx::query_as::<_, StoredInventoryEvent>(
-            "SELECT e.id,e.event_id,e.organization_id,e.project_id,e.cluster_id,e.application_id,e.release_id,m.group_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=1 LEFT JOIN runtime_inventory_event_memberships im ON im.event_id=e.id AND im.identity_version=$4 WHERE e.organization_id=$1 AND e.project_id=$2 AND ($3::uuid IS NULL OR e.application_id=$3) AND im.event_id IS NULL AND ($5::uuid IS NULL OR e.id>$5) AND e.id<=$6 ORDER BY e.id LIMIT $7",
+        let rows = InventoryRepository::projection_backfill_page::<_, StoredInventoryEvent>(
+            &mut *tx,
+            options.organization_id,
+            options.project_id,
+            options.application_id,
+            options.identity_version,
+            cursor,
+            upper_bound,
+            options.batch_size,
         )
-        .bind(options.organization_id)
-        .bind(options.project_id)
-        .bind(options.application_id)
-        .bind(options.identity_version)
-        .bind(cursor)
-        .bind(upper_bound)
-        .bind(options.batch_size)
-        .fetch_all(&mut *tx)
         .await?;
         if rows.is_empty() {
             break;
@@ -213,16 +214,22 @@ pub async fn reconcile(
     let closed_before = lock_project(&mut tx, organization_id, project_id)
         .await?
         .runtime_closed_before;
-    let row = sqlx::query_as::<_, ReconciliationRow>(
-        "SELECT (SELECT count(*) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_event_count,(SELECT count(*) FROM runtime_inventory_event_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) membership_count,(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) item_occurrence_count,(SELECT min(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_first_seen_at,(SELECT min(first_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_first_seen_at,(SELECT max(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_last_seen_at,(SELECT max(last_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_last_seen_at",
+    let row = InventoryRepository::reconciliation::<_, ReconciliationRow>(
+        &mut *tx,
+        organization_id,
+        project_id,
+        application_id,
+        identity_version,
     )
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(application_id)
-    .bind(identity_version)
-    .fetch_one(&mut *tx)
     .await?;
-    let (group_evidence_count,group_occurrence_count):(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM runtime_event_group_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)+(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_history_snapshots WHERE organization_id=$1 AND project_id=$2 AND application_id=$3),(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_event_groups WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)").bind(organization_id).bind(project_id).bind(application_id).fetch_one(&mut *tx).await?;
+    let (group_evidence_count, group_occurrence_count): (i64, i64) =
+        EventGroupRepository::evidence_counts(
+            &mut *tx,
+            organization_id,
+            project_id,
+            application_id,
+        )
+        .await?;
     tx.commit().await?;
     let mismatch_count = u64::from(group_evidence_count != group_occurrence_count)
         + u64::from(row.source_event_count != row.membership_count)

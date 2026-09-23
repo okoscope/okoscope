@@ -12,6 +12,41 @@ use uuid::Uuid;
 pub struct AccessAuditRepository;
 
 impl AccessAuditRepository {
+    /// Appends a successful access control change, kept for a year.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert<'e, E>(
+        executor: E,
+        id: Uuid,
+        actor_kind: &str,
+        actor_user_id: Option<Uuid>,
+        action: &str,
+        organization_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        target_user_id: Option<Uuid>,
+        invitation_id: Option<Uuid>,
+        previous_role: Option<&str>,
+        new_role: Option<&str>,
+        request_id: Option<&str>,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO access_audit_records(id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded',$11,now()+interval '365 days')")
+            .bind(id)
+            .bind(actor_kind)
+            .bind(actor_user_id)
+            .bind(action)
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(target_user_id)
+            .bind(invitation_id)
+            .bind(previous_role)
+            .bind(new_role)
+            .bind(request_id)
+            .execute(executor)
+            .await
+    }
+
     /// A page of access audit records by id, within one organization when
     /// given, after the cursor when one is given.
     ///
@@ -121,6 +156,56 @@ mod tests {
             scoped
                 .iter()
                 .all(|r| r.organization_id == Some(own.organization_id))
+        );
+    }
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::AccessAuditRepository;
+    use crate::repository::test_support::{tenant, user};
+
+    /// A record is appended as succeeded and retained for a year.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn records_are_appended_for_a_year(pool: PgPool) {
+        let own = tenant(&pool, "audit-insert").await;
+        let actor = user(&pool).await;
+        let id = Uuid::new_v4();
+        AccessAuditRepository::insert(
+            &pool,
+            id,
+            "user",
+            Some(actor),
+            "organization_member.role_changed",
+            Some(own.organization_id),
+            None,
+            Some(actor),
+            None,
+            Some("member"),
+            Some("admin"),
+            Some("request-1"),
+        )
+        .await
+        .unwrap();
+        let record: (String, String, Option<String>, bool) = sqlx::query_as(
+            "SELECT outcome,action,new_role,retain_until BETWEEN now()+interval '364 days' AND now()+interval '366 days' FROM access_audit_records WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            record,
+            (
+                "succeeded".into(),
+                "organization_member.role_changed".into(),
+                Some("admin".into()),
+                true
+            )
         );
     }
 }

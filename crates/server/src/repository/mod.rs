@@ -1,7 +1,8 @@
 //! Persistence layer.
 //!
-//! Every SQL statement against a shared entity belongs in a repository here
-//! rather than in an HTTP handler. Repositories own the statement text, the
+//! Every SQL statement the server issues lives in a repository here: HTTP
+//! handlers, background workers and domain modules call repository methods
+//! and never build queries themselves. Repositories own the statement text, the
 //! row types, and — critically — the tenant-scoping predicates, so that
 //! `organization_id` isolation is written once and reviewed once instead of
 //! being restated at each call site.
@@ -9,7 +10,8 @@
 //! Repository methods are generic over [`sqlx::PgExecutor`]. A caller passes
 //! `&pool` for a standalone read or `&mut *tx` to enlist the statement in its
 //! own transaction; the repository never opens or commits a transaction on the
-//! caller's behalf.
+//! caller's behalf. A method that issues several statements in a row takes
+//! `&mut PgConnection` instead, so they all run on the caller's connection.
 //!
 //! Errors surface as [`sqlx::Error`]. Mapping persistence failures onto an
 //! API-facing error type stays the caller's responsibility, because the status
@@ -30,6 +32,8 @@ pub mod agent_health;
 pub mod application_credentials;
 pub mod applications;
 pub mod attention;
+pub mod clusters;
+pub mod deployments;
 pub mod dns_groups;
 pub mod email_actions;
 pub mod event_groups;
@@ -50,8 +54,11 @@ pub mod provisioning;
 pub mod releases;
 pub mod resources;
 pub mod runtime_retention;
+pub mod schema;
 pub mod sessions;
+pub mod terminations;
 pub mod transaction;
+pub mod transactional_mail;
 pub mod users;
 pub mod webhook_destinations;
 

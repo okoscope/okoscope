@@ -77,6 +77,25 @@ pub struct StoredOrganization {
 pub struct OrganizationRepository;
 
 impl OrganizationRepository {
+    /// Records an organization, or renames the one with this slug, and
+    /// returns its id.
+    pub async fn upsert_by_slug<'e, E>(
+        executor: E,
+        id: Uuid,
+        slug: &str,
+        name: &str,
+    ) -> Result<Uuid, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
+            .bind(id)
+            .bind(slug)
+            .bind(name)
+            .fetch_one(executor)
+            .await
+    }
+
     /// Locks the organization row for update. Fails with `RowNotFound` when
     /// there is no such organization.
     pub async fn lock_for_update<'e, E>(

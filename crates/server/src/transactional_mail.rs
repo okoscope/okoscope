@@ -1,3 +1,7 @@
+use crate::repository::email_actions::EmailActionRepository;
+use crate::repository::invitations::InvitationRepository;
+use crate::repository::transactional_mail::TransactionalMailRepository;
+use crate::repository::users::UserRepository;
 use std::{fmt::Write as _, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use chacha20poly1305::{
@@ -542,10 +546,21 @@ async fn insert_encrypted(
         encrypt_payload(&config.encryption_key, id, kind, recipient, serialized)?;
     let retention =
         chrono::Duration::from_std(config.retention).map_err(|_| MailError::InvalidPayload)?;
-    sqlx::query("INSERT INTO transactional_mail_outbox(id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,payload_nonce,action_id,invitation_id,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+$11) ON CONFLICT(logical_key,recipient_email) DO NOTHING")
-        .bind(id).bind(logical_key).bind(kind).bind(recipient).bind(locale.as_str())
-        .bind(ciphertext).bind(nonce.to_vec()).bind(action_id).bind(invitation_id).bind(expires_at).bind(retention)
-        .execute(&mut **tx).await?;
+    TransactionalMailRepository::insert(
+        &mut **tx,
+        id,
+        logical_key,
+        kind,
+        recipient,
+        locale.as_str(),
+        ciphertext,
+        nonce.to_vec(),
+        action_id,
+        invitation_id,
+        expires_at,
+        retention,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1200,8 +1215,7 @@ async fn claim(
 ) -> Result<Vec<ClaimedMail>, sqlx::Error> {
     let lease =
         chrono::Duration::from_std(config.lease).unwrap_or_else(|_| chrono::Duration::seconds(60));
-    sqlx::query_as("WITH due AS (SELECT id FROM transactional_mail_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL AND available_at<=now() AND (claimed_until IS NULL OR claimed_until<now()) ORDER BY available_at,created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED) UPDATE transactional_mail_outbox o SET claimed_by=$2,claimed_until=now()+$3,attempt_count=attempt_count+1,last_attempt_at=now() FROM due WHERE o.id=due.id RETURNING o.id,o.template_kind,o.recipient_email,o.locale,o.payload_ciphertext,o.payload_nonce,o.attempt_count,o.expires_at")
-        .bind(i64::from(config.claim_size)).bind(worker_id).bind(lease).fetch_all(pool).await
+    TransactionalMailRepository::claim(pool, i64::from(config.claim_size), worker_id, lease).await
 }
 
 async fn process_one(
@@ -1266,14 +1280,12 @@ fn decrypt(config: &MailConfig, mail: &ClaimedMail) -> Result<Zeroizing<Vec<u8>>
 }
 
 async fn delivered(pool: &PgPool, id: Uuid, worker: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE transactional_mail_outbox SET delivered_at=now(),claimed_by=NULL,claimed_until=NULL,payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now() WHERE id=$1 AND claimed_by=$2")
-        .bind(id).bind(worker).execute(pool).await?;
+    TransactionalMailRepository::mark_delivered(pool, id, worker).await?;
     Ok(())
 }
 
 async fn terminal(pool: &PgPool, id: Uuid, worker: Uuid, reason: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE transactional_mail_outbox SET terminal_at=now(),terminal_reason=$3,claimed_by=NULL,claimed_until=NULL,payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now() WHERE id=$1 AND claimed_by=$2")
-        .bind(id).bind(worker).bind(reason).execute(pool).await?;
+    TransactionalMailRepository::mark_terminal(pool, id, worker, reason).await?;
     Ok(())
 }
 
@@ -1282,19 +1294,21 @@ async fn retry(pool: &PgPool, id: Uuid, worker: Uuid, attempt: i32) -> Result<()
     let seconds = 5_i64
         .saturating_mul(2_i64.saturating_pow(exponent))
         .min(3600);
-    sqlx::query("UPDATE transactional_mail_outbox SET available_at=now()+make_interval(secs=>$3),claimed_by=NULL,claimed_until=NULL WHERE id=$1 AND claimed_by=$2")
-        .bind(id).bind(worker).bind(f64::from(i32::try_from(seconds).unwrap_or(3600))).execute(pool).await?;
+    TransactionalMailRepository::schedule_retry(
+        pool,
+        id,
+        worker,
+        f64::from(i32::try_from(seconds).unwrap_or(3600)),
+    )
+    .await?;
     Ok(())
 }
 
 pub async fn cleanup(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM user_email_actions WHERE (expires_at<now() OR consumed_at IS NOT NULL OR revoked_at IS NOT NULL) AND created_at<now()-interval '30 days'").execute(pool).await?;
-    sqlx::query("DELETE FROM transactional_mail_outbox WHERE retain_until<now() AND (delivered_at IS NOT NULL OR terminal_at IS NOT NULL)").execute(pool).await?;
-    sqlx::query("DELETE FROM invitations WHERE retain_until<now()")
-        .execute(pool)
-        .await?;
-    sqlx::query("WITH candidates AS (SELECT u.id user_id,m.organization_id FROM users u JOIN organization_memberships m ON m.user_id=u.id AND m.role='owner' WHERE u.email_verified_at IS NULL AND u.created_at<now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id=u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships other WHERE other.organization_id=m.organization_id AND other.user_id<>u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships external WHERE external.user_id=u.id AND external.organization_id<>m.organization_id) LIMIT 100), deleted_organizations AS (DELETE FROM organizations o USING candidates c WHERE o.id=c.organization_id RETURNING c.user_id) DELETE FROM users u USING deleted_organizations d WHERE u.id=d.user_id")
-        .execute(pool).await?;
+    EmailActionRepository::delete_stale(pool).await?;
+    TransactionalMailRepository::delete_retained(pool).await?;
+    InvitationRepository::delete_retained(pool).await?;
+    UserRepository::delete_abandoned_signups(pool).await?;
     Ok(())
 }
 

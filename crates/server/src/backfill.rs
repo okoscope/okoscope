@@ -1,3 +1,4 @@
+use crate::repository::events::EventRepository;
 use std::time::Duration;
 
 use event_model::{EventPayload, KubernetesAttribution, ProcessIdentity, RuntimeEvent};
@@ -68,13 +69,9 @@ pub async fn run(pool: &PgPool, options: BackfillOptions) -> Result<BackfillStat
     if !(1..=10_000).contains(&options.batch_size) {
         return Err(BackfillError::InvalidBatchSize);
     }
-    let upper_bound: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 ORDER BY id DESC LIMIT 1",
-    )
-    .bind(options.organization_id)
-    .bind(options.project_id)
-    .fetch_optional(pool)
-    .await?;
+    let upper_bound: Option<Uuid> =
+        EventRepository::latest_project_id(pool, options.organization_id, options.project_id)
+            .await?;
     let Some(upper_bound) = upper_bound else {
         return Ok(BackfillStats::default());
     };
@@ -91,16 +88,15 @@ pub async fn run(pool: &PgPool, options: BackfillOptions) -> Result<BackfillStat
         if closed.is_some() {
             tracing::info!(?closed, "backfill covers retained raw evidence only");
         }
-        let rows = sqlx::query_as::<_, BackfillEvent>(
-            "SELECT e.id,e.event_id,e.project_id,e.cluster_id,e.application_id,e.release_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e LEFT JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=$3 WHERE e.organization_id=$1 AND e.project_id=$2 AND m.event_id IS NULL AND ($4::uuid IS NULL OR e.id>$4) AND e.id<=$5 ORDER BY e.id LIMIT $6",
+        let rows = EventRepository::grouping_backfill_page::<_, BackfillEvent>(
+            &mut *tx,
+            options.organization_id,
+            options.project_id,
+            options.fingerprint_version,
+            cursor,
+            upper_bound,
+            options.batch_size,
         )
-        .bind(options.organization_id)
-        .bind(options.project_id)
-        .bind(options.fingerprint_version)
-        .bind(cursor)
-        .bind(upper_bound)
-        .bind(options.batch_size)
-        .fetch_all(&mut *tx)
         .await?;
         if rows.is_empty() {
             break;

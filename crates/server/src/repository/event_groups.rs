@@ -108,6 +108,116 @@ pub mod aggregates {
 pub struct EventGroupRepository;
 
 impl EventGroupRepository {
+    /// Makes an event a member of a group under a fingerprint version, with
+    /// its release, once; `None` when it already was.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_release_membership<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        event_id: Uuid,
+        group_id: Uuid,
+        fingerprint_version: i16,
+        release_id: Option<Uuid>,
+    ) -> Result<Option<Uuid>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_event_group_memberships (organization_id, project_id, application_id, event_id, group_id, fingerprint_version, release_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (event_id, fingerprint_version) DO NOTHING RETURNING event_id")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(event_id)
+            .bind(group_id)
+            .bind(fingerprint_version)
+            .bind(release_id)
+            .fetch_optional(executor)
+            .await
+    }
+
+    /// Counts an occurrence of a group in a release, widening its seen
+    /// window and making the event its representative when it is the latest.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_release_occurrence<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        release_id: Uuid,
+        group_id: Uuid,
+        observed_at: DateTime<Utc>,
+        event_id: Uuid,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_event_group_releases (organization_id,project_id,application_id,release_id,group_id,occurrence_count,first_seen_at,last_seen_at,representative_event_id) VALUES ($1,$2,$3,$4,$5,1,$6,$6,$7) ON CONFLICT (release_id,group_id) DO UPDATE SET representative_event_id=COALESCE(runtime_event_group_releases.representative_event_id,EXCLUDED.representative_event_id),occurrence_count=runtime_event_group_releases.occurrence_count+1,first_seen_at=LEAST(runtime_event_group_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_event_group_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(release_id)
+            .bind(group_id)
+            .bind(observed_at)
+            .bind(event_id)
+            .execute(executor)
+            .await
+    }
+
+    /// The application's group memberships plus snapshot occurrences, and
+    /// the total occurrence count of its groups.
+    pub async fn evidence_counts<'e, E, T>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+    ) -> Result<T, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("SELECT (SELECT count(*) FROM runtime_event_group_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)+(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_history_snapshots WHERE organization_id=$1 AND project_id=$2 AND application_id=$3),(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_event_groups WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .fetch_one(executor)
+            .await
+    }
+
+    /// How many per-release group rollups exist.
+    pub async fn release_rollup_count<'e, E>(executor: E) -> Result<i64, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runtime_event_group_releases")
+            .fetch_one(executor)
+            .await
+    }
+
+    /// Makes an event a member of a group, once.
+    pub async fn add_membership<'e, E>(
+        executor: E,
+        organization_id: Uuid,
+        project_id: Uuid,
+        application_id: Uuid,
+        event_id: Uuid,
+        group_id: Uuid,
+        fingerprint_version: i16,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("INSERT INTO runtime_event_group_memberships (organization_id,project_id,application_id,event_id,group_id,fingerprint_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(application_id)
+            .bind(event_id)
+            .bind(group_id)
+            .bind(fingerprint_version)
+            .execute(executor)
+            .await
+    }
+
     /// Whether a group's first sighting should be notified under its current
     /// policy state: `active_suppression`, `evaluation_pending`, `expected`
     /// or `eligible`, with the winning revision and suppression behind it.

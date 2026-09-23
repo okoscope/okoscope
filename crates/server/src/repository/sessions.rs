@@ -29,6 +29,26 @@ use uuid::Uuid;
 pub struct SessionRepository;
 
 impl SessionRepository {
+    /// Resolves a live session of an enabled user by its token hash, whose
+    /// organization, when it names one, is active and still has the user, and
+    /// records that it was used.
+    ///
+    /// Selects `session_id`, `user_id`, `organization_id`, `role`,
+    /// `is_super_admin` and `privileged_until`.
+    pub async fn authenticate<'e, E, T>(
+        executor: E,
+        token_hash: Vec<u8>,
+    ) -> Result<Option<T>, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+        T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
+    {
+        sqlx::query_as("UPDATE user_sessions s SET last_used_at=now() FROM users u WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id AND o.status='active')) RETURNING s.id session_id,s.user_id,s.organization_id,(SELECT m.role FROM organization_memberships m WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id) role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=s.user_id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,s.privileged_until")
+            .bind(token_hash)
+            .fetch_optional(executor)
+            .await
+    }
+
     /// Records a new session under the digest of its token.
     ///
     /// Only the digest is stored. The plaintext token goes to the client once
@@ -330,5 +350,85 @@ mod tests {
             .unwrap();
         assert!(revoked_at(&pool, presented).await.is_some());
         assert!(revoked_at(&pool, other).await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod authenticate_tests {
+    use chrono::{DateTime, Duration, Utc};
+    use sqlx::{FromRow, PgPool};
+    use uuid::Uuid;
+
+    use super::SessionRepository;
+    use crate::repository::MembershipRepository;
+    use crate::repository::test_support::{tenant, user};
+
+    #[derive(Debug, FromRow)]
+    struct Identity {
+        session_id: Uuid,
+        user_id: Uuid,
+        organization_id: Option<Uuid>,
+        role: Option<String>,
+        is_super_admin: bool,
+        privileged_until: Option<DateTime<Utc>>,
+    }
+
+    async fn authenticate(pool: &PgPool, digest: u8) -> Option<Identity> {
+        SessionRepository::authenticate(pool, vec![digest; 32])
+            .await
+            .unwrap()
+    }
+
+    /// A live session resolves with its role while its user is enabled and
+    /// its organization active; revoked or expired ones do not.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn sessions_authenticate_while_live(pool: PgPool) {
+        let own = tenant(&pool, "sessions-authenticate").await;
+        let member = user(&pool).await;
+        MembershipRepository::insert_organization_role(&pool, own.organization_id, member, "admin")
+            .await
+            .unwrap();
+        let session = Uuid::new_v4();
+        SessionRepository::insert(
+            &pool,
+            session,
+            member,
+            Some(own.organization_id),
+            &[1; 32],
+            Utc::now() + Duration::hours(1),
+            None,
+        )
+        .await
+        .unwrap();
+        let identity = authenticate(&pool, 1).await.unwrap();
+        assert_eq!(
+            (
+                identity.session_id,
+                identity.user_id,
+                identity.organization_id,
+                identity.role.as_deref()
+            ),
+            (session, member, Some(own.organization_id), Some("admin"))
+        );
+        assert!(!identity.is_super_admin && identity.privileged_until.is_none());
+        assert!(authenticate(&pool, 2).await.is_none());
+
+        sqlx::query("UPDATE organizations SET status='pending_owner' WHERE id=$1")
+            .bind(own.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            authenticate(&pool, 1).await.is_none(),
+            "an inactive organization"
+        );
+        sqlx::query("UPDATE organizations SET status='active' WHERE id=$1")
+            .bind(own.organization_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        SessionRepository::revoke(&pool, session).await.unwrap();
+        assert!(authenticate(&pool, 1).await.is_none(), "a revoked session");
     }
 }

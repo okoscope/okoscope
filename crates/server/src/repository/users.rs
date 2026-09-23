@@ -42,6 +42,20 @@ pub const ACTIVE: &str = "u.disabled_at IS NULL AND u.email_verified_at IS NOT N
 pub struct UserRepository;
 
 impl UserRepository {
+    /// Deletes up to 100 self-registered owners who never verified their
+    /// email within 7 days and never signed in, together with the
+    /// organization only they belong to.
+    pub async fn delete_abandoned_signups<'e, E>(
+        executor: E,
+    ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query("WITH candidates AS (SELECT u.id user_id,m.organization_id FROM users u JOIN organization_memberships m ON m.user_id=u.id AND m.role='owner' WHERE u.email_verified_at IS NULL AND u.created_at<now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id=u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships other WHERE other.organization_id=m.organization_id AND other.user_id<>u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships external WHERE external.user_id=u.id AND external.organization_id<>m.organization_id) LIMIT 100), deleted_organizations AS (DELETE FROM organizations o USING candidates c WHERE o.id=c.organization_id RETURNING c.user_id) DELETE FROM users u USING deleted_organizations d WHERE u.id=d.user_id")
+            .execute(executor)
+            .await
+    }
+
     /// Takes the transaction-scoped advisory lock that serialises first-run
     /// setup, so only one request can create the first super admin.
     pub async fn lock_setup<'e, E>(
