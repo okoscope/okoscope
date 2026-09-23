@@ -31,8 +31,9 @@ use crate::{
     auth::{
         UserPrincipal, UserSessionAuthenticator, hash_password, normalize_email, validate_password,
     },
+    service::identity::{insert_identity_session, valid_name},
     transactional_mail::Locale,
-    user_auth::{insert_identity_session, session_cookie, valid_name},
+    user_auth::session_cookie,
     web_api::{RequestId, WebApiConfig},
 };
 
