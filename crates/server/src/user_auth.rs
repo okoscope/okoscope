@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::MembershipRepository;
 use crate::repository::UserRepository;
 use axum::{
     Extension, Json, Router,
@@ -534,13 +535,8 @@ async fn create_registration(
         .bind(&input.organization_name)
         .execute(&mut **tx)
         .await?;
-    sqlx::query(
-        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .execute(&mut **tx)
-    .await?;
+    MembershipRepository::insert_organization_role(&mut **tx, organization_id, user_id, "owner")
+        .await?;
     let organization_name = input.organization_name.clone();
     issue_action(
         tx,

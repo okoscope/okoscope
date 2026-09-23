@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::MembershipRepository;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -190,13 +191,12 @@ async fn effective_project_access(
     if principal.role.inherits_project_access() {
         return Ok(Some((ProjectRole::Admin, "organization")));
     }
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM project_memberships WHERE organization_id=$1 AND project_id=$2 AND user_id=$3",
+    let role = MembershipRepository::project_role(
+        pool,
+        principal.organization_id,
+        project_id,
+        principal.user_id,
     )
-    .bind(principal.organization_id)
-    .bind(project_id)
-    .bind(principal.user_id)
-    .fetch_optional(pool)
     .await?;
     Ok(role.and_then(|value| Some((value.parse().ok()?, "project"))))
 }

@@ -1,3 +1,4 @@
+use crate::repository::MembershipRepository;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -85,14 +86,9 @@ pub async fn resolve_project_access(
             source: EffectiveAccessSource::Organization,
         }));
     }
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM project_memberships WHERE organization_id=$1 AND project_id=$2 AND user_id=$3",
-    )
-    .bind(organization_id)
-    .bind(project_id)
-    .bind(principal.user_id)
-    .fetch_optional(pool)
-    .await?;
+    let role =
+        MembershipRepository::project_role(pool, organization_id, project_id, principal.user_id)
+            .await?;
     Ok(role.and_then(|value| {
         Some(EffectiveProjectAccess {
             role: value.parse().ok()?,

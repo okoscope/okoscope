@@ -1,4 +1,5 @@
 use crate::error_code::ErrorCode;
+use crate::repository::MembershipRepository;
 use crate::repository::UserRepository;
 use crate::repository::users::ACTIVE;
 use std::{fmt, str::FromStr};
@@ -1653,16 +1654,32 @@ async fn grant_and_consume(
         return Err(InvitationError::unusable(request_id));
     }
     if let Some(project_id) = invitation.project_id {
-        sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'member') ON CONFLICT(organization_id,user_id) DO NOTHING")
-            .bind(invitation.organization_id).bind(user_id).execute(&mut **tx).await
-            .map_err(|error| InvitationError::database(&error, request_id))?;
-        sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,$4) ON CONFLICT(project_id,user_id) DO NOTHING")
-            .bind(invitation.organization_id).bind(project_id).bind(user_id).bind(&invitation.role)
-            .execute(&mut **tx).await.map_err(|error| InvitationError::database(&error, request_id))?;
+        MembershipRepository::grant_organization_role_if_absent(
+            &mut **tx,
+            invitation.organization_id,
+            user_id,
+            "member",
+        )
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
+        MembershipRepository::grant_project_role_if_absent(
+            &mut **tx,
+            invitation.organization_id,
+            project_id,
+            user_id,
+            &invitation.role,
+        )
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
     } else {
-        sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3) ON CONFLICT(organization_id,user_id) DO NOTHING")
-            .bind(invitation.organization_id).bind(user_id).bind(&invitation.role)
-            .execute(&mut **tx).await.map_err(|error| InvitationError::database(&error, request_id))?;
+        MembershipRepository::grant_organization_role_if_absent(
+            &mut **tx,
+            invitation.organization_id,
+            user_id,
+            &invitation.role,
+        )
+        .await
+        .map_err(|error| InvitationError::database(&error, request_id))?;
     }
     activate_first_owner(tx, invitation)
         .await
