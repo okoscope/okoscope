@@ -30,6 +30,7 @@ pub mod dns_groups;
 pub mod event_groups;
 pub mod events;
 pub mod memberships;
+pub mod navigation;
 pub mod organizations;
 pub mod projects;
 pub mod releases;
