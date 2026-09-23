@@ -39,15 +39,21 @@ pub mod inventory;
 pub mod invitations;
 pub mod memberships;
 pub mod navigation;
+pub mod notification_deliveries;
+pub mod notification_recovery;
+pub mod notification_retention;
 pub mod organizations;
+pub mod outbox;
 pub mod policies;
 pub mod projects;
 pub mod provisioning;
 pub mod releases;
 pub mod resources;
+pub mod runtime_retention;
 pub mod sessions;
 pub mod transaction;
 pub mod users;
+pub mod webhook_destinations;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -1,3 +1,7 @@
+use crate::repository::event_groups::EventGroupRepository;
+use crate::repository::notification_deliveries::NotificationDeliveryRepository;
+use crate::repository::outbox::OutboxRepository;
+use crate::repository::webhook_destinations::WebhookDestinationRepository;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -269,11 +273,10 @@ pub async fn materialize_once(
     service: &NotificationService,
 ) -> Result<MaterializeStats, WorkerError> {
     let mut tx = service.pool.begin().await?;
-    let rows = sqlx::query_as::<_, OutboxRow>(
-        "SELECT id,organization_id,project_id,aggregate_id,source,payload,created_at FROM outbox_messages WHERE topic='runtime_group.first_seen' AND processed_at IS NULL AND materialized_at IS NULL ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT $1",
+    let rows = OutboxRepository::claim_first_seen::<_, OutboxRow>(
+        &mut *tx,
+        i64::from(service.config.claim_size),
     )
-    .bind(i64::from(service.config.claim_size))
-    .fetch_all(&mut *tx)
     .await?;
     let mut stats = MaterializeStats::default();
     for row in rows {
@@ -295,35 +298,45 @@ async fn materialize_message(
     outbox: &OutboxRow,
     stats: &mut MaterializeStats,
 ) -> Result<(), WorkerError> {
-    let eligibility: PolicyEligibility = sqlx::query_as("SELECT CASE WHEN s.id IS NOT NULL THEN 'active_suppression' WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN 'evaluation_pending' WHEN e.verdict='expected' THEN 'expected' ELSE 'eligible' END reason,now() evaluated_at,CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.winning_revision_id END policy_revision_id,s.id policy_suppression_id FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id LEFT JOIN LATERAL (SELECT x.id FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id AND x.project_id=i.project_id AND x.application_id=i.application_id AND x.identity_version=i.identity_version AND x.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND x.cancelled_at IS NULL AND x.expires_at>now() AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids)) AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces)) AND (cardinality(x.workload_kinds)=0 OR g.workload_kind=ANY(x.workload_kinds)) AND (cardinality(x.workload_names)=0 OR g.workload_name=ANY(x.workload_names)) ORDER BY x.expires_at,x.id LIMIT 1) s ON true WHERE g.organization_id=$1 AND g.id=$2")
-        .bind(outbox.organization_id).bind(outbox.aggregate_id).bind(crate::policy::POLICY_EVALUATOR_VERSION)
-        .fetch_one(&mut **tx).await?;
-    sqlx::query("UPDATE outbox_messages SET policy_eligibility_reason=$2,policy_evaluated_at=$3,policy_revision_id=$4,policy_suppression_id=$5 WHERE id=$1")
-        .bind(outbox.id).bind(&eligibility.reason).bind(eligibility.evaluated_at)
-        .bind(eligibility.policy_revision_id).bind(eligibility.policy_suppression_id)
-        .execute(&mut **tx).await?;
+    let eligibility: PolicyEligibility = EventGroupRepository::notification_eligibility(
+        &mut **tx,
+        outbox.organization_id,
+        outbox.aggregate_id,
+        crate::policy::POLICY_EVALUATOR_VERSION,
+    )
+    .await?;
+    OutboxRepository::record_eligibility(
+        &mut **tx,
+        outbox.id,
+        &eligibility.reason,
+        eligibility.evaluated_at,
+        eligibility.policy_revision_id,
+        eligibility.policy_suppression_id,
+    )
+    .await?;
     if matches!(
         eligibility.reason.as_str(),
         "expected" | "active_suppression"
     ) {
         stats.suppressed = stats.suppressed.saturating_add(1);
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason=$2 WHERE id=$1")
-            .bind(outbox.id).bind(&eligibility.reason).execute(&mut **tx).await?;
+        OutboxRepository::complete(&mut **tx, outbox.id, &eligibility.reason).await?;
         return Ok(());
     }
-    let destinations = sqlx::query_as::<_, DestinationSnapshot>(
-        "SELECT id,deliver_backfill FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND enabled=true ORDER BY id",
+    let destinations = WebhookDestinationRepository::enabled_for_project::<_, DestinationSnapshot>(
+        &mut **tx,
+        outbox.organization_id,
+        outbox.project_id,
     )
-    .bind(outbox.organization_id)
-    .bind(outbox.project_id)
-    .fetch_all(&mut **tx)
     .await?;
-    let user_labels: Value = sqlx::query_scalar("SELECT COALESCE(jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at'),'[]'::jsonb) FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=$2 ORDER BY l.display_name,l.id LIMIT 20) labels")
-        .bind(outbox.organization_id).bind(outbox.aggregate_id).fetch_one(&mut **tx).await?;
+    let user_labels: Value = EventGroupRepository::user_labels_json(
+        &mut **tx,
+        outbox.organization_id,
+        outbox.aggregate_id,
+    )
+    .await?;
     if destinations.is_empty() {
         stats.no_destinations = stats.no_destinations.saturating_add(1);
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='no_destinations',policy_eligibility_reason='no_destinations' WHERE id=$1")
-            .bind(outbox.id).execute(&mut **tx).await?;
+        OutboxRepository::complete_without_destinations(&mut **tx, outbox.id).await?;
         return Ok(());
     }
     let mut pending = 0_u64;
@@ -333,12 +346,22 @@ async fn materialize_message(
         let envelope = envelope(outbox, delivery_id, &user_labels);
         let delivery_status = if suppressed { "suppressed" } else { "pending" };
         let terminal_at = suppressed.then(Utc::now);
-        let inserted = sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,outbox_message_id,origin,source,event_name,payload,status,max_attempts,terminal_at,last_error_class,last_error) VALUES ($1,$2,$3,$4,$5,'outbox',$6,'runtime_group.first_seen',$7,$8,$9,$10,$11,$12) ON CONFLICT (outbox_message_id,destination_id) WHERE outbox_message_id IS NOT NULL DO NOTHING")
-            .bind(delivery_id).bind(outbox.organization_id).bind(outbox.project_id).bind(destination.id).bind(outbox.id)
-            .bind(&outbox.source).bind(serde_json::to_value(envelope)?).bind(delivery_status)
-            .bind(i32::try_from(service.config.max_attempts).unwrap_or(i32::MAX)).bind(terminal_at)
-            .bind(suppressed.then_some("backfill_suppressed")).bind(suppressed.then_some("historical delivery is disabled"))
-            .execute(&mut **tx).await?;
+        let inserted = NotificationDeliveryRepository::insert_for_outbox(
+            &mut **tx,
+            delivery_id,
+            outbox.organization_id,
+            outbox.project_id,
+            destination.id,
+            outbox.id,
+            &outbox.source,
+            serde_json::to_value(envelope)?,
+            delivery_status,
+            i32::try_from(service.config.max_attempts).unwrap_or(i32::MAX),
+            terminal_at,
+            suppressed.then_some("backfill_suppressed"),
+            suppressed.then_some("historical delivery is disabled"),
+        )
+        .await?;
         if inserted.rows_affected() == 1 {
             stats.deliveries = stats.deliveries.saturating_add(1);
             if suppressed {
@@ -349,13 +372,9 @@ async fn materialize_message(
         }
     }
     if pending == 0 {
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='backfill_suppressed',policy_eligibility_reason='backfill_suppressed' WHERE id=$1")
-            .bind(outbox.id).execute(&mut **tx).await?;
+        OutboxRepository::complete_backfill_suppressed(&mut **tx, outbox.id).await?;
     } else {
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now() WHERE id=$1")
-            .bind(outbox.id)
-            .execute(&mut **tx)
-            .await?;
+        OutboxRepository::mark_materialized(&mut **tx, outbox.id).await?;
     }
     Ok(())
 }
@@ -391,13 +410,12 @@ fn uuid_field(value: &Value, name: &str) -> Option<Uuid> {
 pub async fn claim_due(service: &NotificationService) -> Result<Vec<DeliveryClaim>, sqlx::Error> {
     let lease_owner = Uuid::new_v4();
     let lease_seconds = i64::try_from(service.config.lease_duration.as_secs()).unwrap_or(i64::MAX);
-    let claims = sqlx::query_as::<_, DeliveryClaim>(
-        "WITH candidates AS (SELECT id FROM notification_deliveries WHERE (status='pending' AND available_at<=now()) OR (status='in_flight' AND lease_expires_at<=now()) ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT $1), claimed AS (UPDATE notification_deliveries d SET status='in_flight',lease_owner=$2,lease_expires_at=now()+make_interval(secs=>$3),updated_at=now() FROM candidates c WHERE d.id=c.id RETURNING d.*) SELECT c.id,c.organization_id,c.project_id,c.destination_id,c.outbox_message_id,c.source,c.event_name,c.payload,c.recovery_generation,c.attempt_count,c.max_attempts,c.lease_owner,w.url,w.encrypted_secret,w.secret_nonce FROM claimed c JOIN webhook_destinations w ON w.id=c.destination_id AND w.organization_id=c.organization_id AND w.project_id=c.project_id WHERE w.enabled=true",
+    let claims = NotificationDeliveryRepository::claim_due::<_, DeliveryClaim>(
+        &service.pool,
+        i64::from(service.config.claim_size),
+        lease_owner,
+        lease_seconds,
     )
-    .bind(i64::from(service.config.claim_size))
-    .bind(lease_owner)
-    .bind(lease_seconds)
-    .fetch_all(&service.pool)
     .await?;
     crate::metrics::record_notification_claims(claims.len());
     Ok(claims)
@@ -457,9 +475,17 @@ pub async fn test_destination(
         semantic_summary: None,
         user_labels: Vec::new(),
     })?;
-    sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,max_attempts) VALUES ($1,$2,$3,$4,'test','test','okoscope.test',$5,'in_flight',$6,now()+make_interval(secs=>$7),1)")
-        .bind(delivery_id).bind(organization_id).bind(project_id).bind(destination_id).bind(&payload).bind(lease_owner)
-        .bind(i64::try_from(service.config.lease_duration.as_secs()).unwrap_or(i64::MAX)).execute(&service.pool).await?;
+    NotificationDeliveryRepository::insert_test(
+        &service.pool,
+        delivery_id,
+        organization_id,
+        project_id,
+        destination_id,
+        &payload,
+        lease_owner,
+        i64::try_from(service.config.lease_duration.as_secs()).unwrap_or(i64::MAX),
+    )
+    .await?;
     process_claim(
         service,
         DeliveryClaim {
@@ -494,15 +520,25 @@ pub async fn list_deliveries(
 ) -> Result<(Vec<DeliverySummary>, Option<Uuid>), sqlx::Error> {
     let limit = filter.limit.unwrap_or(50).clamp(1, 200);
     let cursor = if let Some(cursor) = filter.cursor {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT created_at,id FROM notification_deliveries WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id).bind(project_id).bind(cursor).fetch_optional(pool).await?
+        NotificationDeliveryRepository::cursor(pool, organization_id, project_id, cursor).await?
     } else {
         None
     };
     let (cursor_time, cursor_id) = cursor.unzip();
-    let mut rows = sqlx::query_as::<_, DeliverySummaryRow>("SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,d.event_name,d.payload,w.name destination_name,w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count,d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,d.last_recovery_operation_id FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::text IS NULL OR d.status=$4) AND ($5::text IS NULL OR d.source=$5) AND ($6::text IS NULL OR d.origin=$6) AND ($7::timestamptz IS NULL OR d.created_at >= $7) AND ($8::timestamptz IS NULL OR (d.created_at,d.id)<($8,$9)) ORDER BY d.created_at DESC,d.id DESC LIMIT $10")
-        .bind(organization_id).bind(project_id).bind(filter.destination_id).bind(&filter.status).bind(&filter.source).bind(&filter.origin)
-        .bind(filter.since).bind(cursor_time).bind(cursor_id).bind(limit + 1).fetch_all(pool).await?;
+    let mut rows = NotificationDeliveryRepository::page::<_, DeliverySummaryRow>(
+        pool,
+        organization_id,
+        project_id,
+        filter.destination_id,
+        filter.status.as_deref(),
+        filter.source.as_deref(),
+        filter.origin.as_deref(),
+        filter.since,
+        cursor_time,
+        cursor_id,
+        limit + 1,
+    )
+    .await?;
     let next_cursor = if i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
         rows.pop();
         rows.last().map(|delivery| delivery.id)
@@ -525,8 +561,13 @@ pub async fn delivery_detail(
     else {
         return Ok(None);
     };
-    let attempts = sqlx::query_as::<_, DeliveryAttempt>("SELECT id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,http_status,error_class,response_excerpt FROM notification_delivery_attempts WHERE organization_id=$1 AND project_id=$2 AND delivery_id=$3 ORDER BY recovery_generation DESC,attempt_number DESC LIMIT 100")
-        .bind(organization_id).bind(project_id).bind(delivery_id).fetch_all(pool).await?;
+    let attempts = NotificationDeliveryRepository::attempts::<_, DeliveryAttempt>(
+        pool,
+        organization_id,
+        project_id,
+        delivery_id,
+    )
+    .await?;
     Ok(Some(DeliveryDetail { delivery, attempts }))
 }
 
@@ -536,8 +577,13 @@ async fn delivery_by_id(
     project_id: Uuid,
     id: Uuid,
 ) -> Result<Option<DeliverySummary>, sqlx::Error> {
-    let row = sqlx::query_as::<_, DeliverySummaryRow>("SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,d.event_name,d.payload,w.name destination_name,w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count,d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,d.last_recovery_operation_id FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3")
-        .bind(organization_id).bind(project_id).bind(id).fetch_optional(pool).await?;
+    let row = NotificationDeliveryRepository::get::<_, DeliverySummaryRow>(
+        pool,
+        organization_id,
+        project_id,
+        id,
+    )
+    .await?;
     Ok(row.map(DeliverySummary::from))
 }
 
@@ -634,12 +680,26 @@ async fn persist_attempt(
         disposition == AttemptDisposition::Retryable,
         disposition == AttemptDisposition::Failed,
     );
-    sqlx::query("INSERT INTO notification_delivery_attempts (id,organization_id,project_id,delivery_id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,http_status,error_class,response_excerpt) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12)")
-        .bind(Uuid::new_v4()).bind(claim.organization_id).bind(claim.project_id).bind(claim.id).bind(claim.recovery_generation).bind(attempt_number).bind(started_at)
-        .bind(i64::try_from(result.duration.as_millis()).unwrap_or(i64::MAX))
-        .bind(match disposition { AttemptDisposition::Succeeded => "succeeded", AttemptDisposition::Retryable => "retryable", AttemptDisposition::Failed => "failed" })
-        .bind(result.http_status.map(i32::from)).bind(result.error_class).bind(result.response_excerpt)
-        .execute(&mut *tx).await?;
+    NotificationDeliveryRepository::insert_attempt(
+        &mut *tx,
+        Uuid::new_v4(),
+        claim.organization_id,
+        claim.project_id,
+        claim.id,
+        claim.recovery_generation,
+        attempt_number,
+        started_at,
+        i64::try_from(result.duration.as_millis()).unwrap_or(i64::MAX),
+        match disposition {
+            AttemptDisposition::Succeeded => "succeeded",
+            AttemptDisposition::Retryable => "retryable",
+            AttemptDisposition::Failed => "failed",
+        },
+        result.http_status.map(i32::from),
+        result.error_class,
+        result.response_excerpt,
+    )
+    .await?;
     match disposition {
         AttemptDisposition::Succeeded => {
             update_terminal(&mut tx, claim, attempt_number, "succeeded", None).await?;
@@ -650,9 +710,15 @@ async fn persist_attempt(
         AttemptDisposition::Retryable => {
             let delay = retry_delay(service, attempt_number, result.retry_after);
             let delay_seconds = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
-            sqlx::query("UPDATE notification_deliveries SET status='pending',attempt_count=$3,available_at=now()+make_interval(secs=>$4),lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),last_error_class=$5,last_error=$5 WHERE id=$1 AND lease_owner=$2")
-                .bind(claim.id).bind(claim.lease_owner).bind(attempt_number).bind(delay_seconds).bind(result.error_class)
-                .execute(&mut *tx).await?;
+            NotificationDeliveryRepository::schedule_retry(
+                &mut *tx,
+                claim.id,
+                claim.lease_owner,
+                attempt_number,
+                delay_seconds,
+                result.error_class,
+            )
+            .await?;
         }
     }
     complete_outbox_if_terminal(&mut tx, claim.outbox_message_id).await?;
@@ -667,8 +733,15 @@ async fn update_terminal(
     status: &str,
     error_class: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE notification_deliveries SET status=$3,attempt_count=$4,lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),terminal_at=now(),last_error_class=$5,last_error=$5 WHERE id=$1 AND lease_owner=$2")
-        .bind(claim.id).bind(claim.lease_owner).bind(status).bind(attempt_number).bind(error_class).execute(&mut **tx).await?;
+    NotificationDeliveryRepository::finish(
+        &mut **tx,
+        claim.id,
+        claim.lease_owner,
+        status,
+        attempt_number,
+        error_class,
+    )
+    .await?;
     Ok(())
 }
 
@@ -708,8 +781,7 @@ async fn complete_outbox_if_terminal(
     outbox_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     if let Some(outbox_id) = outbox_id {
-        sqlx::query("UPDATE outbox_messages o SET processed_at=now(),completion_reason='deliveries_terminal' WHERE o.id=$1 AND o.materialized_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notification_deliveries d WHERE d.outbox_message_id=o.id AND d.status NOT IN ('succeeded','failed','suppressed','cancelled'))")
-            .bind(outbox_id).execute(&mut **tx).await?;
+        OutboxRepository::complete_if_deliveries_terminal(&mut **tx, outbox_id).await?;
     }
     Ok(())
 }
