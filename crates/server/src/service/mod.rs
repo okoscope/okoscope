@@ -40,6 +40,7 @@ pub mod dns_groups;
 pub mod identity;
 pub mod inventory;
 pub mod onboarding;
+pub mod policies;
 pub mod provisioning;
 pub mod releases;
 pub mod resources;
