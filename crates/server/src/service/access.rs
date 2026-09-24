@@ -1959,11 +1959,13 @@ mod tests {
                 Err(AccessServiceError::Denied(Denial::OwnerRequired))
             ));
             let audit = service.list_audit(owner, organization, page).await.unwrap();
-            let actions = audit
+            // The audit is paged by record id, which carries no time order.
+            let mut actions = audit
                 .items
                 .iter()
                 .map(|item| item.action.as_str())
                 .collect::<Vec<_>>();
+            actions.sort_unstable();
             assert_eq!(
                 actions,
                 [
