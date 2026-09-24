@@ -55,7 +55,7 @@ pub struct WebApiConfig {
     pub session_lifetime: std::time::Duration,
     pub setup_token_digest: Option<[u8; 32]>,
     pub setup_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub agent_installation: Option<crate::onboarding::AgentInstallationMetadata>,
+    pub agent_installation: Option<crate::service::onboarding::AgentInstallationMetadata>,
 }
 
 impl Default for WebApiConfig {
@@ -136,7 +136,7 @@ impl WebApiConfig {
     #[must_use]
     pub fn with_agent_installation(
         mut self,
-        metadata: Option<crate::onboarding::AgentInstallationMetadata>,
+        metadata: Option<crate::service::onboarding::AgentInstallationMetadata>,
     ) -> Self {
         self.agent_installation = metadata;
         self

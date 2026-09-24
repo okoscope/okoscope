@@ -569,7 +569,7 @@ async fn run_command(
             Ok(true)
         }
         Some(Command::RecoverSuperAdmin { email }) => {
-            server::user_auth::recover_super_admin(pool, &email, admin_credential)
+            server::service::accounts::recover_super_admin(pool, &email, admin_credential)
                 .await
                 .context("recover super administrator")?;
             tracing::info!("super administrator recovery complete");
@@ -656,7 +656,7 @@ async fn main() -> Result<()> {
     {
         return Ok(());
     }
-    server::user_auth::verify_user_access(&pool, args.setup_token.is_some())
+    server::service::accounts::verify_user_access(&pool, args.setup_token.is_some())
         .await
         .context("user access readiness")?;
     let notifications = NotificationService::new(pool.clone(), notification_config);
