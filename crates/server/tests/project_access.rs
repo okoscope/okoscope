@@ -7,12 +7,7 @@ use uuid::Uuid;
 
 const ROUTE_SOURCES: &[(&str, &str)] = &[
     (include_str!("../src/api.rs"), "/api/v1/runtime-groups"),
-    (
-        include_str!("../src/attention.rs"),
-        "/api/v1/attention-summary",
-    ),
     (include_str!("../src/policy_api.rs"), "/policies"),
-    (include_str!("../src/resources.rs"), "/resources"),
     (
         include_str!("../src/notification/api.rs"),
         "/webhook-destinations",
@@ -55,6 +50,16 @@ const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
         include_str!("../src/service/dns_groups.rs"),
         "/runtime-inventory/dns-groups",
     ),
+    (
+        include_str!("../src/attention.rs"),
+        include_str!("../src/service/attention.rs"),
+        "/api/v1/attention-summary",
+    ),
+    (
+        include_str!("../src/resources.rs"),
+        include_str!("../src/service/resources.rs"),
+        "/resources",
+    ),
 ];
 
 #[test]
@@ -79,7 +84,7 @@ fn every_descendant_route_family_has_a_project_access_seam() {
             "{route_family} bypasses the common project resolver"
         );
     }
-    let attention = include_str!("../src/attention.rs");
+    let attention = include_str!("../src/service/attention.rs");
     assert!(attention.contains("project_ids"));
     let attention_queries = include_str!("../src/repository/attention.rs");
     assert!(attention_queries.contains("project_id=ANY($2)"));
