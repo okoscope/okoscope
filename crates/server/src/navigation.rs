@@ -1,6 +1,3 @@
-use crate::error_code::ErrorCode;
-use crate::repository::MembershipRepository;
-use crate::repository::navigation::NavigationRepository;
 use axum::{
     Json, Router,
     extract::{Extension, Path, Query, State},
@@ -9,28 +6,27 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::repository::ApplicationRepository;
-use crate::{
-    access_control::ProjectRole,
-    auth::{UserPrincipal, UserSessionAuthenticator},
-    web_api::{RequestId, error_response},
+use crate::auth::{UserPrincipal, UserSessionAuthenticator};
+use crate::error_code::ErrorCode;
+use crate::service::navigation::{
+    ApplicationSummary, NavigationService, NavigationServiceError, Organization, Page, PageQuery,
+    ProjectSummary, WorkerPage, WorkerPageQuery,
 };
+use crate::web_api::{RequestId, error_response};
 
 #[derive(Clone, Debug)]
 struct StateData {
-    pool: PgPool,
+    service: NavigationService,
     auth: UserSessionAuthenticator,
 }
 
 pub fn router(pool: PgPool) -> Router {
     let state = StateData {
         auth: UserSessionAuthenticator::new(pool.clone()),
-        pool,
+        service: NavigationService::new(pool),
     };
     Router::new()
         .route("/api/v1/organization", get(organization))
@@ -67,37 +63,48 @@ struct NavigationError {
 }
 
 impl NavigationError {
+    fn new(status: StatusCode, code: ErrorCode, message: String, request_id: &RequestId) -> Self {
+        Self {
+            status,
+            code,
+            message,
+            request_id: request_id.clone(),
+        }
+    }
+
     fn unauthorized(request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: ErrorCode::UNAUTHORIZED,
-            message: "invalid or missing bearer credential".into(),
-            request_id: request_id.clone(),
-        }
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::UNAUTHORIZED,
+            "invalid or missing bearer credential".into(),
+            request_id,
+        )
     }
-    fn invalid(message: impl Into<String>, request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: ErrorCode::INVALID_REQUEST,
-            message: message.into(),
-            request_id: request_id.clone(),
-        }
-    }
-    fn not_found(request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: ErrorCode::NOT_FOUND,
-            message: "resource not found".into(),
-            request_id: request_id.clone(),
-        }
-    }
-    fn database(_error: &sqlx::Error, request_id: &RequestId) -> Self {
-        tracing::error!(request_id=%request_id.0, "navigation API database error");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: ErrorCode::INTERNAL_ERROR,
-            message: "internal server error".into(),
-            request_id: request_id.clone(),
+
+    /// The response for a failed navigation read.
+    fn from_service(error: NavigationServiceError, request_id: &RequestId) -> Self {
+        match error {
+            NavigationServiceError::Invalid(message) => Self::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                message,
+                request_id,
+            ),
+            NavigationServiceError::NotFound => Self::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::NOT_FOUND,
+                "resource not found".into(),
+                request_id,
+            ),
+            NavigationServiceError::Database(_error) => {
+                tracing::error!(request_id=%request_id.0, "navigation API database error");
+                Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::INTERNAL_ERROR,
+                    "internal server error".into(),
+                    request_id,
+                )
+            }
         }
     }
 }
@@ -108,158 +115,9 @@ impl IntoResponse for NavigationError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PageQuery {
-    cursor: Option<Uuid>,
-    limit: Option<i64>,
-}
-
-fn page_limit(limit: Option<i64>, request_id: &RequestId) -> Result<i64, NavigationError> {
-    let limit = limit.unwrap_or(50);
-    if (1..=200).contains(&limit) {
-        Ok(limit)
-    } else {
-        Err(NavigationError::invalid(
-            "limit must be between 1 and 200",
-            request_id,
-        ))
-    }
-}
-
-#[derive(Debug, FromRow, Serialize)]
-struct Organization {
-    id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, FromRow, Serialize)]
-struct ProjectSummary {
-    id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-    archived_at: Option<DateTime<Utc>>,
-    application_count: i64,
-    runtime_group_count: i64,
-    #[sqlx(skip)]
-    effective_project_role: Option<ProjectRole>,
-    #[sqlx(skip)]
-    effective_access_source: Option<&'static str>,
-    #[sqlx(skip)]
-    capabilities: serde_json::Value,
-}
-
-#[derive(Debug, FromRow, Serialize)]
-struct ApplicationSummary {
-    id: Uuid,
-    project_id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-    release_count: i64,
-    runtime_group_count: i64,
-    latest_observed_at: Option<DateTime<Utc>>,
-    #[sqlx(skip)]
-    effective_project_role: Option<ProjectRole>,
-    #[sqlx(skip)]
-    effective_access_source: Option<&'static str>,
-    #[sqlx(skip)]
-    capabilities: serde_json::Value,
-}
-
-fn scoped_capabilities(role: ProjectRole, organization_admin: bool) -> serde_json::Value {
-    let project_admin = role == ProjectRole::Admin;
-    serde_json::json!({
-        "manage_platform": false,
-        "manage_organization": organization_admin,
-        "create_project": organization_admin,
-        "manage_project_members": project_admin,
-        "create_application": project_admin,
-        "manage_credentials": project_admin,
-        "organization_roles_grantable": if organization_admin { vec!["owner", "admin", "member"] } else { Vec::<&str>::new() },
-        "project_roles_grantable": if organization_admin { vec!["admin", "member"] } else if project_admin { vec!["member"] } else { Vec::<&str>::new() },
-    })
-}
-
-async fn effective_project_access(
-    pool: &PgPool,
-    principal: UserPrincipal,
-    project_id: Uuid,
-) -> Result<Option<(ProjectRole, &'static str)>, sqlx::Error> {
-    if principal.role.inherits_project_access() {
-        return Ok(Some((ProjectRole::Admin, "organization")));
-    }
-    let role = MembershipRepository::project_role(
-        pool,
-        principal.organization_id,
-        project_id,
-        principal.user_id,
-    )
-    .await?;
-    Ok(role.and_then(|value| Some((value.parse().ok()?, "project"))))
-}
-
-fn apply_project_access(
-    item: &mut ProjectSummary,
-    role: ProjectRole,
-    source: &'static str,
-    organization_admin: bool,
-) {
-    item.effective_project_role = Some(role);
-    item.effective_access_source = Some(source);
-    item.capabilities = scoped_capabilities(role, organization_admin);
-}
-
-fn apply_application_access(
-    item: &mut ApplicationSummary,
-    role: ProjectRole,
-    source: &'static str,
-    organization_admin: bool,
-) {
-    item.effective_project_role = Some(role);
-    item.effective_access_source = Some(source);
-    item.capabilities = scoped_capabilities(role, organization_admin);
-}
-
-#[derive(Debug, Serialize)]
-struct Page<T> {
-    items: Vec<T>,
-    next_cursor: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerPageQuery {
-    cursor: Option<String>,
-    limit: Option<i64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct WorkerCursor {
-    last_observed_at: DateTime<Utc>,
-    agent_id: Uuid,
-}
-
-#[derive(Debug, FromRow, Serialize)]
-struct ApplicationWorker {
-    agent_id: Uuid,
-    cluster_id: Uuid,
-    cluster_name: String,
-    node_name: String,
-    agent_version: String,
-    architecture: Option<String>,
-    kernel_release: Option<String>,
-    first_observed_at: DateTime<Utc>,
-    last_observed_at: DateTime<Utc>,
-    agent_last_seen_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkerPage {
-    coverage: crate::runtime_retention::history::Coverage,
-    items: Vec<ApplicationWorker>,
-    next_cursor: Option<String>,
+/// Maps a service error onto this request's response.
+fn failed(request_id: &RequestId) -> impl Fn(NavigationServiceError) -> NavigationError + '_ {
+    move |error| NavigationError::from_service(error, request_id)
 }
 
 async fn principal(
@@ -271,7 +129,9 @@ async fn principal(
         .auth
         .authenticate_headers(headers)
         .await
-        .map_err(|error| NavigationError::database(&error, request_id))?
+        .map_err(|error| {
+            NavigationError::from_service(NavigationServiceError::Database(error), request_id)
+        })?
         .ok_or_else(|| NavigationError::unauthorized(request_id))
 }
 
@@ -281,11 +141,12 @@ async fn organization(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<Organization>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let value = NavigationRepository::organization(&state.pool, principal.organization_id)
+    state
+        .service
+        .organization(principal)
         .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?
-        .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    Ok(Json(value))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn projects(
@@ -295,45 +156,12 @@ async fn projects(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<ProjectSummary>>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let limit = page_limit(query.limit, &request_id)?;
-    let cursor = cursor_position(
-        &state.pool,
-        "projects",
-        principal.organization_id,
-        None,
-        query.cursor,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    if query.cursor.is_some() && cursor.is_none() {
-        return Err(NavigationError::invalid(
-            "cursor is outside this scope",
-            &request_id,
-        ));
-    }
-    let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = NavigationRepository::project_page::<_, ProjectSummary>(
-        &state.pool,
-        principal.organization_id,
-        cursor_time,
-        cursor_id,
-        limit + 1,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    let organization_admin = principal.role.inherits_project_access();
-    let mut visible = Vec::with_capacity(items.len());
-    for mut item in items.drain(..) {
-        if let Some((role, source)) = effective_project_access(&state.pool, principal, item.id)
-            .await
-            .map_err(|error| NavigationError::database(&error, &request_id))?
-        {
-            apply_project_access(&mut item, role, source, organization_admin);
-            visible.push(item);
-        }
-    }
-    items = visible;
-    Ok(Json(page(&mut items, limit, |item| item.id)))
+    state
+        .service
+        .projects(principal, query)
+        .await
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn project(
@@ -343,25 +171,12 @@ async fn project(
     Path(project_id): Path<Uuid>,
 ) -> Result<Json<ProjectSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let mut item = NavigationRepository::project::<_, ProjectSummary>(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?
-    .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    let (role, source) = effective_project_access(&state.pool, principal, project_id)
+    state
+        .service
+        .project(principal, project_id)
         .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?
-        .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    apply_project_access(
-        &mut item,
-        role,
-        source,
-        principal.role.inherits_project_access(),
-    );
-    Ok(Json(item))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn applications(
@@ -372,51 +187,12 @@ async fn applications(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<ApplicationSummary>>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let (access_role, access_source) = effective_project_access(&state.pool, principal, project_id)
+    state
+        .service
+        .applications(principal, project_id, query)
         .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?
-        .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    ensure_project(&state.pool, principal.organization_id, project_id)
-        .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?
-        .then_some(())
-        .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    let limit = page_limit(query.limit, &request_id)?;
-    let cursor = cursor_position(
-        &state.pool,
-        "applications",
-        principal.organization_id,
-        Some(project_id),
-        query.cursor,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    if query.cursor.is_some() && cursor.is_none() {
-        return Err(NavigationError::invalid(
-            "cursor is outside this scope",
-            &request_id,
-        ));
-    }
-    let (cursor_time, cursor_id) = cursor.unzip();
-    let mut items = NavigationRepository::application_page::<_, ApplicationSummary>(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        cursor_time,
-        cursor_id,
-        limit + 1,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    for item in &mut items {
-        apply_application_access(
-            item,
-            access_role,
-            access_source,
-            principal.role.inherits_project_access(),
-        );
-    }
-    Ok(Json(page(&mut items, limit, |item| item.id)))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn application(
@@ -426,26 +202,12 @@ async fn application(
     Path((project_id, application_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ApplicationSummary>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let (access_role, access_source) = effective_project_access(&state.pool, principal, project_id)
+    state
+        .service
+        .application(principal, project_id, application_id)
         .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?
-        .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    let mut item = NavigationRepository::application::<_, ApplicationSummary>(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?
-    .ok_or_else(|| NavigationError::not_found(&request_id))?;
-    apply_application_access(
-        &mut item,
-        access_role,
-        access_source,
-        principal.role.inherits_project_access(),
-    );
-    Ok(Json(item))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn application_workers(
@@ -456,132 +218,10 @@ async fn application_workers(
     Query(query): Query<WorkerPageQuery>,
 ) -> Result<Json<WorkerPage>, NavigationError> {
     let principal = principal(&headers, &state, &request_id).await?;
-    let owned = ApplicationRepository::exists(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    if !owned {
-        return Err(NavigationError::not_found(&request_id));
-    }
-    let limit = page_limit(query.limit, &request_id)?;
-    let cursor = query
-        .cursor
-        .as_deref()
-        .map(decode_worker_cursor)
-        .transpose()
-        .map_err(|message| NavigationError::invalid(message, &request_id))?;
-    if let Some(cursor) = &cursor {
-        let valid: bool = NavigationRepository::worker_cursor_is_valid(
-            &state.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            cursor.agent_id,
-            cursor.last_observed_at,
-        )
+    state
+        .service
+        .application_workers(principal, project_id, application_id, query)
         .await
-        .map_err(|error| NavigationError::database(&error, &request_id))?;
-        if !valid {
-            return Err(NavigationError::invalid(
-                "cursor is outside this scope",
-                &request_id,
-            ));
-        }
-    }
-    let cursor_time = cursor.as_ref().map(|value| value.last_observed_at);
-    let cursor_agent = cursor.as_ref().map(|value| value.agent_id);
-    let mut items = NavigationRepository::worker_page::<_, ApplicationWorker>(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-        application_id,
-        cursor_time,
-        cursor_agent,
-        limit + 1,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
-        items.pop();
-        items
-            .last()
-            .map(|item| {
-                encode_worker_cursor(&WorkerCursor {
-                    last_observed_at: item.last_observed_at,
-                    agent_id: item.agent_id,
-                })
-            })
-            .transpose()
-            .map_err(|message| NavigationError::invalid(message, &request_id))?
-    } else {
-        None
-    };
-    let coverage = crate::runtime_retention::history::coverage(
-        &state.pool,
-        principal.organization_id,
-        project_id,
-    )
-    .await
-    .map_err(|error| NavigationError::database(&error, &request_id))?;
-    Ok(Json(WorkerPage {
-        coverage,
-        items,
-        next_cursor,
-    }))
-}
-
-fn encode_worker_cursor(cursor: &WorkerCursor) -> Result<String, &'static str> {
-    serde_json::to_vec(cursor)
-        .map(hex::encode)
-        .map_err(|_| "cursor cannot be encoded")
-}
-
-fn decode_worker_cursor(cursor: &str) -> Result<WorkerCursor, &'static str> {
-    if cursor.len() > 1024 {
-        return Err("cursor is invalid");
-    }
-    let bytes = hex::decode(cursor).map_err(|_| "cursor is invalid")?;
-    serde_json::from_slice(&bytes).map_err(|_| "cursor is invalid")
-}
-
-async fn ensure_project(
-    pool: &PgPool,
-    organization_id: Uuid,
-    project_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    crate::repository::ProjectRepository::exists_in(pool, organization_id, project_id).await
-}
-
-async fn cursor_position(
-    pool: &PgPool,
-    table: &str,
-    organization_id: Uuid,
-    project_id: Option<Uuid>,
-    cursor: Option<Uuid>,
-) -> Result<Option<(DateTime<Utc>, Uuid)>, sqlx::Error> {
-    let Some(cursor) = cursor else {
-        return Ok(None);
-    };
-    if table == "projects" {
-        NavigationRepository::project_cursor(pool, organization_id, cursor).await
-    } else {
-        NavigationRepository::application_cursor(pool, organization_id, project_id, cursor).await
-    }
-}
-
-fn page<T>(items: &mut Vec<T>, limit: i64, id: impl Fn(&T) -> Uuid) -> Page<T> {
-    let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {
-        items.pop();
-        items.last().map(id)
-    } else {
-        None
-    };
-    Page {
-        items: std::mem::take(items),
-        next_cursor,
-    }
+        .map(Json)
+        .map_err(failed(&request_id))
 }
