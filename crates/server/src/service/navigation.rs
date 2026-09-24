@@ -420,7 +420,8 @@ impl NavigationService {
         Ok(item)
     }
 
-    /// The agents that observed the application, most recently first.
+    /// The agents that observed the application, most recently first. Like the
+    /// project's other reads, it needs access to the project.
     pub async fn application_workers(
         &self,
         principal: UserPrincipal,
@@ -428,6 +429,10 @@ impl NavigationService {
         application_id: Uuid,
         query: WorkerPageQuery,
     ) -> Result<WorkerPage, NavigationServiceError> {
+        effective_project_access(&self.pool, principal, project_id)
+            .await
+            .map_err(NavigationServiceError::Database)?
+            .ok_or(NavigationServiceError::NotFound)?;
         let owned = ApplicationRepository::exists(
             &self.pool,
             principal.organization_id,
@@ -683,5 +688,60 @@ mod tests {
                 .await,
             Err(NavigationServiceError::NotFound)
         ));
+    }
+
+    /// Workers belong to an application of a project; a member who cannot
+    /// see the project cannot see its workers either, as with the project's
+    /// other reads.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn workers_need_access_to_the_project(pool: PgPool) {
+        let tenant = tenant(&pool, "navigation-service-workers").await;
+        ingest(
+            &pool,
+            &tenant,
+            &[exec(
+                &tenant,
+                "/bin/a",
+                Utc::now() - chrono::Duration::minutes(1),
+            )],
+        )
+        .await;
+        let service = NavigationService::new(pool.clone());
+        let user_id = user(&pool).await;
+        MembershipRepository::insert_organization_role(
+            &pool,
+            tenant.organization_id,
+            user_id,
+            "member",
+        )
+        .await
+        .unwrap();
+        let plain = member(&tenant, user_id, OrganizationRole::Member);
+        let workers = || WorkerPageQuery {
+            cursor: None,
+            limit: None,
+        };
+
+        assert!(matches!(
+            service
+                .application_workers(plain, tenant.project_id, tenant.application_id, workers())
+                .await,
+            Err(NavigationServiceError::NotFound)
+        ));
+        MembershipRepository::insert_project_role(
+            &pool,
+            tenant.organization_id,
+            tenant.project_id,
+            user_id,
+            "member",
+        )
+        .await
+        .unwrap();
+        let page = service
+            .application_workers(plain, tenant.project_id, tenant.application_id, workers())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
     }
 }
