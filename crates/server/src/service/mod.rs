@@ -35,14 +35,18 @@
 //! send them as they are.
 
 pub mod accounts;
+pub mod agent_health;
 pub mod attention;
 pub mod dns_groups;
 pub mod identity;
 pub mod inventory;
 pub mod navigation;
+pub mod notification_retention;
+pub mod notifications;
 pub mod onboarding;
 pub mod policies;
 pub mod provisioning;
 pub mod releases;
 pub mod resources;
 pub mod runtime_groups;
+pub mod runtime_retention;
