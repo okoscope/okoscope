@@ -1,7 +1,3 @@
-use crate::error_code::ErrorCode;
-use crate::repository::UserRepository;
-use crate::repository::provisioning::ProvisioningKeyRepository;
-use crate::repository::{ApplicationRepository, OrganizationStatus, ProjectRepository};
 use axum::{
     Extension, Json, Router,
     extract::{Path, State},
@@ -9,28 +5,28 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::repository::OrganizationRepository;
+use crate::error_code::ErrorCode;
+use crate::service::provisioning::{
+    ApplicationPage, ApplicationResponse, Created, CreatedApplicationResponse, CredentialPage,
+    IssuedCredentialResponse, NamedResource, OrganizationPage, OrganizationResponse, ProjectPage,
+    ProjectResponse, ProvisioningConflict, ProvisioningService, ProvisioningServiceError,
+    ProvisioningTarget, store_error,
+};
 use crate::{
     admin_auth::AdminAuthenticator,
-    application_credentials::{
-        ApplicationCredentialSummary, issue, list as list_credentials, revoke,
-    },
-    auth::{UserPrincipal, UserSessionAuthenticator, session_token},
-    transactional_mail::{Locale, MailConfig, MailError, TemplateData, enqueue},
+    auth::{IdentityPrincipal, UserSessionAuthenticator, session_token},
+    transactional_mail::MailConfig,
     web_api::RequestId,
 };
 
 #[derive(Clone, Debug)]
 struct ProvisioningState {
-    pool: PgPool,
+    service: ProvisioningService,
     tenant: UserSessionAuthenticator,
-    mail: MailConfig,
 }
 
 pub fn router(pool: PgPool, _admin: Option<AdminAuthenticator>, mail: MailConfig) -> Router {
@@ -74,16 +70,9 @@ pub fn router(pool: PgPool, _admin: Option<AdminAuthenticator>, mail: MailConfig
             axum::routing::delete(revoke_application_credential),
         )
         .with_state(ProvisioningState {
-            tenant: UserSessionAuthenticator::new(pool.clone()),
-            pool,
-            mail,
+            service: ProvisioningService::new(pool.clone(), mail),
+            tenant: UserSessionAuthenticator::new(pool),
         })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProvisioningPrincipal {
-    PlatformSuperAdmin,
-    Tenant(UserPrincipal),
 }
 
 #[derive(Debug)]
@@ -96,70 +85,91 @@ struct ProvisioningError {
 }
 
 impl ProvisioningError {
-    fn invalid_credential(request_id: &RequestId) -> Self {
+    fn new(status: StatusCode, code: ErrorCode, message: &str, request_id: &RequestId) -> Self {
         Self {
-            status: StatusCode::UNAUTHORIZED,
-            code: ErrorCode::INVALID_CREDENTIAL,
-            message: "invalid or missing bearer credential".into(),
-            request_id: request_id.clone(),
-            fields: None,
-        }
-    }
-
-    fn invalid(field: &'static str, detail: impl Into<String>, request_id: &RequestId) -> Self {
-        let detail = detail.into();
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: ErrorCode::VALIDATION_FAILED,
-            message: "the request contains invalid fields".into(),
-            request_id: request_id.clone(),
-            fields: Some(std::collections::BTreeMap::from([(field, detail)])),
-        }
-    }
-
-    fn not_found(code: ErrorCode, request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
+            status,
             code,
-            message: "resource not found".into(),
+            message: message.into(),
             request_id: request_id.clone(),
             fields: None,
         }
     }
 
-    fn conflict(code: ErrorCode, request_id: &RequestId) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
-            code,
-            message: "resource already exists".into(),
-            request_id: request_id.clone(),
-            fields: None,
+    /// The response for a failed provisioning use case.
+    fn from_service(error: ProvisioningServiceError, request_id: &RequestId) -> Self {
+        match error {
+            ProvisioningServiceError::InvalidCredential => Self::new(
+                StatusCode::UNAUTHORIZED,
+                ErrorCode::INVALID_CREDENTIAL,
+                "invalid or missing bearer credential",
+                request_id,
+            ),
+            ProvisioningServiceError::SuperAdminRequired => Self::new(
+                StatusCode::FORBIDDEN,
+                ErrorCode::FORBIDDEN,
+                "super administrator role is required",
+                request_id,
+            ),
+            ProvisioningServiceError::OwnerRequired => Self::new(
+                StatusCode::FORBIDDEN,
+                ErrorCode::FORBIDDEN,
+                "owner role is required",
+                request_id,
+            ),
+            ProvisioningServiceError::Invalid { field, detail } => Self {
+                fields: Some(std::collections::BTreeMap::from([(field, detail.into())])),
+                ..Self::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::VALIDATION_FAILED,
+                    "the request contains invalid fields",
+                    request_id,
+                )
+            },
+            ProvisioningServiceError::NotFound(target) => Self::new(
+                StatusCode::NOT_FOUND,
+                match target {
+                    ProvisioningTarget::Organization => ErrorCode::ORGANIZATION_NOT_FOUND,
+                    ProvisioningTarget::Project => ErrorCode::PROJECT_NOT_FOUND,
+                    ProvisioningTarget::Application => ErrorCode::APPLICATION_NOT_FOUND,
+                    ProvisioningTarget::Credential => ErrorCode::CREDENTIAL_NOT_FOUND,
+                },
+                "resource not found",
+                request_id,
+            ),
+            ProvisioningServiceError::Conflict(conflict) => Self::new(
+                StatusCode::CONFLICT,
+                match conflict {
+                    ProvisioningConflict::OrganizationSlug => ErrorCode::ORGANIZATION_SLUG_CONFLICT,
+                    ProvisioningConflict::ProjectSlug => ErrorCode::PROJECT_SLUG_CONFLICT,
+                    ProvisioningConflict::ApplicationSlug => ErrorCode::APPLICATION_SLUG_CONFLICT,
+                    ProvisioningConflict::CredentialName => ErrorCode::CREDENTIAL_NAME_CONFLICT,
+                    ProvisioningConflict::Credential => ErrorCode::CREDENTIAL_CONFLICT,
+                    ProvisioningConflict::IdempotencyKeyReused => ErrorCode::IDEMPOTENCY_KEY_REUSED,
+                    ProvisioningConflict::OperationAlreadyCompleted => {
+                        ErrorCode::OPERATION_ALREADY_COMPLETED
+                    }
+                },
+                "resource already exists",
+                request_id,
+            ),
+            ProvisioningServiceError::MailPayloadRejected => {
+                tracing::error!(request_id=%request_id.0, "application mail payload rejected");
+                Self::internal(request_id)
+            }
+            ProvisioningServiceError::Database(error) => {
+                tracing::error!(error=%error, request_id=%request_id.0, "provisioning database error");
+                Self::internal(request_id)
+            }
         }
     }
 
-    fn database(error: &sqlx::Error, conflict_code: ErrorCode, request_id: &RequestId) -> Self {
-        if error
-            .as_database_error()
-            .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
-        {
-            return Self::conflict(conflict_code, request_id);
-        }
-        tracing::error!(error=%error, request_id=%request_id.0, "provisioning database error");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: ErrorCode::INTERNAL_ERROR,
-            message: "internal server error".into(),
-            request_id: request_id.clone(),
-            fields: None,
-        }
-    }
-
-    fn completed(request_id: &RequestId) -> Self {
-        Self::conflict(ErrorCode::OPERATION_ALREADY_COMPLETED, request_id)
-    }
-
-    fn idempotency_reused(request_id: &RequestId) -> Self {
-        Self::conflict(ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
+    fn internal(request_id: &RequestId) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::INTERNAL_ERROR,
+            "internal server error",
+            request_id,
+        )
     }
 }
 
@@ -186,11 +196,25 @@ impl IntoResponse for ProvisioningError {
     }
 }
 
+/// Maps a service error onto this request's response.
+fn failed(request_id: &RequestId) -> impl Fn(ProvisioningServiceError) -> ProvisioningError + '_ {
+    move |error| ProvisioningError::from_service(error, request_id)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateNamedResource {
     slug: String,
     name: String,
+}
+
+impl From<CreateNamedResource> for NamedResource {
+    fn from(input: CreateNamedResource) -> Self {
+        Self {
+            slug: input.slug,
+            name: input.name,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,266 +223,38 @@ struct IssueCredentialRequest {
     name: String,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct OrganizationResponse {
-    id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct ProjectResponse {
-    id: Uuid,
-    organization_id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize, sqlx::FromRow)]
-struct ApplicationResponse {
-    id: Uuid,
-    organization_id: Uuid,
-    project_id: Uuid,
-    slug: String,
-    name: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Serialize)]
-struct IssuedCredentialResponse {
-    id: Uuid,
-    name: String,
-    token: String,
-    token_hint: String,
-    created_at: DateTime<Utc>,
-    shown_once: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct CreatedApplicationResponse {
-    application: ApplicationResponse,
-    credential: IssuedCredentialResponse,
-}
-
-#[derive(Debug, Serialize)]
-struct CredentialPage {
-    items: Vec<ApplicationCredentialSummary>,
-}
-
-#[derive(Debug, Serialize)]
-struct OrganizationPage {
-    items: Vec<OrganizationResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct ProjectPage {
-    items: Vec<ProjectResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct ApplicationPage {
-    items: Vec<ApplicationResponse>,
-}
-
-async fn resolve_principal(
+async fn authenticate(
     state: &ProvisioningState,
     headers: &HeaderMap,
     request_id: &RequestId,
-) -> Result<ProvisioningPrincipal, ProvisioningError> {
-    let presented =
-        session_token(headers).ok_or_else(|| ProvisioningError::invalid_credential(request_id))?;
-    let principal = state
+) -> Result<IdentityPrincipal, ProvisioningError> {
+    let invalid =
+        || ProvisioningError::from_service(ProvisioningServiceError::InvalidCredential, request_id);
+    let presented = session_token(headers).ok_or_else(invalid)?;
+    state
         .tenant
         .authenticate_identity(presented)
         .await
         .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::CREDENTIAL_CONFLICT, request_id)
+            ProvisioningError::from_service(
+                store_error(error, ProvisioningConflict::Credential),
+                request_id,
+            )
         })?
-        .ok_or_else(|| ProvisioningError::invalid_credential(request_id))?;
-    if principal.is_super_admin {
-        Ok(ProvisioningPrincipal::PlatformSuperAdmin)
-    } else {
-        principal
-            .tenant()
-            .map(ProvisioningPrincipal::Tenant)
-            .ok_or_else(|| ProvisioningError::invalid_credential(request_id))
-    }
+        .ok_or_else(invalid)
 }
 
-async fn authorize_platform_admin(
-    state: &ProvisioningState,
-    headers: &HeaderMap,
-    request_id: &RequestId,
-) -> Result<(), ProvisioningError> {
-    match resolve_principal(state, headers, request_id).await? {
-        ProvisioningPrincipal::PlatformSuperAdmin => Ok(()),
-        ProvisioningPrincipal::Tenant(_) => Err(ProvisioningError {
-            status: StatusCode::FORBIDDEN,
-            code: ErrorCode::FORBIDDEN,
-            message: "super administrator role is required".into(),
-            request_id: request_id.clone(),
-            fields: None,
-        }),
-    }
+fn idempotency_key(headers: &HeaderMap) -> Option<&[u8]> {
+    headers
+        .get("idempotency-key")
+        .map(axum::http::HeaderValue::as_bytes)
 }
 
-fn authorize_organization(
-    principal: ProvisioningPrincipal,
-    organization_id: Uuid,
-    not_found_code: ErrorCode,
-    request_id: &RequestId,
-) -> Result<(), ProvisioningError> {
-    match principal {
-        ProvisioningPrincipal::PlatformSuperAdmin => Ok(()),
-        ProvisioningPrincipal::Tenant(tenant)
-            if tenant.organization_id == organization_id && tenant.role.is_owner() =>
-        {
-            Ok(())
-        }
-        ProvisioningPrincipal::Tenant(tenant) if tenant.organization_id == organization_id => {
-            Err(ProvisioningError {
-                status: StatusCode::FORBIDDEN,
-                code: ErrorCode::FORBIDDEN,
-                message: "owner role is required".into(),
-                request_id: request_id.clone(),
-                fields: None,
-            })
-        }
-        ProvisioningPrincipal::Tenant(_) => {
-            Err(ProvisioningError::not_found(not_found_code, request_id))
-        }
+fn created<T: Serialize>(created: Created<T>) -> (StatusCode, Json<T>) {
+    match created {
+        Created::New(value) => (StatusCode::CREATED, Json(value)),
+        Created::Replayed(value) => (StatusCode::OK, Json(value)),
     }
-}
-
-fn validate_slug(value: &str, request_id: &RequestId) -> Result<(), ProvisioningError> {
-    let valid = (1..=63).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && !value.contains("--");
-    if valid {
-        Ok(())
-    } else {
-        Err(ProvisioningError::invalid(
-            "slug",
-            "slug must contain 1-63 lowercase letters, digits, or single hyphens",
-            request_id,
-        ))
-    }
-}
-
-fn validate_name(value: &str, request_id: &RequestId) -> Result<(), ProvisioningError> {
-    if value.trim() == value && (1..=120).contains(&value.chars().count()) {
-        Ok(())
-    } else {
-        Err(ProvisioningError::invalid(
-            "name",
-            "name must contain 1-120 characters without surrounding whitespace",
-            request_id,
-        ))
-    }
-}
-
-fn validate_credential_name(value: &str, request_id: &RequestId) -> Result<(), ProvisioningError> {
-    let valid = (1..=64).contains(&value.len())
-        && value.bytes().enumerate().all(|(index, byte)| {
-            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(ProvisioningError::invalid(
-            "name",
-            "credential name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-            request_id,
-        ))
-    }
-}
-
-enum Idempotency {
-    Disabled,
-    Fresh(Uuid),
-    Replay(Uuid),
-}
-
-async fn reserve_idempotency(
-    tx: &mut Transaction<'_, Postgres>,
-    headers: &HeaderMap,
-    operation: &'static str,
-    fingerprint_parts: &[&str],
-    request_id: &RequestId,
-) -> Result<Idempotency, ProvisioningError> {
-    let Some(raw_key) = headers.get("idempotency-key") else {
-        return Ok(Idempotency::Disabled);
-    };
-    let key = raw_key.to_str().ok().and_then(|value| {
-        Uuid::parse_str(value)
-            .ok()
-            .filter(|parsed| parsed.to_string() == value)
-    });
-    let Some(key) = key else {
-        return Err(ProvisioningError::invalid(
-            "idempotency_key",
-            "Idempotency-Key must be a canonical UUID",
-            request_id,
-        ));
-    };
-    let key_hash = Sha256::digest(format!("okoscope.provisioning.v1\0{key}").as_bytes());
-    let mut fingerprint = Sha256::new();
-    fingerprint.update(operation.as_bytes());
-    for part in fingerprint_parts {
-        fingerprint.update([0]);
-        fingerprint.update(part.as_bytes());
-    }
-    let fingerprint = fingerprint.finalize();
-    let reservation_id = Uuid::new_v4();
-    let inserted = ProvisioningKeyRepository::reserve(
-        &mut **tx,
-        reservation_id,
-        operation,
-        key_hash.as_slice(),
-        fingerprint.as_slice(),
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
-    })?;
-    if inserted.is_some() {
-        return Ok(Idempotency::Fresh(reservation_id));
-    }
-    let existing: (Vec<u8>, Option<Uuid>) =
-        ProvisioningKeyRepository::reservation(&mut **tx, operation, key_hash.as_slice())
-            .await
-            .map_err(|error| {
-                ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
-            })?;
-    if existing.0.as_slice() != fingerprint.as_slice() {
-        return Err(ProvisioningError::idempotency_reused(request_id));
-    }
-    existing
-        .1
-        .map(Idempotency::Replay)
-        .ok_or_else(|| ProvisioningError::idempotency_reused(request_id))
-}
-
-async fn complete_idempotency(
-    tx: &mut Transaction<'_, Postgres>,
-    state: &Idempotency,
-    resource_id: Uuid,
-    request_id: &RequestId,
-) -> Result<(), ProvisioningError> {
-    if let Idempotency::Fresh(reservation_id) = state {
-        ProvisioningKeyRepository::complete(&mut **tx, resource_id, *reservation_id)
-            .await
-            .map_err(|error| {
-                ProvisioningError::database(&error, ErrorCode::IDEMPOTENCY_KEY_REUSED, request_id)
-            })?;
-    }
-    Ok(())
 }
 
 async fn list_organizations(
@@ -466,13 +262,13 @@ async fn list_organizations(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<OrganizationPage>, ProvisioningError> {
-    authorize_platform_admin(&state, &headers, &request_id).await?;
-    let items = OrganizationRepository::summaries(&state.pool)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .list_organizations(principal)
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
-        })?;
-    Ok(Json(OrganizationPage { items }))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn list_projects(
@@ -481,24 +277,13 @@ async fn list_projects(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ProjectPage>, ProvisioningError> {
-    authorize_platform_admin(&state, &headers, &request_id).await?;
-    let exists: bool = OrganizationRepository::exists(&state.pool, organization_id)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .list_projects(principal, organization_id)
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-        })?;
-    if !exists {
-        return Err(ProvisioningError::not_found(
-            ErrorCode::ORGANIZATION_NOT_FOUND,
-            &request_id,
-        ));
-    }
-    let items = ProjectRepository::summaries(&state.pool, organization_id)
-        .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-        })?;
-    Ok(Json(ProjectPage { items }))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn list_applications(
@@ -507,24 +292,13 @@ async fn list_applications(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationPage>, ProvisioningError> {
-    authorize_platform_admin(&state, &headers, &request_id).await?;
-    let exists: bool = ProjectRepository::exists(&state.pool, project_id)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .list_applications(principal, project_id)
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-        })?;
-    if !exists {
-        return Err(ProvisioningError::not_found(
-            ErrorCode::PROJECT_NOT_FOUND,
-            &request_id,
-        ));
-    }
-    let items = ApplicationRepository::summaries(&state.pool, project_id)
-        .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-        })?;
-    Ok(Json(ApplicationPage { items }))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn get_application(
@@ -533,16 +307,13 @@ async fn get_application(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApplicationResponse>, ProvisioningError> {
-    authorize_platform_admin(&state, &headers, &request_id).await?;
-    let application = ApplicationRepository::summary(&state.pool, project_id, application_id)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .get_application(principal, project_id, application_id)
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-        })?
-        .ok_or_else(|| {
-            ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, &request_id)
-        })?;
-    Ok(Json(application))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn create_organization(
@@ -551,54 +322,13 @@ async fn create_organization(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<CreateNamedResource>,
 ) -> Result<(StatusCode, Json<OrganizationResponse>), ProvisioningError> {
-    authorize_platform_admin(&state, &headers, &request_id).await?;
-    validate_slug(&input.slug, &request_id)?;
-    validate_name(&input.name, &request_id)?;
-    let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
-    })?;
-    let idempotency = reserve_idempotency(
-        &mut tx,
-        &headers,
-        "create_organization",
-        &[&input.slug, &input.name],
-        &request_id,
-    )
-    .await?;
-    if let Idempotency::Replay(resource_id) = idempotency {
-        let organization = OrganizationRepository::summary(&mut *tx, resource_id)
-            .await
-            .map_err(|error| {
-                ProvisioningError::database(
-                    &error,
-                    ErrorCode::ORGANIZATION_SLUG_CONFLICT,
-                    &request_id,
-                )
-            })?;
-        return Ok((StatusCode::OK, Json(organization)));
-    }
-    let stored = OrganizationRepository::insert(
-        &mut *tx,
-        Uuid::new_v4(),
-        &input.slug,
-        &input.name,
-        OrganizationStatus::Active,
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
-    })?;
-    let organization = OrganizationResponse {
-        id: stored.id,
-        slug: stored.slug,
-        name: stored.name,
-        created_at: stored.created_at,
-    };
-    complete_idempotency(&mut tx, &idempotency, organization.id, &request_id).await?;
-    tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::ORGANIZATION_SLUG_CONFLICT, &request_id)
-    })?;
-    Ok((StatusCode::CREATED, Json(organization)))
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .create_organization(principal, input.into(), idempotency_key(&headers))
+        .await
+        .map(created)
+        .map_err(failed(&request_id))
 }
 
 async fn create_project(
@@ -608,72 +338,18 @@ async fn create_project(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<CreateNamedResource>,
 ) -> Result<(StatusCode, Json<ProjectResponse>), ProvisioningError> {
-    let principal = resolve_principal(&state, &headers, &request_id).await?;
-    authorize_organization(
-        principal,
-        organization_id,
-        ErrorCode::ORGANIZATION_NOT_FOUND,
-        &request_id,
-    )?;
-    validate_slug(&input.slug, &request_id)?;
-    validate_name(&input.name, &request_id)?;
-    let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-    })?;
-    let organization_id_text = organization_id.to_string();
-    let idempotency = reserve_idempotency(
-        &mut tx,
-        &headers,
-        "create_project",
-        &[&organization_id_text, &input.slug, &input.name],
-        &request_id,
-    )
-    .await?;
-    if let Idempotency::Replay(resource_id) = idempotency {
-        let project = ProjectRepository::summary(&mut *tx, resource_id, organization_id)
-            .await
-            .map_err(|error| {
-                ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-            })?;
-        return Ok((StatusCode::OK, Json(project)));
-    }
-    let exists: bool = OrganizationRepository::exists(&mut *tx, organization_id)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .create_project(
+            principal,
+            organization_id,
+            input.into(),
+            idempotency_key(&headers),
+        )
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-        })?;
-    if !exists {
-        return Err(ProvisioningError::not_found(
-            ErrorCode::ORGANIZATION_NOT_FOUND,
-            &request_id,
-        ));
-    }
-    // The existence check above makes `None` a race with a concurrent
-    // deletion, which is reported the same way that check reports it.
-    let stored = ProjectRepository::insert(
-        &mut *tx,
-        Uuid::new_v4(),
-        organization_id,
-        &input.slug,
-        &input.name,
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-    })?
-    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::ORGANIZATION_NOT_FOUND, &request_id))?;
-    let project = ProjectResponse {
-        id: stored.id,
-        organization_id: stored.organization_id,
-        slug: stored.slug,
-        name: stored.name,
-        created_at: stored.created_at,
-    };
-    complete_idempotency(&mut tx, &idempotency, project.id, &request_id).await?;
-    tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::PROJECT_SLUG_CONFLICT, &request_id)
-    })?;
-    Ok((StatusCode::CREATED, Json(project)))
+        .map(created)
+        .map_err(failed(&request_id))
 }
 
 async fn create_application(
@@ -683,175 +359,18 @@ async fn create_application(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<CreateNamedResource>,
 ) -> Result<(StatusCode, Json<CreatedApplicationResponse>), ProvisioningError> {
-    let principal = resolve_principal(&state, &headers, &request_id).await?;
-    validate_slug(&input.slug, &request_id)?;
-    validate_name(&input.name, &request_id)?;
-    let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-    })?;
-    let (organization_id, project_name): (Uuid, String) =
-        ProjectRepository::organization_and_name(&mut *tx, project_id)
-            .await
-            .map_err(|error| {
-                ProvisioningError::database(
-                    &error,
-                    ErrorCode::APPLICATION_SLUG_CONFLICT,
-                    &request_id,
-                )
-            })?
-            .ok_or_else(|| {
-                ProvisioningError::not_found(ErrorCode::PROJECT_NOT_FOUND, &request_id)
-            })?;
-    authorize_organization(
-        principal,
-        organization_id,
-        ErrorCode::PROJECT_NOT_FOUND,
-        &request_id,
-    )?;
-    let project_id_text = project_id.to_string();
-    let idempotency = reserve_idempotency(
-        &mut tx,
-        &headers,
-        "create_application",
-        &[&project_id_text, &input.slug, &input.name],
-        &request_id,
-    )
-    .await?;
-    if matches!(idempotency, Idempotency::Replay(_)) {
-        return Err(ProvisioningError::completed(&request_id));
-    }
-    // The project was resolved above; `None` is a race with its deletion and
-    // is reported the way that lookup reports a missing project.
-    let stored = ApplicationRepository::insert(
-        &mut *tx,
-        Uuid::new_v4(),
-        project_id,
-        &input.slug,
-        &input.name,
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-    })?
-    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::PROJECT_NOT_FOUND, &request_id))?;
-    let application = ApplicationResponse {
-        id: stored.id,
-        organization_id: stored.organization_id,
-        project_id: stored.project_id,
-        slug: stored.slug,
-        name: stored.name,
-        created_at: stored.created_at,
-    };
-    let credential = issue(
-        &mut tx,
-        organization_id,
-        project_id,
-        application.id,
-        "default",
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-    })?;
-    let response = CreatedApplicationResponse {
-        application,
-        credential: issued_response(&credential),
-    };
-    enqueue_application_mail(
-        &mut tx,
-        &state.mail,
-        organization_id,
-        &project_name,
-        &response.application,
-        &request_id,
-    )
-    .await?;
-    complete_idempotency(&mut tx, &idempotency, response.application.id, &request_id).await?;
-    tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, &request_id)
-    })?;
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    let response = state
+        .service
+        .create_application(
+            principal,
+            project_id,
+            input.into(),
+            idempotency_key(&headers),
+        )
+        .await
+        .map_err(failed(&request_id))?;
     Ok((StatusCode::CREATED, Json(response)))
-}
-
-async fn enqueue_application_mail(
-    tx: &mut Transaction<'_, Postgres>,
-    mail: &MailConfig,
-    organization_id: Uuid,
-    project_name: &str,
-    application: &ApplicationResponse,
-    request_id: &RequestId,
-) -> Result<(), ProvisioningError> {
-    if !mail.enabled {
-        return Ok(());
-    }
-    let rows = UserRepository::active_organization_owners(&mut **tx, organization_id)
-        .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
-        })?;
-    if rows.len() > crate::transactional_mail::MAX_RECIPIENTS {
-        return Err(ProvisioningError::invalid(
-            "owners",
-            "verified owner recipient limit exceeded",
-            request_id,
-        ));
-    }
-    let recipients = rows
-        .into_iter()
-        .map(|(email, locale)| (email, locale.parse().unwrap_or(Locale::En)))
-        .collect::<Vec<_>>();
-    let payload = TemplateData::ApplicationCreated {
-        application_name: application.name.clone(),
-        project_name: project_name.to_owned(),
-    };
-    enqueue(
-        tx,
-        mail,
-        &format!("application-created:{}", application.id),
-        &recipients,
-        &payload,
-        None,
-        None,
-    )
-    .await
-    .map_err(|error| mail_error(error, request_id))
-}
-
-fn mail_error(error: MailError, request_id: &RequestId) -> ProvisioningError {
-    match error {
-        MailError::TooManyRecipients => ProvisioningError::invalid(
-            "owners",
-            "verified owner recipient limit exceeded",
-            request_id,
-        ),
-        MailError::Database(error) => {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
-        }
-        MailError::InvalidPayload => {
-            tracing::error!(request_id=%request_id.0, "application mail payload rejected");
-            ProvisioningError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: ErrorCode::INTERNAL_ERROR,
-                message: "internal server error".into(),
-                request_id: request_id.clone(),
-                fields: None,
-            }
-        }
-    }
-}
-
-async fn owned_application(
-    state: &ProvisioningState,
-    project_id: Uuid,
-    application_id: Uuid,
-    request_id: &RequestId,
-) -> Result<Uuid, ProvisioningError> {
-    ApplicationRepository::organization_of(&state.pool, project_id, application_id)
-        .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::APPLICATION_SLUG_CONFLICT, request_id)
-        })?
-        .ok_or_else(|| ProvisioningError::not_found(ErrorCode::APPLICATION_NOT_FOUND, request_id))
 }
 
 async fn list_application_credentials(
@@ -860,21 +379,13 @@ async fn list_application_credentials(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<CredentialPage>, ProvisioningError> {
-    let principal = resolve_principal(&state, &headers, &request_id).await?;
-    let organization_id =
-        owned_application(&state, project_id, application_id, &request_id).await?;
-    authorize_organization(
-        principal,
-        organization_id,
-        ErrorCode::APPLICATION_NOT_FOUND,
-        &request_id,
-    )?;
-    let items = list_credentials(&state.pool, organization_id, project_id, application_id)
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .list_credentials(principal, project_id, application_id)
         .await
-        .map_err(|error| {
-            ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-        })?;
-    Ok(Json(CredentialPage { items }))
+        .map(Json)
+        .map_err(failed(&request_id))
 }
 
 async fn issue_application_credential(
@@ -884,48 +395,18 @@ async fn issue_application_credential(
     Extension(request_id): Extension<RequestId>,
     Json(input): Json<IssueCredentialRequest>,
 ) -> Result<(StatusCode, Json<IssuedCredentialResponse>), ProvisioningError> {
-    let principal = resolve_principal(&state, &headers, &request_id).await?;
-    validate_credential_name(&input.name, &request_id)?;
-    let organization_id =
-        owned_application(&state, project_id, application_id, &request_id).await?;
-    authorize_organization(
-        principal,
-        organization_id,
-        ErrorCode::APPLICATION_NOT_FOUND,
-        &request_id,
-    )?;
-    let mut tx = state.pool.begin().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-    })?;
-    let project_id_text = project_id.to_string();
-    let application_id_text = application_id.to_string();
-    let idempotency = reserve_idempotency(
-        &mut tx,
-        &headers,
-        "issue_application_credential",
-        &[&project_id_text, &application_id_text, &input.name],
-        &request_id,
-    )
-    .await?;
-    if matches!(idempotency, Idempotency::Replay(_)) {
-        return Err(ProvisioningError::completed(&request_id));
-    }
-    let credential = issue(
-        &mut tx,
-        organization_id,
-        project_id,
-        application_id,
-        &input.name,
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-    })?;
-    let response = issued_response(&credential);
-    complete_idempotency(&mut tx, &idempotency, response.id, &request_id).await?;
-    tx.commit().await.map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-    })?;
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    let response = state
+        .service
+        .issue_credential(
+            principal,
+            project_id,
+            application_id,
+            &input.name,
+            idempotency_key(&headers),
+        )
+        .await
+        .map_err(failed(&request_id))?;
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -935,69 +416,11 @@ async fn revoke_application_credential(
     headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<StatusCode, ProvisioningError> {
-    let principal = resolve_principal(&state, &headers, &request_id).await?;
-    let organization_id =
-        owned_application(&state, project_id, application_id, &request_id).await?;
-    authorize_organization(
-        principal,
-        organization_id,
-        ErrorCode::APPLICATION_NOT_FOUND,
-        &request_id,
-    )?;
-    revoke(
-        &state.pool,
-        organization_id,
-        project_id,
-        application_id,
-        credential_id,
-    )
-    .await
-    .map_err(|error| {
-        ProvisioningError::database(&error, ErrorCode::CREDENTIAL_NAME_CONFLICT, &request_id)
-    })?
-    .ok_or_else(|| ProvisioningError::not_found(ErrorCode::CREDENTIAL_NOT_FOUND, &request_id))?;
+    let principal = authenticate(&state, &headers, &request_id).await?;
+    state
+        .service
+        .revoke_credential(principal, project_id, application_id, credential_id)
+        .await
+        .map_err(failed(&request_id))?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn issued_response(
-    credential: &crate::application_credentials::IssuedApplicationCredential,
-) -> IssuedCredentialResponse {
-    IssuedCredentialResponse {
-        id: credential.summary.id,
-        name: credential.summary.name.clone(),
-        token: credential.token().to_owned(),
-        token_hint: credential.summary.token_hint.clone(),
-        created_at: credential.summary.created_at,
-        shown_once: true,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn request_id() -> RequestId {
-        RequestId("provisioning-unit-test".into())
-    }
-
-    #[test]
-    fn validation_codes_and_fields_are_stable() {
-        let slug = validate_slug("Invalid--slug", &request_id()).unwrap_err();
-        assert_eq!(slug.code, ErrorCode::VALIDATION_FAILED);
-        assert!(slug.fields.unwrap().contains_key("slug"));
-
-        let credential = validate_credential_name("rotation 1", &request_id()).unwrap_err();
-        assert_eq!(credential.code, ErrorCode::VALIDATION_FAILED);
-        assert!(credential.fields.unwrap().contains_key("name"));
-    }
-
-    #[test]
-    fn credential_names_use_a_bounded_ascii_operator_safe_format() {
-        for valid in ["default", "rotation-2026-08", "blue_green.v2"] {
-            validate_credential_name(valid, &request_id()).unwrap();
-        }
-        for invalid in ["", " leading", "two words", "юникод", "_leading"] {
-            assert!(validate_credential_name(invalid, &request_id()).is_err());
-        }
-    }
 }
