@@ -11,14 +11,6 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
         include_str!("../src/attention.rs"),
         "/api/v1/attention-summary",
     ),
-    (
-        include_str!("../src/inventory_api.rs"),
-        "/runtime-inventory",
-    ),
-    (
-        include_str!("../src/dns_group_api.rs"),
-        "/runtime-inventory/dns-groups",
-    ),
     (include_str!("../src/policy_api.rs"), "/policies"),
     (include_str!("../src/resources.rs"), "/resources"),
     (
@@ -37,11 +29,23 @@ const ROUTE_SOURCES: &[(&str, &str)] = &[
 
 /// Route families whose use cases live in a service: the route is in the
 /// handler, the project access check in the service it calls.
-const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[(
-    include_str!("../src/releases.rs"),
-    include_str!("../src/service/releases.rs"),
-    "/releases",
-)];
+const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
+    (
+        include_str!("../src/releases.rs"),
+        include_str!("../src/service/releases.rs"),
+        "/releases",
+    ),
+    (
+        include_str!("../src/inventory_api.rs"),
+        include_str!("../src/service/inventory.rs"),
+        "/runtime-inventory",
+    ),
+    (
+        include_str!("../src/dns_group_api.rs"),
+        include_str!("../src/service/dns_groups.rs"),
+        "/runtime-inventory/dns-groups",
+    ),
+];
 
 #[test]
 fn every_descendant_route_family_has_a_project_access_seam() {
