@@ -35,6 +35,9 @@
 //! send them as they are.
 
 pub mod access;
+pub mod accounts;
 pub mod identity;
 pub mod invitations;
+pub mod onboarding;
+pub mod provisioning;
 pub mod releases;
