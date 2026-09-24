@@ -36,7 +36,9 @@
 
 pub mod access;
 pub mod accounts;
+pub mod dns_groups;
 pub mod identity;
+pub mod inventory;
 pub mod invitations;
 pub mod onboarding;
 pub mod provisioning;
