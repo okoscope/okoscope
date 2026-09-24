@@ -6,8 +6,6 @@ use server::{
 use uuid::Uuid;
 
 const ROUTE_SOURCES: &[(&str, &str)] = &[
-    (include_str!("../src/api.rs"), "/api/v1/runtime-groups"),
-    (include_str!("../src/policy_api.rs"), "/policies"),
     (
         include_str!("../src/notification/api.rs"),
         "/webhook-destinations",
@@ -59,6 +57,16 @@ const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
         include_str!("../src/resources.rs"),
         include_str!("../src/service/resources.rs"),
         "/resources",
+    ),
+    (
+        include_str!("../src/policy_api.rs"),
+        include_str!("../src/service/policies.rs"),
+        "/policies",
+    ),
+    (
+        include_str!("../src/api.rs"),
+        include_str!("../src/service/runtime_groups.rs"),
+        "/api/v1/runtime-groups",
     ),
 ];
 
