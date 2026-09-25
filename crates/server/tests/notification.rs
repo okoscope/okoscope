@@ -23,6 +23,7 @@ use server::{
         worker::{claim_due, materialize_once, process_claim, test_destination},
     },
     notification_config::NotificationArgs,
+    web_api::{self, REQUEST_ID_HEADER, WebApiConfig},
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -883,4 +884,468 @@ async fn destination_and_delivery_apis_are_secret_safe_and_tenant_scoped(pool: s
         .unwrap();
     assert_eq!(unauthorized_health.status(), StatusCode::UNAUTHORIZED);
     task.abort();
+}
+
+/// Sends a request through the web stack and returns its status and JSON
+/// body. An error body must carry the request's correlation id.
+async fn send(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    session: Option<&str>,
+    key: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", "ui.test")
+        .header("origin", "https://ui.test");
+    if let Some(session) = session {
+        builder = builder.header(COOKIE, format!("okoscope_session={session}"));
+    }
+    if let Some(key) = key {
+        builder = builder.header("idempotency-key", key);
+    }
+    if body.is_some() {
+        builder = builder.header("content-type", "application/json");
+    }
+    let request = builder
+        .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let request_id = response.headers()[REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    if status.is_client_error() || status.is_server_error() {
+        assert_eq!(body["request_id"], request_id, "{method} {uri}");
+    }
+    (status, body)
+}
+
+fn assert_error(
+    (status, body): &(StatusCode, serde_json::Value),
+    expected: StatusCode,
+    code: &str,
+    message: &str,
+    route: &str,
+) {
+    assert_eq!(*status, expected, "{route}: {body}");
+    assert_eq!(body["error"], code, "{route}");
+    assert_eq!(body["message"], message, "{route}");
+}
+
+async fn failed_delivery(
+    pool: &sqlx::PgPool,
+    ids: &server::bootstrap::BootstrapIds,
+    destination_id: Uuid,
+    status: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    let terminal = matches!(status, "failed" | "succeeded" | "cancelled");
+    let in_flight = status == "in_flight";
+    sqlx::query("INSERT INTO notification_deliveries(id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,attempt_count,max_attempts,terminal_at,last_error_class,last_error) VALUES($1,$2,$3,$4,'test','test','okoscope.test','{}',$5,$6,CASE WHEN $6::uuid IS NULL THEN NULL ELSE now()+interval '1 minute' END,1,3,CASE WHEN $7 THEN now() ELSE NULL END,CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END,CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END)")
+        .bind(id).bind(ids.organization_id).bind(ids.project_id).bind(destination_id).bind(status)
+        .bind(in_flight.then(Uuid::new_v4)).bind(terminal).execute(pool).await.unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn notification_routes_map_each_service_error_onto_the_error_envelope(pool: sqlx::PgPool) {
+    let (first, _) = tenant(&pool, "notify-errors-first").await;
+    let (second, _) = tenant(&pool, "notify-errors-second").await;
+    let owner = user_session(&pool, first.organization_id, "errors-first@example.com").await;
+    let foreign = user_session(&pool, second.organization_id, "errors-second@example.com").await;
+    let app = web_api::router(
+        server::notification::api::router(pool.clone(), service(pool.clone())),
+        &WebApiConfig::default(),
+    );
+    let project = format!("/api/v1/projects/{}", first.project_id);
+    let destinations = format!("{project}/webhook-destinations");
+    let target = serde_json::json!({"name":"receiver","url":"http://127.0.0.1:9/hook"});
+
+    let (status, created) = send(
+        &app,
+        "POST",
+        &destinations,
+        Some(&owner),
+        None,
+        Some(target.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let destination_id = created["id"].as_str().unwrap().to_owned();
+    let destination = format!("{destinations}/{destination_id}");
+    let (status, other) = send(
+        &app,
+        "POST",
+        &destinations,
+        Some(&owner),
+        None,
+        Some(serde_json::json!({"name":"standby","url":"http://127.0.0.1:9/hook"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let disabled_id: Uuid = other["id"].as_str().unwrap().parse().unwrap();
+    let destination_id: Uuid = destination_id.parse().unwrap();
+    let failed = failed_delivery(&pool, &first, destination_id, "failed").await;
+    let deliveries = format!("{project}/notification-deliveries");
+    let (status, retried) = send(
+        &app,
+        "POST",
+        &format!("{deliveries}/{failed}/retry"),
+        Some(&owner),
+        Some("retry-command-0001"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["status"], "pending");
+    let operation_id = retried["operation_id"].as_str().unwrap().to_owned();
+
+    let routes: Vec<(&str, String, Option<serde_json::Value>)> = vec![
+        ("GET", destinations.clone(), None),
+        ("POST", destinations.clone(), Some(target.clone())),
+        ("GET", destination.clone(), None),
+        (
+            "PATCH",
+            destination.clone(),
+            Some(serde_json::json!({"name":"renamed","revision":1})),
+        ),
+        ("POST", format!("{destination}/disable"), None),
+        ("POST", format!("{destination}/rotate-secret"), None),
+        ("POST", format!("{destination}/test"), None),
+        ("GET", deliveries.clone(), None),
+        (
+            "POST",
+            format!("{deliveries}/bulk-retry"),
+            Some(serde_json::json!({})),
+        ),
+        ("GET", format!("{project}/notification-health"), None),
+        ("GET", format!("{deliveries}/{failed}"), None),
+        ("POST", format!("{deliveries}/{failed}/retry"), None),
+        ("POST", format!("{deliveries}/{failed}/cancel"), None),
+        (
+            "GET",
+            format!("{project}/notification-recovery-operations"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{project}/notification-recovery-operations/{operation_id}"),
+            None,
+        ),
+    ];
+    for (method, uri, body) in &routes {
+        let route = format!("{method} {uri}");
+        let key = Some("route-command-0001");
+        assert_error(
+            &send(&app, method, uri, None, key, body.clone()).await,
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or missing bearer credential",
+            &route,
+        );
+        assert_error(
+            &send(&app, method, uri, Some(&foreign), key, body.clone()).await,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "destination not found",
+            &route,
+        );
+    }
+
+    // Unknown destinations, deliveries and operations inside a visible
+    // project are not found.
+    let unknown = Uuid::new_v4();
+    for (method, uri, body) in [
+        ("GET", format!("{destinations}/{unknown}"), None),
+        (
+            "PATCH",
+            format!("{destinations}/{unknown}"),
+            Some(serde_json::json!({"name":"renamed","revision":1})),
+        ),
+        ("POST", format!("{destinations}/{unknown}/disable"), None),
+        (
+            "POST",
+            format!("{destinations}/{unknown}/rotate-secret"),
+            None,
+        ),
+        ("GET", format!("{deliveries}/{unknown}"), None),
+        ("POST", format!("{deliveries}/{unknown}/retry"), None),
+        ("POST", format!("{deliveries}/{unknown}/cancel"), None),
+        (
+            "GET",
+            format!("{project}/notification-recovery-operations/{unknown}"),
+            None,
+        ),
+    ] {
+        let route = format!("{method} {uri}");
+        assert_error(
+            &send(
+                &app,
+                method,
+                &uri,
+                Some(&owner),
+                Some("unknown-command-0001"),
+                body,
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "destination not found",
+            &route,
+        );
+    }
+    // A test delivery to an unknown destination is reported as a failed
+    // test, not as a missing resource.
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{destinations}/{unknown}/test"),
+            Some(&owner),
+            None,
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "test delivery could not be completed",
+        "test of an unknown destination",
+    );
+
+    // Destination validation and revision conflicts.
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &destinations,
+            Some(&owner),
+            None,
+            Some(serde_json::json!({"name":"receiver","url":"http://127.0.0.1:9/hook#fragment"})),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "invalid webhook URL: fragments are prohibited",
+        "URL with a fragment",
+    );
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &destinations,
+            Some(&owner),
+            None,
+            Some(serde_json::json!({"name":" ","url":"http://127.0.0.1:9/hook"})),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        "destination name must contain between 1 and 200 characters",
+        "blank destination name",
+    );
+    assert_error(
+        &send(
+            &app,
+            "PATCH",
+            &destination,
+            Some(&owner),
+            None,
+            Some(serde_json::json!({"name":"renamed","revision":99})),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "revision_conflict",
+        "destination revision conflict",
+        "stale revision",
+    );
+    let (status, rotated) = send(
+        &app,
+        "POST",
+        &format!("{destination}/rotate-secret"),
+        Some(&owner),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rotated["secret"].as_str().unwrap().len(), 64);
+    let (status, disabled) = send(
+        &app,
+        "POST",
+        &format!("{destinations}/{disabled_id}/disable"),
+        Some(&owner),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(disabled["enabled"], false);
+
+    // Recovery commands need a well-formed idempotency key.
+    let pending = failed_delivery(&pool, &first, destination_id, "pending").await;
+    for (uri, body) in [
+        (format!("{deliveries}/{pending}/retry"), None),
+        (format!("{deliveries}/{pending}/cancel"), None),
+        (
+            format!("{deliveries}/bulk-retry"),
+            Some(serde_json::json!({})),
+        ),
+    ] {
+        assert_error(
+            &send(&app, "POST", &uri, Some(&owner), None, body.clone()).await,
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing or invalid Idempotency-Key header",
+            &uri,
+        );
+        assert_error(
+            &send(&app, "POST", &uri, Some(&owner), Some("short"), body).await,
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "idempotency key must contain 8 to 200 visible ASCII characters",
+            &uri,
+        );
+    }
+
+    // Each recovery conflict has its own code.
+    let conflict = "notification recovery command conflicts with current state";
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{deliveries}/{pending}/cancel"),
+            Some(&owner),
+            Some("retry-command-0001"),
+            None,
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "idempotency_key_reused",
+        conflict,
+        "reused key",
+    );
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{deliveries}/{pending}/retry"),
+            Some(&owner),
+            Some("retry-pending-0001"),
+            None,
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "delivery_invalid_state",
+        conflict,
+        "retry of a pending delivery",
+    );
+    let in_flight = failed_delivery(&pool, &first, destination_id, "in_flight").await;
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{deliveries}/{in_flight}/cancel"),
+            Some(&owner),
+            Some("cancel-leased-0001"),
+            None,
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "delivery_active_lease",
+        conflict,
+        "cancel of a leased delivery",
+    );
+    let unreachable = failed_delivery(&pool, &first, disabled_id, "failed").await;
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{deliveries}/{unreachable}/retry"),
+            Some(&owner),
+            Some("retry-disabled-0001"),
+            None,
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "destination_disabled",
+        conflict,
+        "retry to a disabled destination",
+    );
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &format!("{deliveries}/bulk-retry"),
+            Some(&owner),
+            Some("bulk-command-0001"),
+            Some(serde_json::json!({"limit":201})),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "bulk_limit_exceeded",
+        conflict,
+        "bulk limit",
+    );
+
+    // The successful reads of what the commands recorded.
+    let (status, operation) = send(
+        &app,
+        "GET",
+        &format!("{project}/notification-recovery-operations/{operation_id}"),
+        Some(&owner),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{operation}");
+    let (status, operations) = send(
+        &app,
+        "GET",
+        &format!("{project}/notification-recovery-operations"),
+        Some(&owner),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!operations["items"].as_array().unwrap().is_empty());
+    let (status, cancelled) = send(
+        &app,
+        "POST",
+        &format!("{deliveries}/{pending}/cancel"),
+        Some(&owner),
+        Some("cancel-pending-0001"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cancelled["status"], "cancelled");
+    let (status, bulk) = send(
+        &app,
+        "POST",
+        &format!("{deliveries}/bulk-retry"),
+        Some(&owner),
+        Some("bulk-command-0002"),
+        Some(serde_json::json!({"limit":10})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bulk}");
+    let (status, detail) = send(
+        &app,
+        "GET",
+        &format!("{deliveries}/{failed}"),
+        Some(&owner),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
 }
