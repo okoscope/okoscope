@@ -13,12 +13,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
+use crate::access_control::ProjectRole;
 use crate::application_credentials;
 use crate::auth::{SessionToken, UserPrincipal, hash_password, normalize_email, validate_password};
 use crate::repository::application_credentials::ApplicationCredentialRepository;
 use crate::repository::events::EventRepository;
 use crate::repository::installations::InstallationRepository;
-use crate::repository::{ApplicationRepository, UserRepository};
+use crate::repository::{ApplicationRepository, MembershipRepository, UserRepository};
 use crate::service::identity::{insert_identity_session, valid_name};
 use crate::transactional_mail::Locale;
 use crate::web_api::WebApiConfig;
@@ -429,7 +430,7 @@ impl OnboardingService {
         Ok(InstallationPage { items })
     }
 
-    /// One installation.
+    /// One installation of an application in a project the principal can see.
     pub async fn get_installation(
         &self,
         principal: UserPrincipal,
@@ -437,6 +438,7 @@ impl OnboardingService {
         application_id: Uuid,
         installation_id: Uuid,
     ) -> Result<Installation> {
+        self.ensure_project_access(principal, project_id).await?;
         InstallationRepository::get(
             &self.pool,
             principal.organization_id,
@@ -558,12 +560,15 @@ impl OnboardingService {
         Ok(derive_readiness(events, cred, status))
     }
 
+    /// The application must be in a project the principal can see: owners
+    /// and admins see every project, members those they hold a role in.
     async fn owned_application(
         &self,
         principal: UserPrincipal,
         project_id: Uuid,
         application_id: Uuid,
     ) -> Result<()> {
+        self.ensure_project_access(principal, project_id).await?;
         let found = ApplicationRepository::exists(
             &self.pool,
             principal.organization_id,
@@ -572,6 +577,32 @@ impl OnboardingService {
         )
         .await?;
         if found {
+            Ok(())
+        } else {
+            Err(OnboardingServiceError::NotFound)
+        }
+    }
+
+    /// A project the principal cannot see does not exist for them.
+    async fn ensure_project_access(
+        &self,
+        principal: UserPrincipal,
+        project_id: Uuid,
+    ) -> Result<()> {
+        if principal.role.inherits_project_access() {
+            return Ok(());
+        }
+        let role = MembershipRepository::project_role(
+            &self.pool,
+            principal.organization_id,
+            project_id,
+            principal.user_id,
+        )
+        .await?;
+        if role
+            .and_then(|value| value.parse::<ProjectRole>().ok())
+            .is_some()
+        {
             Ok(())
         } else {
             Err(OnboardingServiceError::NotFound)
@@ -1012,7 +1043,7 @@ mod tests {
             ));
 
             let listed = service
-                .list_installations(member, project, application)
+                .list_installations(owner, project, application)
                 .await
                 .unwrap();
             assert_eq!(listed.items.len(), 1);
@@ -1030,7 +1061,7 @@ mod tests {
             assert_eq!(updated.workload_name.as_deref(), Some("web"));
             assert_eq!(
                 service
-                    .get_installation(member, project, application, id)
+                    .get_installation(owner, project, application, id)
                     .await
                     .unwrap()
                     .workload_name
@@ -1056,10 +1087,88 @@ mod tests {
             ));
 
             let readiness = service
-                .connection_readiness(member, project, application)
+                .connection_readiness(owner, project, application)
                 .await
                 .unwrap();
             assert_eq!(readiness.state, "waiting_for_agent");
+        }
+
+        /// Installations and connection readiness belong to an application of
+        /// a project; a member who cannot see the project reads neither.
+        #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+        #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+        async fn installation_reads_need_access_to_the_project(pool: PgPool) {
+            use crate::repository::MembershipRepository;
+            use crate::repository::test_support::user;
+
+            let tenant = tenant(&pool, "onboarding-project-access").await;
+            let config = WebApiConfig::default().with_agent_installation(Some(metadata()));
+            let service = OnboardingService::new(pool.clone(), &config);
+            let owner = principal(tenant.organization_id, OrganizationRole::Owner);
+            let (project, application) = (tenant.project_id, tenant.application_id);
+            let InstallationIssue::Issued(issued) = service
+                .create_installation(owner, project, application, Some("k1"), request("api"))
+                .await
+                .unwrap()
+            else {
+                panic!("the first request issues an installation");
+            };
+            let installation = issued.installation.id;
+
+            let user_id = user(&pool).await;
+            MembershipRepository::insert_organization_role(
+                &pool,
+                tenant.organization_id,
+                user_id,
+                "member",
+            )
+            .await
+            .unwrap();
+            let member = UserPrincipal {
+                user_id,
+                ..principal(tenant.organization_id, OrganizationRole::Member)
+            };
+            assert!(matches!(
+                service
+                    .list_installations(member, project, application)
+                    .await,
+                Err(OnboardingServiceError::NotFound)
+            ));
+            assert!(matches!(
+                service
+                    .get_installation(member, project, application, installation)
+                    .await,
+                Err(OnboardingServiceError::NotFound)
+            ));
+            assert!(matches!(
+                service
+                    .connection_readiness(member, project, application)
+                    .await,
+                Err(OnboardingServiceError::NotFound)
+            ));
+
+            MembershipRepository::insert_project_role(
+                &pool,
+                tenant.organization_id,
+                project,
+                user_id,
+                "member",
+            )
+            .await
+            .unwrap();
+            let listed = service
+                .list_installations(member, project, application)
+                .await
+                .unwrap();
+            assert_eq!(listed.items.len(), 1);
+            service
+                .get_installation(member, project, application, installation)
+                .await
+                .unwrap();
+            service
+                .connection_readiness(member, project, application)
+                .await
+                .unwrap();
         }
     }
 }

@@ -395,4 +395,49 @@ async fn installation_resume_update_replace_and_readiness_are_safe(pool: sqlx::P
     )
     .await;
     assert_eq!(json(readiness).await["state"], "waiting_for_agent");
+
+    // A member of the organization without a role in the project reads none
+    // of it, as with the project's other reads.
+    let member = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
+        .bind(member)
+        .bind(format!("{member}@example.test"))
+        .bind("$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHR2YWx1ZQ$0123456789abcdef")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'member')",
+    )
+    .bind(organization_id)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let session = server::auth::SessionToken::generate();
+    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
+        .bind(uuid::Uuid::new_v4())
+        .bind(member)
+        .bind(organization_id)
+        .bind(session.digest().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let member_cookie = format!("okoscope_session={}", session.expose());
+    for path in [
+        uri.clone(),
+        item_uri.clone(),
+        format!("/api/v1/projects/{project_id}/applications/{application_id}/connection-readiness"),
+    ] {
+        let response = call(
+            &app,
+            Request::builder()
+                .uri(&path)
+                .header(header::COOKIE, &member_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }
