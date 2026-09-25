@@ -10,8 +10,8 @@
 //! compile and silently return `false` for every real project. The methods here
 //! take them as named arguments.
 //!
-//! Per-project retention settings stay in [`crate::runtime_retention::settings`]
-//! and [`crate::notification::retention_settings`], and the retention workers
+//! Per-project retention settings stay in [`crate::service::runtime_retention`]
+//! and [`crate::service::notification_retention`], and the retention workers
 //! advance their own watermarks, beside the code that interprets them.
 
 use chrono::{DateTime, Utc};

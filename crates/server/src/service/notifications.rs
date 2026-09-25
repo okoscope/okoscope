@@ -1,7 +1,9 @@
 //! A project's notifications as its members manage them: webhook
 //! destinations, delivery history and health, and recovery of failed
-//! deliveries. The notification domain ([`crate::notification`]) does the
-//! work; this service checks project access and validates the request first.
+//! deliveries. This service checks project access and validates the request,
+//! then hands destinations to [`super::notification_destinations`], recovery
+//! to [`super::notification_recovery`], and delivery history and health to
+//! the notification domain ([`crate::notification`]).
 
 use serde::Serialize;
 use thiserror::Error;
@@ -11,16 +13,18 @@ use crate::auth::IdentityPrincipal;
 use crate::notification::{
     NotificationService,
     health::{NotificationHealthResponse, load_project_snapshot},
-    recovery::{
-        BulkRecoveryResult, BulkRetryFilter, DeliveryRecoveryResult, RecoveryActor, RecoveryError,
-        RecoveryOperationDetail, RecoveryOperationFilter, RecoveryOperationSummary,
-    },
-    repository::{DestinationError, DestinationUpdate, WebhookDestination},
     webhook::{parse_url, resolve_target},
     worker::{
         DeliveryDetail, DeliveryFilter, DeliverySummary, delivery_detail, list_deliveries,
         test_destination,
     },
+};
+use crate::service::notification_destinations::{
+    DestinationError, DestinationUpdate, WebhookDestination,
+};
+use crate::service::notification_recovery::{
+    BulkRecoveryResult, BulkRetryFilter, DeliveryRecoveryResult, RecoveryActor, RecoveryError,
+    RecoveryOperationDetail, RecoveryOperationFilter, RecoveryOperationSummary,
 };
 use crate::service::project_access::project_scope;
 

@@ -1,11 +1,8 @@
 pub mod api;
 pub mod crypto;
 pub mod health;
-pub mod recovery;
-pub mod repository;
 pub mod retention;
 pub mod retention_api;
-pub mod retention_settings;
 pub mod webhook;
 pub mod worker;
 
@@ -13,9 +10,9 @@ use sqlx::PgPool;
 
 use crate::notification_config::NotificationConfig;
 
-use self::{
-    crypto::SecretVault, recovery::RecoveryRepository, repository::DestinationRepository,
-    webhook::WebhookPolicy,
+use self::{crypto::SecretVault, webhook::WebhookPolicy};
+use crate::service::{
+    notification_destinations::DestinationService, notification_recovery::RecoveryService,
 };
 
 #[derive(Clone, Debug)]
@@ -23,8 +20,8 @@ pub struct NotificationService {
     pub pool: PgPool,
     pub config: NotificationConfig,
     pub vault: SecretVault,
-    pub destinations: DestinationRepository,
-    pub recovery: RecoveryRepository,
+    pub destinations: DestinationService,
+    pub recovery: RecoveryService,
     pub policy: WebhookPolicy,
 }
 
@@ -33,8 +30,8 @@ impl NotificationService {
     pub fn new(pool: PgPool, config: NotificationConfig) -> Option<Self> {
         let key = config.encryption_key.as_ref()?;
         let vault = SecretVault::new(key);
-        let destinations = DestinationRepository::new(pool.clone(), vault.clone());
-        let recovery = RecoveryRepository::new(pool.clone(), *key);
+        let destinations = DestinationService::new(pool.clone(), vault.clone());
+        let recovery = RecoveryService::new(pool.clone(), *key);
         let policy = WebhookPolicy {
             allow_http: config.allow_http,
             allow_private_ips: config.allow_private_ips,

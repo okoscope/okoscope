@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::{IdentityPrincipal, UserSessionAuthenticator};
-use crate::runtime_retention::settings::{ProjectRetention, RetentionPolicy};
+use crate::service::runtime_retention::{ProjectRetention, RetentionPolicy};
 use crate::service::runtime_retention::{RetentionServiceError, RuntimeRetentionService};
 
 #[derive(Clone, Debug)]

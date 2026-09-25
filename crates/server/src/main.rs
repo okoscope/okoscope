@@ -633,9 +633,9 @@ async fn main() -> Result<()> {
     verify_schema(&pool)
         .await
         .context("database schema readiness")?;
-    server::notification::retention_settings::initialize(
+    server::service::notification_retention::initialize(
         &pool,
-        server::notification::retention_settings::RetentionPolicy {
+        server::service::notification_retention::RetentionPolicy {
             enabled: args.notification.retention_enabled,
             history_days: i32::try_from(
                 args.notification
