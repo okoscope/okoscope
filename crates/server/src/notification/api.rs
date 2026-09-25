@@ -22,12 +22,12 @@ use crate::{
 use super::{
     NotificationService,
     health::NotificationHealthResponse,
-    recovery::{
-        BulkRecoveryResult, BulkRetryFilter, DeliveryRecoveryResult, RecoveryConflictCode,
-        RecoveryError, RecoveryOperationDetail, RecoveryOperationFilter,
-    },
-    repository::{DestinationError, WebhookDestination},
     worker::{DeliveryDetail, DeliveryFilter, DeliverySummary},
+};
+use crate::service::notification_destinations::{DestinationError, WebhookDestination};
+use crate::service::notification_recovery::{
+    BulkRecoveryResult, BulkRetryFilter, DeliveryRecoveryResult, RecoveryConflictCode,
+    RecoveryError, RecoveryOperationDetail, RecoveryOperationFilter,
 };
 
 #[derive(Clone, Debug)]

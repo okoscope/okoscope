@@ -5,7 +5,12 @@ use axum::{
 };
 use server::{
     auth::{SessionToken, hash_password},
-    notification::retention_settings::{self, RetentionPolicy},
+    service::{
+        notification_retention::{
+            self as retention_settings, NotificationHistory, RetentionPolicy,
+        },
+        retention::RetentionSettings,
+    },
 };
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -239,7 +244,7 @@ async fn legacy_import_is_once_and_new_organizations_keep_defaults(pool: PgPool)
     a.unwrap();
     b.unwrap();
     assert_eq!(
-        retention_settings::organization(&pool, old).await.unwrap(),
+        NotificationHistory::organization(&pool, old).await.unwrap(),
         Some(legacy)
     );
     sqlx::query("UPDATE organizations SET notification_retention_enabled=false,notification_retention_days=7 WHERE id=$1")
@@ -247,14 +252,14 @@ async fn legacy_import_is_once_and_new_organizations_keep_defaults(pool: PgPool)
     let (new, _) = tenant(&pool).await;
     retention_settings::initialize(&pool, legacy).await.unwrap();
     assert_eq!(
-        retention_settings::organization(&pool, old).await.unwrap(),
+        NotificationHistory::organization(&pool, old).await.unwrap(),
         Some(RetentionPolicy {
             enabled: false,
             history_days: 7
         })
     );
     assert_eq!(
-        retention_settings::organization(&pool, new).await.unwrap(),
+        NotificationHistory::organization(&pool, new).await.unwrap(),
         Some(RetentionPolicy {
             enabled: false,
             history_days: 90

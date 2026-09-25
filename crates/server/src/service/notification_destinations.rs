@@ -1,3 +1,9 @@
+//! A project's webhook destinations: creating, changing, disabling them and
+//! rotating their signing secrets. Secrets are sealed with the notification
+//! [`SecretVault`] before they reach storage and are shown in the clear only
+//! on creation and rotation. Project access is checked by the caller,
+//! [`super::notifications`].
+
 use crate::repository::notification_deliveries::NotificationDeliveryRepository;
 use crate::repository::webhook_destinations::WebhookDestinationRepository;
 use chrono::{DateTime, Utc};
@@ -7,7 +13,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::crypto::{SecretVault, SecretVaultError};
+use crate::notification::crypto::{SecretVault, SecretVaultError};
 
 #[derive(Clone, Debug, FromRow, Serialize)]
 pub struct WebhookDestination {
@@ -24,7 +30,7 @@ pub struct WebhookDestination {
 }
 
 #[derive(Clone, Debug)]
-pub struct DestinationRepository {
+pub struct DestinationService {
     pool: PgPool,
     vault: SecretVault,
 }
@@ -61,7 +67,7 @@ pub enum DestinationError {
     Vault(#[from] SecretVaultError),
 }
 
-impl DestinationRepository {
+impl DestinationService {
     #[must_use]
     pub fn new(pool: PgPool, vault: SecretVault) -> Self {
         Self { pool, vault }

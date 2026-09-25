@@ -242,7 +242,7 @@ async fn destination_schema_lifecycle_and_tenant_ownership(pool: sqlx::PgPool) {
             first.organization_id,
             first.project_id,
             destination.id,
-            server::notification::repository::DestinationUpdate {
+            server::service::notification_destinations::DestinationUpdate {
                 name: Some("renamed"),
                 url: None,
                 deliver_backfill: None,
@@ -253,7 +253,7 @@ async fn destination_schema_lifecycle_and_tenant_ownership(pool: sqlx::PgPool) {
         .await;
     assert!(matches!(
         conflict,
-        Err(server::notification::repository::DestinationError::RevisionConflict)
+        Err(server::service::notification_destinations::DestinationError::RevisionConflict)
     ));
     let (_, rotated) = service
         .destinations
@@ -652,7 +652,7 @@ async fn retries_suppresses_backfill_and_test_is_outbox_independent(pool: sqlx::
             ids.organization_id,
             ids.project_id,
             destination.id,
-            server::notification::repository::DestinationUpdate {
+            server::service::notification_destinations::DestinationUpdate {
                 name: None,
                 url: None,
                 deliver_backfill: Some(true),
