@@ -992,6 +992,37 @@ async fn notification_routes_map_each_service_error_onto_the_error_envelope(pool
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let disabled_id: Uuid = other["id"].as_str().unwrap().parse().unwrap();
+    // A name is taken once per project, on creation and on rename.
+    assert_error(
+        &send(
+            &app,
+            "POST",
+            &destinations,
+            Some(&owner),
+            None,
+            Some(target.clone()),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "destination_name_conflict",
+        "destination name already exists",
+        "duplicate name",
+    );
+    assert_error(
+        &send(
+            &app,
+            "PATCH",
+            &format!("{destinations}/{disabled_id}"),
+            Some(&owner),
+            None,
+            Some(serde_json::json!({"name":"receiver","revision":other["revision"]})),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "destination_name_conflict",
+        "destination name already exists",
+        "rename to a taken name",
+    );
     let destination_id: Uuid = destination_id.parse().unwrap();
     let failed = failed_delivery(&pool, &first, destination_id, "failed").await;
     let deliveries = format!("{project}/notification-deliveries");

@@ -8,6 +8,15 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Adding a user who does not exist, or is not a member of the organization,
+  to a project now answers `404 user_not_found` instead of `500`.
+- Revoking the super administrator role of a user who does not exist now
+  answers `404 user_not_found` instead of `500`.
+- Creating or renaming a webhook destination to a name already used in the
+  project now answers `409 destination_name_conflict` instead of `500`.
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

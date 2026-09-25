@@ -878,6 +878,9 @@ impl AccessService {
         let actor = require_platform(principal, true)?;
         let mut tx = self.pool.begin().await?;
         MembershipRepository::lock_authority(&mut *tx).await?;
+        if !UserRepository::exists(&mut *tx, user_id).await? {
+            return Err(AccessServiceError::NotFound(AccessTarget::User));
+        }
         let result = UserRepository::revoke_super_admin(&mut *tx, user_id).await;
         map_authority_result(result, AccessConflict::LastSuperAdminRequired)?;
         SessionRepository::revoke_all_for_user(&mut *tx, user_id, None).await?;
@@ -1122,6 +1125,13 @@ impl AccessService {
                 .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
             {
                 AccessServiceError::Conflict(AccessConflict::MembershipExists)
+            } else if error
+                .as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_foreign_key_violation)
+            {
+                // A project member must belong to the organization; a user
+                // who does not, or does not exist, is not found here.
+                AccessServiceError::NotFound(AccessTarget::User)
             } else {
                 AccessServiceError::Database(error)
             }
@@ -2104,6 +2114,36 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(sessions, 0);
+        }
+
+        #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+        #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+        async fn users_outside_the_platform_or_organization_are_not_found(pool: PgPool) {
+            let tenant = tenant(&pool, "unknown-users").await;
+            let service = AccessService::new(pool.clone(), &WebApiConfig::default());
+            let owner = member(&pool, &tenant, OrganizationRole::Owner).await;
+            let outsider = user(&pool).await;
+            for user_id in [Uuid::new_v4(), outsider] {
+                assert!(matches!(
+                    service
+                        .add_project_member(
+                            owner,
+                            tenant.project_id,
+                            user_id,
+                            ProjectRole::Member,
+                            "request"
+                        )
+                        .await,
+                    Err(AccessServiceError::NotFound(AccessTarget::User))
+                ));
+            }
+            let administrator = super_admin(user(&pool).await, true);
+            assert!(matches!(
+                service
+                    .revoke_super_admin(administrator, Uuid::new_v4(), "request")
+                    .await,
+                Err(AccessServiceError::NotFound(AccessTarget::User))
+            ));
         }
     }
 }

@@ -354,6 +354,17 @@ impl UserRepository {
         .await
     }
 
+    /// Reports whether an account with this id exists, active or not.
+    pub async fn exists<'e, E>(executor: E, user_id: Uuid) -> Result<bool, sqlx::Error>
+    where
+        E: PgExecutor<'e>,
+    {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+            .bind(user_id)
+            .fetch_one(executor)
+            .await
+    }
+
     /// Reports whether any account holds this address, active or not.
     ///
     /// This deliberately ignores [`ACTIVE`]: it answers "is this address

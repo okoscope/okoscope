@@ -103,6 +103,7 @@ enum ApiError {
     Invalid(String),
     NotFound,
     Conflict,
+    NameConflict,
     RecoveryConflict(RecoveryConflictCode),
     Database(sqlx::Error),
 }
@@ -127,6 +128,11 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 ErrorCode::REVISION_CONFLICT,
                 "destination revision conflict".into(),
+            ),
+            Self::NameConflict => (
+                StatusCode::CONFLICT,
+                ErrorCode::DESTINATION_NAME_CONFLICT,
+                "destination name already exists".into(),
             ),
             Self::RecoveryConflict(conflict) => (
                 StatusCode::CONFLICT,
@@ -163,6 +169,7 @@ impl From<DestinationError> for ApiError {
         match error {
             DestinationError::NotFound => Self::NotFound,
             DestinationError::RevisionConflict => Self::Conflict,
+            DestinationError::NameConflict => Self::NameConflict,
             DestinationError::InvalidName => Self::Invalid(error.to_string()),
             DestinationError::Database(error) => Self::Database(error),
             DestinationError::Vault(error) => {

@@ -77,6 +77,7 @@ impl ErrorCode {
     pub const DELIVERY_ACTIVE_LEASE: Self = Self("delivery_active_lease");
     pub const DELIVERY_INVALID_STATE: Self = Self("delivery_invalid_state");
     pub const DESTINATION_DISABLED: Self = Self("destination_disabled");
+    pub const DESTINATION_NAME_CONFLICT: Self = Self("destination_name_conflict");
     pub const INVALID_IDENTITY_TOKEN: Self = Self("invalid_identity_token");
     pub const EXPIRED_IDENTITY_TOKEN: Self = Self("expired_identity_token");
     pub const IDENTITY_TOKEN_SCOPE_MISMATCH: Self = Self("identity_token_scope_mismatch");
@@ -141,6 +142,7 @@ impl ErrorCode {
         Self::DELIVERY_ACTIVE_LEASE,
         Self::DELIVERY_INVALID_STATE,
         Self::DESTINATION_DISABLED,
+        Self::DESTINATION_NAME_CONFLICT,
         Self::INVALID_IDENTITY_TOKEN,
         Self::EXPIRED_IDENTITY_TOKEN,
         Self::IDENTITY_TOKEN_SCOPE_MISMATCH,
