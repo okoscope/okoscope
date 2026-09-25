@@ -14,7 +14,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
-use crate::access_control::{ProjectRole, can_manage_project_role, resolve_project_access};
+use crate::access_control::{ProjectRole, can_manage_project_role};
 use crate::auth::{
     IdentityPrincipal, OrganizationRole, SessionToken, hash_password, normalize_email,
     validate_password,
@@ -24,6 +24,7 @@ use crate::repository::{
     MembershipRepository, OrganizationRepository, ProjectRepository, UserRepository,
 };
 use crate::service::identity::{insert_session_with_context, valid_name};
+use crate::service::project_access::{ProjectScope, project_scope};
 use crate::transactional_mail::{Locale, MailConfig, MailError, TemplateData, enqueue_invitation};
 use crate::web_api::{InvitationConfig, WebApiConfig};
 
@@ -750,11 +751,10 @@ impl InvitationService {
         principal: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<ProjectActor> {
-        let organization_id: Option<Uuid> =
-            ProjectRepository::organization_of(&self.pool, project_id).await?;
-        let organization_id =
-            organization_id.ok_or(InvitationServiceError::NotFound(InvitationTarget::Project))?;
-        let access = resolve_project_access(&self.pool, principal, organization_id, project_id)
+        let ProjectScope {
+            organization_id,
+            access,
+        } = project_scope(&self.pool, principal, project_id)
             .await?
             .ok_or(InvitationServiceError::NotFound(InvitationTarget::Project))?;
         if !access.can_manage_members() {
