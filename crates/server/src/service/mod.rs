@@ -36,6 +36,7 @@
 
 pub mod accounts;
 pub mod agent_health;
+pub mod agent_sessions;
 pub mod attention;
 pub mod dns_groups;
 pub mod identity;
