@@ -10,8 +10,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::{IdentityPrincipal, UserSessionAuthenticator};
-use crate::notification::retention_settings::{ProjectRetention, RetentionPolicy};
 use crate::service::notification_retention::{NotificationRetentionService, RetentionServiceError};
+use crate::service::notification_retention::{ProjectRetention, RetentionPolicy};
 
 #[derive(Clone, Debug)]
 struct ApiState {

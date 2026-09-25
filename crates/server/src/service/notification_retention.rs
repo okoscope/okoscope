@@ -1,13 +1,12 @@
 //! How long notification history is kept, per organization and project.
-//! The use cases are in [`super::retention`].
+//! The policy types and where they are stored are here; the use cases are in
+//! [`super::retention`].
 
-use sqlx::PgPool;
-use uuid::Uuid;
-
-use crate::notification::retention_settings::{
-    self as settings, ProjectRetention, RetentionPolicy,
-};
+use crate::repository::notification_retention::NotificationRetentionRepository;
 use crate::service::retention::{RetentionService, RetentionSettings};
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
 
 pub use crate::service::retention::RetentionServiceError;
 
@@ -29,7 +28,7 @@ impl RetentionSettings for NotificationHistory {
         pool: &PgPool,
         organization_id: Uuid,
     ) -> Result<Option<RetentionPolicy>, sqlx::Error> {
-        settings::organization(pool, organization_id).await
+        NotificationRetentionRepository::organization_policy(pool, organization_id).await
     }
 
     async fn project(
@@ -37,7 +36,31 @@ impl RetentionSettings for NotificationHistory {
         organization_id: Uuid,
         project_id: Uuid,
     ) -> Result<Option<ProjectRetention>, sqlx::Error> {
-        settings::project(pool, organization_id, project_id).await
+        let row: Option<ProjectPolicyRow> =
+            NotificationRetentionRepository::project_policy(pool, organization_id, project_id)
+                .await?;
+        Ok(row.map(|row| {
+            let policy_override =
+                row.override_enabled
+                    .zip(row.override_days)
+                    .map(|(enabled, history_days)| RetentionPolicy {
+                        enabled,
+                        history_days,
+                    });
+            ProjectRetention {
+                source: if policy_override.is_some() {
+                    "project"
+                } else {
+                    "organization"
+                },
+                policy_override,
+                effective: row.effective,
+                inherited: RetentionPolicy {
+                    enabled: row.inherited_enabled,
+                    history_days: row.inherited_days,
+                },
+            }
+        }))
     }
 
     async fn set_organization(
@@ -46,7 +69,15 @@ impl RetentionSettings for NotificationHistory {
         actor: Uuid,
         policy: RetentionPolicy,
     ) -> Result<(), sqlx::Error> {
-        settings::set_organization(pool, organization_id, actor, policy).await
+        NotificationRetentionRepository::set_organization_policy(
+            pool,
+            organization_id,
+            policy.enabled,
+            policy.history_days,
+            actor,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn set_project(
@@ -56,8 +87,65 @@ impl RetentionSettings for NotificationHistory {
         actor: Uuid,
         policy: Option<RetentionPolicy>,
     ) -> Result<(), sqlx::Error> {
-        settings::set_project(pool, organization_id, project_id, actor, policy).await
+        NotificationRetentionRepository::set_project_override(
+            pool,
+            organization_id,
+            project_id,
+            policy.map(|p| p.enabled),
+            policy.map(|p| p.history_days),
+            actor,
+        )
+        .await?;
+        Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionPolicy {
+    pub enabled: bool,
+    pub history_days: i32,
+}
+
+impl RetentionPolicy {
+    pub fn valid(self) -> bool {
+        (1..=3650).contains(&self.history_days)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectRetention {
+    #[serde(rename = "override")]
+    pub policy_override: Option<RetentionPolicy>,
+    pub effective: RetentionPolicy,
+    pub inherited: RetentionPolicy,
+    pub source: &'static str,
+}
+
+/// Import only organizations present when migration 22 ran; never overwrite user edits.
+pub async fn initialize(pool: &PgPool, legacy: RetentionPolicy) -> Result<(), sqlx::Error> {
+    if !legacy.valid() {
+        return Err(sqlx::Error::Protocol(
+            "invalid legacy retention window".into(),
+        ));
+    }
+    NotificationRetentionRepository::initialize_organizations(
+        pool,
+        legacy.enabled,
+        legacy.history_days,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(FromRow)]
+struct ProjectPolicyRow {
+    override_enabled: Option<bool>,
+    override_days: Option<i32>,
+    #[sqlx(flatten)]
+    effective: RetentionPolicy,
+    inherited_enabled: bool,
+    inherited_days: i32,
 }
 
 #[cfg(test)]

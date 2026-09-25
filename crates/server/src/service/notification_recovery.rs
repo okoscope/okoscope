@@ -1,3 +1,9 @@
+//! Recovery of failed webhook deliveries: retrying or cancelling one
+//! delivery, retrying a filtered batch, and the audit of those operations.
+//! Every command is idempotent under its key: a repeated key with the same
+//! request replays the recorded result, and with a different request it is a
+//! conflict. Project access is checked by the caller, [`super::notifications`].
+
 use crate::repository::notification_deliveries::NotificationDeliveryRepository;
 use crate::repository::notification_recovery::NotificationRecoveryRepository;
 use chrono::{DateTime, Utc};
@@ -161,7 +167,7 @@ struct LockedDelivery {
 }
 
 #[derive(Clone, Debug)]
-pub struct RecoveryRepository {
+pub struct RecoveryService {
     pool: PgPool,
     hash_key: [u8; 32],
 }
@@ -180,7 +186,7 @@ pub enum RecoveryError {
     Database(#[from] sqlx::Error),
 }
 
-impl RecoveryRepository {
+impl RecoveryService {
     #[must_use]
     pub fn new(pool: PgPool, hash_key: [u8; 32]) -> Self {
         Self { pool, hash_key }
@@ -728,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn hashes_keys_without_exposing_them() {
         let repository =
-            RecoveryRepository::new(PgPool::connect_lazy("postgres://unused").unwrap(), [7; 32]);
+            RecoveryService::new(PgPool::connect_lazy("postgres://unused").unwrap(), [7; 32]);
         let first = repository.idempotency_hash("retry-command-1").unwrap();
         assert_eq!(
             first,
