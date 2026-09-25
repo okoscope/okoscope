@@ -28,24 +28,45 @@ querying, and presentation.
 
 ## Server layering
 
-The server separates request handling from persistence:
+The server is split into three layers. Each depends only on the one below it.
 
 | Layer | Location | Responsibility |
 | --- | --- | --- |
-| Transport | `*_api.rs`, `api.rs`, `navigation.rs` | Parse and authorize requests, map domain errors onto the HTTP error envelope, serialize responses. |
+| Transport | axum handlers (`*_api.rs`, `api.rs`, `navigation.rs`, `notification/api.rs`, ...) and the agent gRPC session (`session.rs`) | Authenticate the caller, parse the request, call one service method, map its result or error onto a status, error code and message, record request metrics. |
+| Service | `service/` | Carry the use case: authorization against the authenticated principal, input validation, the order of repository calls, and which of them share a transaction. Each service has its own error enum and knows nothing about HTTP or gRPC. |
 | Persistence | `repository/` | Own SQL statement text, row types, and tenant-scoping predicates. |
 
-A shared entity queried from more than one endpoint belongs in a repository
-rather than in a handler, so that its tenant-scoping predicate is written and
-reviewed once. Repository methods are generic over `sqlx::PgExecutor`: a caller
-passes a pool for a standalone read or a transaction handle to enlist the
-statement in its own unit of work. Repositories never open or commit
-transactions, and they return `sqlx::Error` because the status code for a
-persistence failure depends on the endpoint, not on the query.
+Transport code never calls a repository, runs a query, resolves project
+access, or opens a transaction; it asks a service. The few places that do
+(the session extractor in `auth.rs`, the gauges in `metrics.rs`, a startup
+check in `main.rs`) are listed with their reason in
+`crates/server/tests/layers.rs`, which fails when a new one appears or an
+existing one is no longer needed. The same test checks that services do not
+use axum or tonic and that repositories do not open transactions.
+
+Service methods take the authenticated principal first, then the scope the
+request names, then the parsed inputs. The order of checks inside a use case
+decides which error a request that is wrong in several ways gets, so it is
+part of the use case's behaviour. Results live with the service; where a
+response body is exactly that result, the type derives `Serialize` and the
+transport sends it as it is.
+
+A shared entity queried from more than one use case belongs in a repository,
+so that its tenant-scoping predicate is written and reviewed once. Repository
+methods are generic over `sqlx::PgExecutor`: a caller passes a pool for a
+standalone read or a transaction handle to enlist the statement in its own
+unit of work. Repositories never open or commit transactions, and they return
+`sqlx::Error` because what a persistence failure means depends on the use
+case, not on the query.
 
 Persistence rows are distinct from response bodies. A repository returns a row
-type; the endpoint projects it into the serializable shape named in the OpenAPI
-contract, so that table layout and public JSON evolve independently.
+type; the service or endpoint projects it into the serializable shape named in
+the OpenAPI contract, so that table layout and public JSON evolve
+independently.
+
+Background work (ingestion projections, retention and notification workers,
+release discovery) runs outside request handling and uses repositories
+directly.
 
 ## Trust boundaries
 
