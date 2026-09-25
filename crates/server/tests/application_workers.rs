@@ -214,13 +214,23 @@ async fn workers_are_evidence_based_paginated_and_tenant_safe(pool: sqlx::PgPool
         .unwrap();
     assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
     let foreign = app
+        .clone()
         .oneshot(request(&base, &second_config.api_credential))
         .await
         .unwrap();
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    // A member of the organization without a role in the project does not
+    // see its workers, as with the project's other reads.
+    let member = session(&pool, first.organization_id, "member").await;
+    let hidden = app.oneshot(request(&base, &member)).await.unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
 }
 
 async fn owner_session(pool: &sqlx::PgPool, organization: Uuid) -> String {
+    session(pool, organization, "owner").await
+}
+
+async fn session(pool: &sqlx::PgPool, organization: Uuid, role: &str) -> String {
     let user = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)")
         .bind(user)
@@ -230,10 +240,11 @@ async fn owner_session(pool: &sqlx::PgPool, organization: Uuid) -> String {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+        "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
     )
     .bind(organization)
     .bind(user)
+    .bind(role)
     .execute(pool)
     .await
     .unwrap();

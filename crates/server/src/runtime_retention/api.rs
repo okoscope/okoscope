@@ -9,12 +9,15 @@ use axum::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::settings::{self as settings, ProjectRetention, RetentionPolicy};
-use crate::repository::ProjectRepository;
-use crate::{
-    access_control::{EffectiveProjectAccess, resolve_project_access},
-    auth::{IdentityPrincipal, OrganizationRole, UserSessionAuthenticator},
-};
+use crate::auth::{IdentityPrincipal, UserSessionAuthenticator};
+use crate::runtime_retention::settings::{ProjectRetention, RetentionPolicy};
+use crate::service::runtime_retention::{RetentionServiceError, RuntimeRetentionService};
+
+#[derive(Clone, Debug)]
+struct ApiState {
+    auth: UserSessionAuthenticator,
+    service: RuntimeRetentionService,
+}
 
 #[derive(Debug)]
 enum ApiError {
@@ -67,6 +70,17 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<RetentionServiceError> for ApiError {
+    fn from(error: RetentionServiceError) -> Self {
+        match error {
+            RetentionServiceError::Forbidden => Self::Forbidden,
+            RetentionServiceError::NotFound => Self::NotFound,
+            RetentionServiceError::Invalid => Self::Invalid,
+            RetentionServiceError::Database(error) => Self::Database(error),
+        }
+    }
+}
+
 pub fn router(pool: PgPool) -> Router {
     Router::new()
         .route(
@@ -77,142 +91,72 @@ pub fn router(pool: PgPool) -> Router {
             "/api/v1/projects/{project_id}/runtime-retention",
             get(get_project).put(put_project).delete(delete_project),
         )
-        .with_state(pool)
+        .with_state(ApiState {
+            auth: UserSessionAuthenticator::new(pool.clone()),
+            service: RuntimeRetentionService::new(pool),
+        })
 }
 
-async fn principal(pool: &PgPool, headers: &HeaderMap) -> Result<IdentityPrincipal, ApiError> {
-    UserSessionAuthenticator::new(pool.clone())
+async fn principal(state: &ApiState, headers: &HeaderMap) -> Result<IdentityPrincipal, ApiError> {
+    state
+        .auth
         .authenticate_identity_headers(headers)
         .await?
         .ok_or(ApiError::Unauthorized)
 }
 
-fn owner(principal: IdentityPrincipal, organization_id: Uuid) -> Result<(), ApiError> {
-    if principal.is_super_admin
-        || principal.active_organization_id == Some(organization_id)
-            && principal.organization_role == Some(OrganizationRole::Owner)
-    {
-        Ok(())
-    } else {
-        Err(ApiError::Forbidden)
-    }
-}
-
-fn validate(policy: RetentionPolicy) -> Result<(), ApiError> {
-    if policy.valid() {
-        Ok(())
-    } else {
-        Err(ApiError::Invalid)
-    }
-}
-
-async fn owned_organization(
-    pool: &PgPool,
-    user: IdentityPrincipal,
-    id: Uuid,
-) -> Result<RetentionPolicy, ApiError> {
-    let can_read = user.is_super_admin
-        || user.active_organization_id == Some(id)
-            && user
-                .organization_role
-                .is_some_and(OrganizationRole::inherits_project_access);
-    if !can_read {
-        return Err(ApiError::NotFound);
-    }
-    settings::organization(pool, id)
-        .await?
-        .ok_or(ApiError::NotFound)
-}
-
-async fn owned_project(
-    pool: &PgPool,
-    user: IdentityPrincipal,
-    id: Uuid,
-) -> Result<(Uuid, EffectiveProjectAccess, ProjectRetention), ApiError> {
-    let organization_id: Uuid = ProjectRepository::organization_of(pool, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let access = resolve_project_access(pool, user, organization_id, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let retention = settings::project(pool, organization_id, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    Ok((organization_id, access, retention))
-}
-
 async fn get_organization(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<RetentionPolicy>, ApiError> {
-    let user = principal(&pool, &headers).await?;
-    Ok(Json(owned_organization(&pool, user, id).await?))
+    let user = principal(&state, &headers).await?;
+    Ok(Json(state.service.organization(user, id).await?))
 }
 
 async fn put_organization(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     payload: Result<Json<RetentionPolicy>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<RetentionPolicy>, ApiError> {
-    let user = principal(&pool, &headers).await?;
-    if !user.is_super_admin && user.active_organization_id != Some(id) {
-        return Err(ApiError::NotFound);
-    }
-    owner(user, id)?;
-    owned_organization(&pool, user, id).await?;
-    let Json(policy) = payload.map_err(|_| ApiError::Invalid)?;
-    validate(policy)?;
-    settings::set_organization(&pool, id, user.user_id, policy).await?;
-    Ok(Json(policy))
+    let user = principal(&state, &headers).await?;
+    // A body that is not a policy is refused after the authority checks.
+    let policy = payload.ok().map(|Json(policy)| policy);
+    Ok(Json(
+        state.service.set_organization(user, id, policy).await?,
+    ))
 }
 
 async fn get_project(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<ProjectRetention>, ApiError> {
-    let user = principal(&pool, &headers).await?;
-    let (_, _, retention) = owned_project(&pool, user, id).await?;
-    Ok(Json(retention))
-}
-
-async fn change_project(
-    pool: &PgPool,
-    headers: &HeaderMap,
-    id: Uuid,
-    policy: Option<RetentionPolicy>,
-) -> Result<Json<ProjectRetention>, ApiError> {
-    let user = principal(pool, headers).await?;
-    let (organization_id, access, _) = owned_project(pool, user, id).await?;
-    if !access.can_manage_members() {
-        return Err(ApiError::Forbidden);
-    }
-    if let Some(policy) = policy {
-        validate(policy)?;
-    }
-    settings::set_project(pool, organization_id, id, user.user_id, policy).await?;
-    let (_, _, retention) = owned_project(pool, user, id).await?;
-    Ok(Json(retention))
+    let user = principal(&state, &headers).await?;
+    Ok(Json(state.service.project(user, id).await?))
 }
 
 async fn put_project(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     payload: Result<Json<RetentionPolicy>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<ProjectRetention>, ApiError> {
     let Json(policy) = payload.map_err(|_| ApiError::Invalid)?;
-    change_project(&pool, &headers, id, Some(policy)).await
+    let user = principal(&state, &headers).await?;
+    Ok(Json(
+        state.service.change_project(user, id, Some(policy)).await?,
+    ))
 }
 
 async fn delete_project(
-    State(pool): State<PgPool>,
+    State(state): State<ApiState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<ProjectRetention>, ApiError> {
-    change_project(&pool, &headers, id, None).await
+    let user = principal(&state, &headers).await?;
+    Ok(Json(state.service.change_project(user, id, None).await?))
 }
 
 #[cfg(test)]

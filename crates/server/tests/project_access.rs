@@ -5,23 +5,8 @@ use server::{
 };
 use uuid::Uuid;
 
-const ROUTE_SOURCES: &[(&str, &str)] = &[
-    (
-        include_str!("../src/notification/api.rs"),
-        "/webhook-destinations",
-    ),
-    (
-        include_str!("../src/notification/retention_api.rs"),
-        "/notification-retention",
-    ),
-    (
-        include_str!("../src/runtime_retention/api.rs"),
-        "/runtime-retention",
-    ),
-];
-
-/// Route families whose use cases live in a service: the route is in the
-/// handler, the project access check in the service it calls.
+/// Every project route family: the route is in the handler, the project
+/// access check in the service it calls.
 const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
     (
         include_str!("../src/releases.rs"),
@@ -68,20 +53,25 @@ const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
         include_str!("../src/service/runtime_groups.rs"),
         "/api/v1/runtime-groups",
     ),
+    (
+        include_str!("../src/notification/api.rs"),
+        include_str!("../src/service/notifications.rs"),
+        "/webhook-destinations",
+    ),
+    (
+        include_str!("../src/notification/retention_api.rs"),
+        include_str!("../src/service/notification_retention.rs"),
+        "/notification-retention",
+    ),
+    (
+        include_str!("../src/runtime_retention/api.rs"),
+        include_str!("../src/service/runtime_retention.rs"),
+        "/runtime-retention",
+    ),
 ];
 
 #[test]
 fn every_descendant_route_family_has_a_project_access_seam() {
-    for (source, route_family) in ROUTE_SOURCES {
-        assert!(
-            source.contains(route_family),
-            "missing route family {route_family}"
-        );
-        assert!(
-            source.contains("resolve_project_access"),
-            "{route_family} bypasses the common project resolver"
-        );
-    }
     for (handler, service, route_family) in SERVICE_ROUTE_SOURCES {
         assert!(
             handler.contains(route_family),
