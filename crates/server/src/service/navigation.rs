@@ -12,8 +12,9 @@ use uuid::Uuid;
 
 use crate::access_control::ProjectRole;
 use crate::auth::UserPrincipal;
+use crate::repository::ApplicationRepository;
 use crate::repository::navigation::NavigationRepository;
-use crate::repository::{ApplicationRepository, MembershipRepository};
+use crate::service::project_access::member_project_role;
 
 /// Why a navigation read failed.
 #[derive(Debug, Error)]
@@ -106,24 +107,6 @@ fn scoped_capabilities(role: ProjectRole, organization_admin: bool) -> serde_jso
         "organization_roles_grantable": if organization_admin { vec!["owner", "admin", "member"] } else { Vec::<&str>::new() },
         "project_roles_grantable": if organization_admin { vec!["admin", "member"] } else if project_admin { vec!["member"] } else { Vec::<&str>::new() },
     })
-}
-
-async fn effective_project_access(
-    pool: &PgPool,
-    principal: UserPrincipal,
-    project_id: Uuid,
-) -> Result<Option<(ProjectRole, &'static str)>, sqlx::Error> {
-    if principal.role.inherits_project_access() {
-        return Ok(Some((ProjectRole::Admin, "organization")));
-    }
-    let role = MembershipRepository::project_role(
-        pool,
-        principal.organization_id,
-        project_id,
-        principal.user_id,
-    )
-    .await?;
-    Ok(role.and_then(|value| Some((value.parse().ok()?, "project"))))
 }
 
 fn apply_project_access(
@@ -297,7 +280,7 @@ impl NavigationService {
         let organization_admin = principal.role.inherits_project_access();
         let mut visible = Vec::with_capacity(items.len());
         for mut item in items.drain(..) {
-            if let Some((role, source)) = effective_project_access(&self.pool, principal, item.id)
+            if let Some((role, source)) = member_project_role(&self.pool, principal, item.id)
                 .await
                 .map_err(NavigationServiceError::Database)?
             {
@@ -323,7 +306,7 @@ impl NavigationService {
         .await
         .map_err(NavigationServiceError::Database)?
         .ok_or(NavigationServiceError::NotFound)?;
-        let (role, source) = effective_project_access(&self.pool, principal, project_id)
+        let (role, source) = member_project_role(&self.pool, principal, project_id)
             .await
             .map_err(NavigationServiceError::Database)?
             .ok_or(NavigationServiceError::NotFound)?;
@@ -343,11 +326,10 @@ impl NavigationService {
         project_id: Uuid,
         query: PageQuery,
     ) -> Result<Page<ApplicationSummary>, NavigationServiceError> {
-        let (access_role, access_source) =
-            effective_project_access(&self.pool, principal, project_id)
-                .await
-                .map_err(NavigationServiceError::Database)?
-                .ok_or(NavigationServiceError::NotFound)?;
+        let (access_role, access_source) = member_project_role(&self.pool, principal, project_id)
+            .await
+            .map_err(NavigationServiceError::Database)?
+            .ok_or(NavigationServiceError::NotFound)?;
         ensure_project(&self.pool, principal.organization_id, project_id)
             .await
             .map_err(NavigationServiceError::Database)?
@@ -397,11 +379,10 @@ impl NavigationService {
         project_id: Uuid,
         application_id: Uuid,
     ) -> Result<ApplicationSummary, NavigationServiceError> {
-        let (access_role, access_source) =
-            effective_project_access(&self.pool, principal, project_id)
-                .await
-                .map_err(NavigationServiceError::Database)?
-                .ok_or(NavigationServiceError::NotFound)?;
+        let (access_role, access_source) = member_project_role(&self.pool, principal, project_id)
+            .await
+            .map_err(NavigationServiceError::Database)?
+            .ok_or(NavigationServiceError::NotFound)?;
         let mut item = NavigationRepository::application::<_, ApplicationSummary>(
             &self.pool,
             principal.organization_id,
@@ -429,7 +410,7 @@ impl NavigationService {
         application_id: Uuid,
         query: WorkerPageQuery,
     ) -> Result<WorkerPage, NavigationServiceError> {
-        effective_project_access(&self.pool, principal, project_id)
+        member_project_role(&self.pool, principal, project_id)
             .await
             .map_err(NavigationServiceError::Database)?
             .ok_or(NavigationServiceError::NotFound)?;
@@ -515,6 +496,7 @@ impl NavigationService {
 mod tests {
     use super::*;
     use crate::auth::OrganizationRole;
+    use crate::repository::MembershipRepository;
     use crate::repository::test_support::{Tenant, exec, ingest, tenant, user};
 
     fn member(tenant: &Tenant, user_id: Uuid, role: OrganizationRole) -> UserPrincipal {

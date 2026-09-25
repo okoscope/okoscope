@@ -16,11 +16,11 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::application_credentials::ApplicationCredentialScope;
 use crate::auth::{IdentityPrincipal, SessionScope};
 use crate::repository::resources::ResourceRepository;
 use crate::repository::{ApplicationRepository, ProjectRepository};
+use crate::service::project_access::project_scope;
 
 /// Why a resource read failed.
 #[derive(Debug, Error)]
@@ -883,13 +883,10 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, ResourceServiceError> {
-    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+    let scope = project_scope(&state.pool, principal, project_id)
         .await?
         .ok_or(ResourceServiceError::NotFound)?;
-    resolve_project_access(&state.pool, principal, organization_id, project_id)
-        .await?
-        .ok_or(ResourceServiceError::NotFound)?;
-    Ok(organization_id)
+    Ok(scope.organization_id)
 }
 
 async fn ensure_application(
