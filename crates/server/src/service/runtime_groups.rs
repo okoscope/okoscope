@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
+use crate::repository::ApplicationRepository;
 use crate::repository::event_groups::EventGroupRepository;
 use crate::repository::events::EventRepository;
-use crate::repository::{ApplicationRepository, ProjectRepository};
+use crate::service::project_access::project_scope;
 
 /// Why a runtime group use case failed.
 #[derive(Debug, Error)]
@@ -179,13 +180,10 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, RuntimeGroupServiceError> {
-    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+    let scope = project_scope(&state.pool, principal, project_id)
         .await?
         .ok_or(RuntimeGroupServiceError::NotFound)?;
-    resolve_project_access(&state.pool, principal, organization_id, project_id)
-        .await?
-        .ok_or(RuntimeGroupServiceError::NotFound)?;
-    Ok(organization_id)
+    Ok(scope.organization_id)
 }
 
 async fn group_scope(

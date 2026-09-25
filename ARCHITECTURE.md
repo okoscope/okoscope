@@ -44,7 +44,10 @@ check in `main.rs`) are listed with their reason in
 existing one is no longer needed. The same test checks that services do not
 use axum or tonic and that repositories do not open transactions.
 
-Service methods take the authenticated principal first, then the scope the
+Project-scoped use cases resolve the caller's access through
+`service::project_access`, which reports a project the caller cannot see the
+same way as one that does not exist. Service methods take the authenticated
+principal first, then the scope the
 request names, then the parsed inputs. The order of checks inside a use case
 decides which error a request that is wrong in several ways gets, so it is
 part of the use case's behaviour. Results live with the service; where a

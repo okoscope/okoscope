@@ -6,7 +6,7 @@ use server::{
 use uuid::Uuid;
 
 /// Every project route family: the route is in the handler, the project
-/// access check in the service it calls.
+/// access check in the service it calls, through `service::project_access`.
 const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
     (
         include_str!("../src/releases.rs"),
@@ -50,12 +50,12 @@ const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
     ),
     (
         include_str!("../src/notification/retention_api.rs"),
-        include_str!("../src/service/notification_retention.rs"),
+        include_str!("../src/service/retention.rs"),
         "/notification-retention",
     ),
     (
         include_str!("../src/runtime_retention/api.rs"),
-        include_str!("../src/service/runtime_retention.rs"),
+        include_str!("../src/service/retention.rs"),
         "/runtime-retention",
     ),
 ];
@@ -68,10 +68,14 @@ fn every_descendant_route_family_has_a_project_access_seam() {
             "missing route family {route_family}"
         );
         assert!(
-            service.contains("resolve_project_access"),
+            service.contains("project_scope(") || service.contains("resolve_project_access"),
             "{route_family} bypasses the common project resolver"
         );
     }
+    let shared = include_str!("../src/service/project_access.rs");
+    assert!(
+        shared.contains("resolve_project_access(pool, principal, organization_id, project_id)")
+    );
     let attention = include_str!("../src/service/attention.rs");
     assert!(attention.contains("project_ids"));
     let attention_queries = include_str!("../src/repository/attention.rs");
