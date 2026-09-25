@@ -14,6 +14,16 @@ const SERVICE_ROUTE_SOURCES: &[(&str, &str, &str)] = &[
         "/releases",
     ),
     (
+        include_str!("../src/access_api.rs"),
+        include_str!("../src/service/access.rs"),
+        "/api/v1/projects/{project_id}/members",
+    ),
+    (
+        include_str!("../src/invitation_api.rs"),
+        include_str!("../src/service/invitations.rs"),
+        "/api/v1/projects/{project_id}/invitations",
+    ),
+    (
         include_str!("../src/inventory_api.rs"),
         include_str!("../src/service/inventory.rs"),
         "/runtime-inventory",
