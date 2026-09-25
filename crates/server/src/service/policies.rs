@@ -15,15 +15,15 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
 use crate::policy::{
     BehaviorIdentity, Placement, PlacementMatcher, PolicyEffect, PolicySeed, SeedUnavailableReason,
 };
+use crate::repository::ApplicationRepository;
 use crate::repository::inventory::InventoryRepository;
 use crate::repository::policies::PolicyRepository;
 use crate::repository::transaction::TransactionRepository;
-use crate::repository::{ApplicationRepository, ProjectRepository};
+use crate::service::project_access::project_scope;
 
 /// Why a policy use case failed.
 #[derive(Debug, Error)]
@@ -1336,17 +1336,13 @@ impl PolicyService {
         identity: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<ProjectPrincipal, PolicyServiceError> {
-        let organization_id: Uuid = ProjectRepository::organization_of(&self.pool, project_id)
-            .await
-            .map_err(PolicyServiceError::Database)?
-            .ok_or(PolicyServiceError::NotFound)?;
-        resolve_project_access(&self.pool, identity, organization_id, project_id)
+        let scope = project_scope(&self.pool, identity, project_id)
             .await
             .map_err(PolicyServiceError::Database)?
             .ok_or(PolicyServiceError::NotFound)?;
         Ok(ProjectPrincipal {
             user_id: identity.user_id,
-            organization_id,
+            organization_id: scope.organization_id,
         })
     }
 }

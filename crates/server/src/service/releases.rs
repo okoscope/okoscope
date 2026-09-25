@@ -9,13 +9,11 @@ use sqlx::{FromRow, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
 use crate::repository::transaction::TransactionRepository;
-use crate::repository::{
-    ApplicationRepository, ApplicationScope, ProjectRepository, ReleaseRepository,
-};
+use crate::repository::{ApplicationRepository, ApplicationScope, ReleaseRepository};
 use crate::runtime_retention::history::Coverage;
+use crate::service::project_access::project_scope;
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
@@ -481,13 +479,10 @@ impl ReleaseService {
         principal: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<Uuid, ReleaseServiceError> {
-        let organization_id: Uuid = ProjectRepository::organization_of(&self.pool, project_id)
+        let scope = project_scope(&self.pool, principal, project_id)
             .await?
             .ok_or(ReleaseServiceError::NotFound)?;
-        resolve_project_access(&self.pool, principal, organization_id, project_id)
-            .await?
-            .ok_or(ReleaseServiceError::NotFound)?;
-        Ok(organization_id)
+        Ok(scope.organization_id)
     }
 
     async fn application_owned(

@@ -13,14 +13,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
-use crate::access_control::ProjectRole;
 use crate::application_credentials;
 use crate::auth::{SessionToken, UserPrincipal, hash_password, normalize_email, validate_password};
 use crate::repository::application_credentials::ApplicationCredentialRepository;
 use crate::repository::events::EventRepository;
 use crate::repository::installations::InstallationRepository;
-use crate::repository::{ApplicationRepository, MembershipRepository, UserRepository};
+use crate::repository::{ApplicationRepository, UserRepository};
 use crate::service::identity::{insert_identity_session, valid_name};
+use crate::service::project_access::member_project_role;
 use crate::transactional_mail::Locale;
 use crate::web_api::WebApiConfig;
 
@@ -589,18 +589,8 @@ impl OnboardingService {
         principal: UserPrincipal,
         project_id: Uuid,
     ) -> Result<()> {
-        if principal.role.inherits_project_access() {
-            return Ok(());
-        }
-        let role = MembershipRepository::project_role(
-            &self.pool,
-            principal.organization_id,
-            project_id,
-            principal.user_id,
-        )
-        .await?;
-        if role
-            .and_then(|value| value.parse::<ProjectRole>().ok())
+        if member_project_role(&self.pool, principal, project_id)
+            .await?
             .is_some()
         {
             Ok(())

@@ -12,15 +12,15 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::auth::{IdentityPrincipal, OrganizationRole};
 use crate::notification::health::{
     NotificationHealthState, NotificationQueueSnapshot, derive_state,
 };
+use crate::repository::MembershipRepository;
 use crate::repository::attention::AttentionRepository;
 use crate::repository::resources::ResourceRepository;
 use crate::repository::transaction::TransactionRepository;
-use crate::repository::{MembershipRepository, ProjectRepository};
+use crate::service::project_access::project_scope;
 
 /// Why an attention use case failed.
 #[derive(Debug, Error)]
@@ -586,13 +586,10 @@ async fn project_organization(
     principal: IdentityPrincipal,
     project_id: Uuid,
 ) -> Result<Uuid, AttentionServiceError> {
-    let organization_id: Uuid = ProjectRepository::organization_of(&state.pool, project_id)
+    let scope = project_scope(&state.pool, principal, project_id)
         .await?
         .ok_or(AttentionServiceError::NotFound)?;
-    resolve_project_access(&state.pool, principal, organization_id, project_id)
-        .await?
-        .ok_or(AttentionServiceError::NotFound)?;
-    Ok(organization_id)
+    Ok(scope.organization_id)
 }
 async fn snapshot(
     pool: &PgPool,
