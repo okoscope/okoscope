@@ -18,9 +18,6 @@ use crate::{
     web_api::{RequestId, WebApiConfig},
 };
 
-// Callers not yet moved to services still reach these through this module.
-pub(crate) use crate::service::identity::{insert_session_with_context, valid_name, valid_slug};
-
 #[derive(Clone, Debug)]
 struct AuthState {
     service: AccountService,
