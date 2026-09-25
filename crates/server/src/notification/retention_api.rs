@@ -122,7 +122,10 @@ async fn put_organization(
 ) -> Result<Json<RetentionPolicy>, ApiError> {
     let user = principal(&state, &headers).await?;
     Ok(Json(
-        state.service.set_organization(user, id, policy).await?,
+        state
+            .service
+            .set_organization(user, id, Some(policy))
+            .await?,
     ))
 }
 
