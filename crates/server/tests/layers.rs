@@ -36,14 +36,6 @@ const TRANSPORT_EXCEPTIONS: &[(&str, &str)] = &[
         "main.rs",
         "a startup check logs whether webhook destinations are enabled",
     ),
-    (
-        "access_api.rs",
-        "moves into service::access with the access service change",
-    ),
-    (
-        "invitation_api.rs",
-        "moves into service::invitations with the access service change",
-    ),
 ];
 
 fn src() -> PathBuf {
