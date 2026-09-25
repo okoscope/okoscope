@@ -29,8 +29,8 @@
 //! would take other people's access with it.
 //!
 //! Retention settings are not here. They live beside the logic that interprets
-//! them, in [`crate::runtime_retention::settings`] and
-//! [`crate::notification::retention_settings`].
+//! them, in [`crate::service::runtime_retention`] and
+//! [`crate::service::notification_retention`].
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgExecutor};

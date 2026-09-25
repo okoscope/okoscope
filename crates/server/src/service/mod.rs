@@ -44,6 +44,8 @@ pub mod identity;
 pub mod inventory;
 pub mod invitations;
 pub mod navigation;
+pub mod notification_destinations;
+pub mod notification_recovery;
 pub mod notification_retention;
 pub mod notifications;
 pub mod onboarding;

@@ -1,10 +1,8 @@
 use server::{
     database::MIGRATOR,
-    notification::{
-        recovery::{
-            BulkRetryFilter, RecoveryActor, RecoveryConflictCode, RecoveryError, RecoveryRepository,
-        },
-        retention::{RetentionConfig, delete_once},
+    notification::retention::{RetentionConfig, delete_once},
+    service::notification_recovery::{
+        BulkRetryFilter, RecoveryActor, RecoveryConflictCode, RecoveryError, RecoveryService,
     },
 };
 use std::time::Duration;
@@ -75,7 +73,7 @@ async fn retry_preserves_history_and_is_idempotent(pool: sqlx::PgPool) {
     let delivery_id = delivery(&pool, &fixture, "failed").await;
     sqlx::query("INSERT INTO notification_delivery_attempts(id,organization_id,project_id,delivery_id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,error_class) VALUES($1,$2,$3,$4,0,1,now(),now(),1,'failed','timeout')")
         .bind(Uuid::new_v4()).bind(fixture.organization_id).bind(fixture.project_id).bind(delivery_id).execute(&pool).await.unwrap();
-    let repository = RecoveryRepository::new(pool.clone(), [9; 32]);
+    let repository = RecoveryService::new(pool.clone(), [9; 32]);
     let actor = RecoveryActor {
         id: fixture.credential_id,
         request_id: "request-retry-1",
@@ -162,7 +160,7 @@ async fn retry_preserves_history_and_is_idempotent(pool: sqlx::PgPool) {
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn cancel_conflicts_with_lease_and_bulk_is_bounded(pool: sqlx::PgPool) {
     let fixture = fixture(&pool).await;
-    let repository = RecoveryRepository::new(pool.clone(), [8; 32]);
+    let repository = RecoveryService::new(pool.clone(), [8; 32]);
     let actor = RecoveryActor {
         id: fixture.credential_id,
         request_id: "request-cancel-1",
@@ -281,7 +279,7 @@ async fn retention_is_bounded_and_preserves_active_work(pool: sqlx::PgPool) {
     let terminal = delivery(&pool, &fixture, "failed").await;
     let active = delivery(&pool, &fixture, "pending").await;
     let recovered = delivery(&pool, &fixture, "failed").await;
-    let recovery = RecoveryRepository::new(pool.clone(), [6; 32])
+    let recovery = RecoveryService::new(pool.clone(), [6; 32])
         .retry_delivery(
             fixture.organization_id,
             fixture.project_id,
@@ -388,7 +386,7 @@ async fn unified_cleanup_removes_single_and_partial_then_final_bulk_history(pool
     enable_retention(&pool, &fixture).await;
     let first = delivery(&pool, &fixture, "failed").await;
     let second = delivery(&pool, &fixture, "failed").await;
-    let repository = RecoveryRepository::new(pool.clone(), [9; 32]);
+    let repository = RecoveryService::new(pool.clone(), [9; 32]);
     let bulk = repository
         .bulk_retry(
             fixture.organization_id,
@@ -537,7 +535,7 @@ async fn policies_change_live_and_locked_active_and_recent_deliveries_survive(po
         0
     );
     lock.rollback().await.unwrap();
-    let repository = RecoveryRepository::new(pool.clone(), [8; 32]);
+    let repository = RecoveryService::new(pool.clone(), [8; 32]);
     repository
         .retry_delivery(
             fixture.organization_id,
@@ -591,7 +589,7 @@ async fn policies_change_live_and_locked_active_and_recent_deliveries_survive(po
 async fn empty_operations_expire_under_same_policy_and_batch_limit(pool: sqlx::PgPool) {
     let fixture = fixture(&pool).await;
     enable_retention(&pool, &fixture).await;
-    let repository = RecoveryRepository::new(pool.clone(), [7; 32]);
+    let repository = RecoveryService::new(pool.clone(), [7; 32]);
     for key in ["empty-operation-0001", "empty-operation-0002"] {
         repository
             .bulk_retry(
