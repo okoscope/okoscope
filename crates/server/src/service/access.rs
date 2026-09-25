@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
 use crate::access_control::{
     EffectiveAccessSource, ProjectRole, can_manage_organization_role, can_manage_project_role,
-    resolve_project_access,
 };
 use crate::application_credentials::issue as issue_application_credential;
 use crate::auth::{IdentityPrincipal, OrganizationRole, SessionToken};
@@ -27,6 +26,7 @@ use crate::service::invitations::{
     InvitationServiceError, InvitationView, current_organization_owner_invitation,
     issue_organization_invitation,
 };
+use crate::service::project_access::{ProjectScope, project_scope};
 use crate::transactional_mail::Locale;
 use crate::web_api::{OrganizationMode, WebApiConfig};
 
@@ -1271,10 +1271,10 @@ impl AccessService {
         principal: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<ProjectActor> {
-        let organization_id: Uuid = ProjectRepository::organization_of(&self.pool, project_id)
-            .await?
-            .ok_or(AccessServiceError::NotFound(AccessTarget::Project))?;
-        let access = resolve_project_access(&self.pool, principal, organization_id, project_id)
+        let ProjectScope {
+            organization_id,
+            access,
+        } = project_scope(&self.pool, principal, project_id)
             .await?
             .ok_or(AccessServiceError::NotFound(AccessTarget::Project))?;
         if !access.can_manage_members() {
