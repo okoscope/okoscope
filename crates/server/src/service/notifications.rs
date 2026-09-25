@@ -7,7 +7,6 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
 use crate::notification::{
     NotificationService,
@@ -23,7 +22,7 @@ use crate::notification::{
         test_destination,
     },
 };
-use crate::repository::ProjectRepository;
+use crate::service::project_access::project_scope;
 
 /// Why a project notification use case failed.
 #[derive(Debug, Error)]
@@ -407,14 +406,10 @@ impl ProjectNotificationService {
         principal: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<Uuid> {
-        let pool = &self.notifications.pool;
-        let organization_id: Uuid = ProjectRepository::organization_of(pool, project_id)
+        let scope = project_scope(&self.notifications.pool, principal, project_id)
             .await?
             .ok_or(ProjectNotificationError::NotFound)?;
-        resolve_project_access(pool, principal, organization_id, project_id)
-            .await?
-            .ok_or(ProjectNotificationError::NotFound)?;
-        Ok(organization_id)
+        Ok(scope.organization_id)
     }
 
     /// A destination URL must parse under the webhook policy and resolve to

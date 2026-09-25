@@ -19,11 +19,11 @@ use sqlx::{FromRow, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
 use crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION;
+use crate::repository::ApplicationRepository;
 use crate::repository::inventory::{FacetColumn, InventoryFilter, InventoryRepository};
-use crate::repository::{ApplicationRepository, ProjectRepository};
+use crate::service::project_access::project_scope;
 
 /// Why an inventory use case failed.
 #[derive(Debug, Error)]
@@ -1606,14 +1606,11 @@ impl InventoryService {
         identity: IdentityPrincipal,
         project_id: Uuid,
     ) -> Result<ProjectPrincipal, InventoryServiceError> {
-        let organization_id: Uuid = ProjectRepository::organization_of(&self.pool, project_id)
-            .await?
-            .ok_or(InventoryServiceError::NotFound)?;
-        resolve_project_access(&self.pool, identity, organization_id, project_id)
+        let scope = project_scope(&self.pool, identity, project_id)
             .await?
             .ok_or(InventoryServiceError::NotFound)?;
         Ok(ProjectPrincipal {
-            organization_id,
+            organization_id: scope.organization_id,
             user_id: identity.user_id,
         })
     }
