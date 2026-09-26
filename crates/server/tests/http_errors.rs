@@ -29,12 +29,9 @@ use uuid::Uuid;
 enum Expect {
     Ok(u16),
     Error(u16, &'static str, &'static str),
-    /// Answers `500 internal_error` today; the fix is tracked separately, so
-    /// the case does not pin it.
-    Unpinned,
 }
 
-use Expect::{Error, Ok, Unpinned};
+use Expect::{Error, Ok};
 
 struct Case {
     method: &'static str,
@@ -206,7 +203,6 @@ async fn run(pool: sqlx::PgPool, cases: &[Case]) {
                     assert_eq!(json["message"], message, "{route}");
                     assert_eq!(json["request_id"], request_id, "{route}");
                 }
-                Unpinned => {}
             }
         }
     }
@@ -303,8 +299,7 @@ const ROUTES: &[Case] = &[
         method: "DELETE",
         uri: "/api/v1/platform/users/{user_id}/roles/super-admin",
         body: None,
-        // Revoking an unknown user fails on the audit row's foreign key.
-        expect: [Error(401, "unauthorized", "authentication required"), Error(403, "forbidden", "super administrator role is required"), Error(403, "forbidden", "super administrator role is required"), Error(403, "forbidden", "super administrator role is required"), Unpinned],
+        expect: [Error(401, "unauthorized", "authentication required"), Error(403, "forbidden", "super administrator role is required"), Error(403, "forbidden", "super administrator role is required"), Error(403, "forbidden", "super administrator role is required"), Error(404, "user_not_found", "resource not found")],
     },
     Case {
         method: "GET",
@@ -364,8 +359,7 @@ const ROUTES: &[Case] = &[
         method: "POST",
         uri: "/api/v1/projects/{project_id}/members",
         body: Some(r#"{"user_id":"{uuid}","role":"member"}"#),
-        // Adding an unknown user fails on the membership's foreign key.
-        expect: [Error(401, "unauthorized", "authentication required"), Error(404, "project_not_found", "resource not found"), Error(404, "project_not_found", "resource not found"), Unpinned, Unpinned],
+        expect: [Error(401, "unauthorized", "authentication required"), Error(404, "project_not_found", "resource not found"), Error(404, "project_not_found", "resource not found"), Error(404, "user_not_found", "resource not found"), Error(404, "user_not_found", "resource not found")],
     },
     Case {
         method: "PATCH",
@@ -395,8 +389,7 @@ const ROUTES: &[Case] = &[
         method: "POST",
         uri: "/api/v1/platform/projects/{project_id}/members",
         body: Some(r#"{"user_id":"{uuid}","role":"member"}"#),
-        // Adding an unknown user fails on the membership's foreign key.
-        expect: [Error(401, "unauthorized", "authentication required"), Error(404, "project_not_found", "resource not found"), Error(404, "project_not_found", "resource not found"), Unpinned, Unpinned],
+        expect: [Error(401, "unauthorized", "authentication required"), Error(404, "project_not_found", "resource not found"), Error(404, "project_not_found", "resource not found"), Error(404, "user_not_found", "resource not found"), Error(404, "user_not_found", "resource not found")],
     },
     Case {
         method: "GET",
