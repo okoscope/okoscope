@@ -8,6 +8,21 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Every paginated list now refuses a `limit` outside its range with
+  `400 invalid_request` ("limit must be between 1 and N"). Organization and
+  project members, eligible members, organization and platform audit, the
+  platform user, organization, project and application lists, runtime group
+  snapshots, notification deliveries and recovery operations used to clamp
+  it silently; invitation lists answered `validation_failed`.
+- Requests without a valid session to onboarding (installations, connection
+  readiness, installation metadata) and provisioning routes now answer
+  `401 unauthorized`, like every other route, instead of `invalid_credential`.
+  The `invalid_credential` error code is no longer emitted.
+- The OpenAPI contract documents the 1-200 limit of the lists that accept
+  it (`LargeLimit`); `Limit` stays 1-100.
+
 ### Fixed
 
 - Adding a user who does not exist, or is not a member of the organization,

@@ -158,6 +158,11 @@ impl InvitationError {
                 ErrorCode::VALIDATION_FAILED,
                 message,
             ),
+            InvitationServiceError::InvalidLimit => (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "limit must be between 1 and 100",
+            ),
             InvitationServiceError::Conflict(conflict) => (
                 StatusCode::CONFLICT,
                 match conflict {

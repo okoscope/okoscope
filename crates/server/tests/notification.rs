@@ -1326,6 +1326,20 @@ async fn notification_routes_map_each_service_error_onto_the_error_envelope(pool
         "bulk limit",
     );
 
+    // Delivery and recovery pages hold 1 to 200 items.
+    for uri in [
+        format!("{deliveries}?limit=0"),
+        format!("{project}/notification-recovery-operations?limit=201"),
+    ] {
+        assert_error(
+            &send(&app, "GET", &uri, Some(&owner), None, None).await,
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "limit must be between 1 and 200",
+            &uri,
+        );
+    }
+
     // The successful reads of what the commands recorded.
     let (status, operation) = send(
         &app,
