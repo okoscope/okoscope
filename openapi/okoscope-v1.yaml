@@ -1753,7 +1753,9 @@ paths:
     post:
       operationId: createWebhookDestination
       requestBody: { $ref: '#/components/requestBodies/CreateWebhookDestination' }
-      responses: { '201': { $ref: '#/components/responses/DestinationWithSecret' } }
+      responses:
+        '201': { $ref: '#/components/responses/DestinationWithSecret' }
+        '409': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/webhook-destinations/{destination_id}:
     parameters:
       [
@@ -1766,7 +1768,9 @@ paths:
     patch:
       operationId: updateWebhookDestination
       requestBody: { $ref: '#/components/requestBodies/UpdateWebhookDestination' }
-      responses: { '200': { $ref: '#/components/responses/WebhookDestination' } }
+      responses:
+        '200': { $ref: '#/components/responses/WebhookDestination' }
+        '409': { $ref: '#/components/responses/Error' }
   /api/v1/projects/{project_id}/webhook-destinations/{destination_id}/disable:
     parameters:
       [
@@ -4139,7 +4143,7 @@ components:
       properties:
         error:
           type: string
-          enum: [validation_failed, unauthorized, invalid_credentials, email_verification_required, registration_disabled, registration_conflict, untrusted_origin, forbidden, not_found, organization_not_found, project_not_found, application_not_found, user_not_found, user_not_eligible, setup_already_completed, invalid_setup_token, setup_rate_limited, privilege_confirmation_required, current_password_invalid, self_promotion_forbidden, last_super_admin_required, last_organization_owner_required, organization_limit_reached, invitation_unusable, invitation_account_mismatch, invitation_exists, rate_limited, mail_unavailable, idempotency_key_reused, operation_already_completed, internal_error, invalid_request, label_conflict, revision_conflict, release_exists, action_token_invalid, application_slug_conflict, conflict, credential_conflict, credential_name_conflict, credential_not_found, installation_metadata_unavailable, invalid_credential, invitation_identity_conflict, invitation_not_found, invitation_not_pending, invitation_requires_sign_in, invitation_scope_not_found, membership_exists, organization_not_deletable, organization_slug_conflict, project_slug_conflict, bulk_limit_exceeded, delivery_active_lease, delivery_invalid_state, destination_disabled, invalid_identity_token, expired_identity_token, identity_token_scope_mismatch]
+          enum: [validation_failed, unauthorized, invalid_credentials, email_verification_required, registration_disabled, registration_conflict, untrusted_origin, forbidden, not_found, organization_not_found, project_not_found, application_not_found, user_not_found, user_not_eligible, setup_already_completed, invalid_setup_token, setup_rate_limited, privilege_confirmation_required, current_password_invalid, self_promotion_forbidden, last_super_admin_required, last_organization_owner_required, organization_limit_reached, invitation_unusable, invitation_account_mismatch, invitation_exists, rate_limited, mail_unavailable, idempotency_key_reused, operation_already_completed, internal_error, invalid_request, label_conflict, revision_conflict, release_exists, action_token_invalid, application_slug_conflict, conflict, credential_conflict, credential_name_conflict, credential_not_found, installation_metadata_unavailable, invalid_credential, invitation_identity_conflict, invitation_not_found, invitation_not_pending, invitation_requires_sign_in, invitation_scope_not_found, membership_exists, organization_not_deletable, organization_slug_conflict, project_slug_conflict, bulk_limit_exceeded, delivery_active_lease, delivery_invalid_state, destination_disabled, destination_name_conflict, invalid_identity_token, expired_identity_token, identity_token_scope_mismatch]
         message: { type: string, example: resource not found }
         request_id: { type: string, example: 0ec02ed2-8483-4981-893e-bffc535897d7 }
         fields:

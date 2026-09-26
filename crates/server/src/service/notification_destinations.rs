@@ -59,6 +59,8 @@ pub enum DestinationError {
     NotFound,
     #[error("destination revision conflict")]
     RevisionConflict,
+    #[error("destination name already exists")]
+    NameConflict,
     #[error("destination name must contain between 1 and 200 characters")]
     InvalidName,
     #[error("database error: {0}")]
@@ -133,7 +135,8 @@ impl DestinationService {
             encrypted.nonce.as_slice(),
             deliver_backfill,
         )
-        .await?;
+        .await
+        .map_err(name_conflict)?;
         Ok((destination, secret))
     }
 
@@ -158,7 +161,8 @@ impl DestinationService {
             update.enabled,
             update.expected_revision,
         )
-        .await?;
+        .await
+        .map_err(name_conflict)?;
         if let Some(destination) = destination {
             return Ok(destination);
         }
@@ -213,10 +217,70 @@ impl DestinationService {
     }
 }
 
+/// A destination name is unique within its project.
+const NAME_CONSTRAINT: &str = "webhook_destinations_organization_id_project_id_name_key";
+
+fn name_conflict(error: sqlx::Error) -> DestinationError {
+    if error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::constraint)
+        == Some(NAME_CONSTRAINT)
+    {
+        DestinationError::NameConflict
+    } else {
+        DestinationError::Database(error)
+    }
+}
+
 fn validate_name(name: &str) -> Result<(), DestinationError> {
     if (1..=200).contains(&name.trim().chars().count()) {
         Ok(())
     } else {
         Err(DestinationError::InvalidName)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repository::test_support::tenant;
+
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn a_name_is_taken_once_per_project(pool: PgPool) {
+        let tenant = tenant(&pool, "destination-names").await;
+        let service = DestinationService::new(pool.clone(), SecretVault::new(&[3; 32]));
+        let (org, project) = (tenant.organization_id, tenant.project_id);
+        service
+            .create(org, project, "primary", "https://a.example/hook", false)
+            .await
+            .unwrap();
+        let (standby, _) = service
+            .create(org, project, "standby", "https://b.example/hook", false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .create(org, project, " primary ", "https://c.example/hook", false)
+                .await,
+            Err(DestinationError::NameConflict)
+        ));
+        assert!(matches!(
+            service
+                .update(
+                    org,
+                    project,
+                    standby.id,
+                    DestinationUpdate {
+                        name: Some("primary"),
+                        url: None,
+                        deliver_backfill: None,
+                        enabled: None,
+                        expected_revision: standby.revision,
+                    },
+                )
+                .await,
+            Err(DestinationError::NameConflict)
+        ));
     }
 }
