@@ -616,6 +616,11 @@ impl RuntimeGroupService {
                 "day_from must precede day_to".into(),
             ));
         }
+        if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+            return Err(RuntimeGroupServiceError::Invalid(
+                "limit must be between 1 and 100".into(),
+            ));
+        }
         Ok(crate::runtime_retention::history::page(
             &self.pool,
             organization_id,
@@ -900,5 +905,23 @@ mod use_cases {
                 .await,
             Err(RuntimeGroupServiceError::Invalid(message)) if message == "day_from must precede day_to"
         ));
+        for limit in [0, 101] {
+            assert!(matches!(
+                service
+                    .list_snapshots(
+                        principal,
+                        group,
+                        crate::runtime_retention::history::Query {
+                            day_from: None,
+                            day_to: None,
+                            release_id: None,
+                            cursor: None,
+                            limit: Some(limit),
+                        },
+                    )
+                    .await,
+                Err(RuntimeGroupServiceError::Invalid(message)) if message == "limit must be between 1 and 100"
+            ));
+        }
     }
 }

@@ -246,6 +246,7 @@ impl ProjectNotificationService {
         filter: DeliveryFilter,
     ) -> Result<DeliveryList> {
         let organization_id = self.project_organization(principal, project_id).await?;
+        page_limit(filter.limit)?;
         let (items, next_cursor) = list_deliveries(
             &self.notifications.pool,
             organization_id,
@@ -380,6 +381,7 @@ impl ProjectNotificationService {
         filter: RecoveryOperationFilter,
     ) -> Result<RecoveryOperationList> {
         let organization_id = self.project_organization(principal, project_id).await?;
+        page_limit(filter.limit)?;
         let (items, next_cursor) = self
             .notifications
             .recovery
@@ -427,6 +429,16 @@ impl ProjectNotificationService {
             .map_err(|error| ProjectNotificationError::Invalid(error.to_string()))?;
         Ok(())
     }
+}
+
+/// A page of deliveries or recovery operations holds 1 to 200 items.
+fn page_limit(limit: Option<i64>) -> Result<()> {
+    if limit.is_some_and(|limit| !(1..=200).contains(&limit)) {
+        return Err(ProjectNotificationError::Invalid(
+            "limit must be between 1 and 200".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn required_key(value: Option<&str>) -> Result<&str> {

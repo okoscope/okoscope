@@ -49,6 +49,9 @@ pub enum InvitationServiceError {
     /// The request is malformed; the message says how.
     #[error("{0}")]
     Invalid(&'static str),
+    /// The page limit is outside 1..=100.
+    #[error("limit must be between 1 and 100")]
+    InvalidLimit,
     /// The invitation clashes with the current state.
     #[error("{0:?}")]
     Conflict(InvitationConflict),
@@ -1029,7 +1032,7 @@ fn page_limit(limit: Option<i64>) -> Result<i64> {
     if (1..=MAX_PAGE_LIMIT).contains(&limit) {
         Ok(limit)
     } else {
-        Err(invalid("limit must be between 1 and 100"))
+        Err(InvitationServiceError::InvalidLimit)
     }
 }
 
@@ -1563,12 +1566,7 @@ mod tests {
             let listed = service
                 .list_organization(admin, organization, None, Some(0))
                 .await;
-            assert!(matches!(
-                listed,
-                Err(InvitationServiceError::Invalid(
-                    "limit must be between 1 and 100"
-                ))
-            ));
+            assert!(matches!(listed, Err(InvitationServiceError::InvalidLimit)));
             let listed = service
                 .list_platform_organization(admin, organization, None, None)
                 .await;

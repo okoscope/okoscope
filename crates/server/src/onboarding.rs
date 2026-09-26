@@ -144,9 +144,7 @@ async fn principal(
         .authenticate_headers(headers)
         .await
         .map_err(ApiError::database)?
-        .ok_or_else(|| {
-            ApiError::unauthorized(ErrorCode::INVALID_CREDENTIAL, "authentication required")
-        })
+        .ok_or_else(|| ApiError::unauthorized(ErrorCode::UNAUTHORIZED, "authentication required"))
 }
 
 async fn installation_metadata(

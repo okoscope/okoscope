@@ -211,6 +211,11 @@ impl AccessError {
                 ErrorCode::VALIDATION_FAILED,
                 message,
             ),
+            AccessServiceError::InvalidLimit => (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::INVALID_REQUEST,
+                "limit must be between 1 and 100",
+            ),
             AccessServiceError::UserNotEligible => (
                 StatusCode::CONFLICT,
                 ErrorCode::USER_NOT_ELIGIBLE,
