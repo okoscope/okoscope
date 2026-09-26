@@ -63,7 +63,6 @@ impl ErrorCode {
     pub const CREDENTIAL_NAME_CONFLICT: Self = Self("credential_name_conflict");
     pub const CREDENTIAL_NOT_FOUND: Self = Self("credential_not_found");
     pub const INSTALLATION_METADATA_UNAVAILABLE: Self = Self("installation_metadata_unavailable");
-    pub const INVALID_CREDENTIAL: Self = Self("invalid_credential");
     pub const INVITATION_IDENTITY_CONFLICT: Self = Self("invitation_identity_conflict");
     pub const INVITATION_NOT_FOUND: Self = Self("invitation_not_found");
     pub const INVITATION_NOT_PENDING: Self = Self("invitation_not_pending");
@@ -128,7 +127,6 @@ impl ErrorCode {
         Self::CREDENTIAL_NAME_CONFLICT,
         Self::CREDENTIAL_NOT_FOUND,
         Self::INSTALLATION_METADATA_UNAVAILABLE,
-        Self::INVALID_CREDENTIAL,
         Self::INVITATION_IDENTITY_CONFLICT,
         Self::INVITATION_NOT_FOUND,
         Self::INVITATION_NOT_PENDING,

@@ -58,6 +58,9 @@ pub enum AccessServiceError {
     /// The request is malformed; the message says how.
     #[error("{0}")]
     Invalid(&'static str),
+    /// The page limit is outside 1..=100.
+    #[error("limit must be between 1 and 100")]
+    InvalidLimit,
     /// The user cannot be made a super administrator.
     #[error("user is not eligible")]
     UserNotEligible,
@@ -358,7 +361,7 @@ pub struct AuditPage {
 }
 
 /// A page request: where to continue and how many items to return. The limit
-/// defaults to 50 and is clamped to 1..=100.
+/// defaults to 50 and must be within 1..=100.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PageRequest {
     pub cursor: Option<Uuid>,
@@ -366,10 +369,13 @@ pub struct PageRequest {
 }
 
 impl PageRequest {
-    fn limit(self) -> i64 {
-        self.limit
-            .unwrap_or(DEFAULT_PAGE_LIMIT)
-            .clamp(1, MAX_PAGE_LIMIT)
+    fn limit(self) -> Result<i64> {
+        let limit = self.limit.unwrap_or(DEFAULT_PAGE_LIMIT);
+        if (1..=MAX_PAGE_LIMIT).contains(&limit) {
+            Ok(limit)
+        } else {
+            Err(AccessServiceError::InvalidLimit)
+        }
     }
 }
 
@@ -495,7 +501,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<UserPage> {
         require_platform(principal, false)?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let mut items: Vec<UserSummary> =
             UserRepository::platform_page(&self.pool, page.cursor, limit + 1).await?;
         let next_cursor = trim_page(&mut items, limit, |item| item.id);
@@ -509,7 +515,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<PlatformOrganizationPage> {
         require_platform(principal, false)?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let mut items: Vec<PlatformOrganization> =
             OrganizationRepository::platform_page(&self.pool, page.cursor, limit + 1).await?;
         let next_cursor = trim_page(&mut items, limit, |item| item.id);
@@ -650,7 +656,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<PlatformProjectPage> {
         require_platform(principal, false)?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let mut items: Vec<PlatformProject> =
             ProjectRepository::platform_page(&self.pool, organization_id, page.cursor, limit + 1)
                 .await?;
@@ -722,7 +728,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<PlatformApplicationPage> {
         require_platform(principal, false)?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let mut items: Vec<PlatformApplication> =
             ApplicationRepository::platform_page(&self.pool, project_id, page.cursor, limit + 1)
                 .await?;
@@ -909,7 +915,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<OrganizationMemberPage> {
         let actor = organization_admin(principal, organization_id)?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let rows: Vec<OrganizationMemberRow> = MembershipRepository::organization_member_page(
             &self.pool,
             organization_id,
@@ -1043,7 +1049,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<ProjectMemberPage> {
         let actor = self.project_actor(principal, project_id).await?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let rows: Vec<(Uuid, String, String, String, DateTime<Utc>)> =
             MembershipRepository::project_member_page(
                 &self.pool,
@@ -1078,7 +1084,7 @@ impl AccessService {
         page: PageRequest,
     ) -> Result<OrganizationMemberPage> {
         let actor = self.project_actor(principal, project_id).await?;
-        let limit = page.limit();
+        let limit = page.limit()?;
         let rows: Vec<OrganizationMemberRow> = MembershipRepository::eligible_project_member_page(
             &self.pool,
             actor.organization_id,
@@ -1266,7 +1272,7 @@ impl AccessService {
         organization_id: Option<Uuid>,
         page: PageRequest,
     ) -> Result<AuditPage> {
-        let limit = page.limit();
+        let limit = page.limit()?;
         let mut items: Vec<AuditRecord> =
             AccessAuditRepository::page(&self.pool, organization_id, page.cursor, limit + 1)
                 .await?;

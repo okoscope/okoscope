@@ -100,7 +100,7 @@ impl ProvisioningError {
         match error {
             ProvisioningServiceError::InvalidCredential => Self::new(
                 StatusCode::UNAUTHORIZED,
-                ErrorCode::INVALID_CREDENTIAL,
+                ErrorCode::UNAUTHORIZED,
                 "invalid or missing bearer credential",
                 request_id,
             ),
