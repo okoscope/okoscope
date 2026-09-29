@@ -14,6 +14,9 @@ use uuid::Uuid;
 #[tokio::test]
 #[ignore = "requires an isolated browser test database and scope environment"]
 async fn seed_browser_thread_windows() {
+    if std::env::var_os("E2E_ORG").is_none() {
+        return;
+    }
     let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
