@@ -1,5 +1,6 @@
 use server::bootstrap::{BootstrapConfig, bootstrap};
 use server::database::{MIGRATOR, REQUIRED_MIGRATION, migrate, verify_schema};
+use std::borrow::Cow;
 use uuid::Uuid;
 
 fn config(name: &str) -> BootstrapConfig {
@@ -39,6 +40,55 @@ async fn migration_only_is_idempotent_when_current(pool: sqlx::PgPool) {
 
     assert_eq!(first, second);
     assert_eq!(second.applied, REQUIRED_MIGRATION);
+}
+
+#[sqlx::test]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn previously_applied_thread_windows_upgrade_without_checksum_change(pool: sqlx::PgPool) {
+    let previous = sqlx::migrate::Migrator {
+        migrations: Cow::Owned(
+            MIGRATOR
+                .iter()
+                .filter(|migration| migration.version <= 31)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    previous.run(&pool).await.expect("migration 31 applies");
+    let old_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+         WHERE conrelid='thread_activity_windows'::regclass AND contype='u'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!old_constraint.contains("agent_id"));
+
+    migrate(&pool)
+        .await
+        .expect("migration 32 upgrades existing schema");
+    let new_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+         WHERE conrelid='thread_activity_windows'::regclass AND contype='u'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(new_constraint.contains("project_id"));
+    assert!(new_constraint.contains("agent_id"));
+    let process_index: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() \
+         AND tablename='thread_activity_windows' \
+         AND indexname='thread_activity_windows_process_scope_idx'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(process_index.contains("agent_id"));
+    migrate(&pool).await.expect("upgraded schema is idempotent");
 }
 
 #[sqlx::test(migrator = "MIGRATOR")]

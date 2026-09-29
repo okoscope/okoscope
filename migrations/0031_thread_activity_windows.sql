@@ -27,7 +27,7 @@ CREATE TABLE thread_activity_windows (
     gaps jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (window_ended_at > window_started_at),
-    UNIQUE (organization_id, project_id, application_id, agent_id, process_cgroup_id, process_tgid,
+    UNIQUE (organization_id, application_id, process_cgroup_id, process_tgid,
             process_generation, observation_epoch, window_started_at, window_ended_at)
 );
 
@@ -37,5 +37,5 @@ CREATE INDEX thread_activity_windows_application_scope_idx
 
 CREATE INDEX thread_activity_windows_process_scope_idx
     ON thread_activity_windows
-    (organization_id, application_id, agent_id, process_cgroup_id, process_tgid,
+    (organization_id, application_id, process_cgroup_id, process_tgid,
      process_generation, observation_epoch, window_started_at DESC, id DESC);
