@@ -135,7 +135,8 @@ Changes to browser-facing APIs update the backend contract first, then the web
 contract copy and generated types. The web verification workflow compares its
 contract against the configured backend revision and checks generated types
 without rewriting files. Deploy compatible backend support before its dependent
-web interface; lifecycle storage requires database migration 31.
+web interface; lifecycle storage requires database migration 32. Installations
+that already applied migration 31 can upgrade without rebuilding stored windows.
 The web repository also provides a dedicated PostgreSQL-backed thread-activity
 browser suite. It starts this server with an isolated local database and seeds
 windows through authenticated ingestion using `browser_thread_fixture`; see

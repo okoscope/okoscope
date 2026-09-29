@@ -4204,7 +4204,7 @@ components:
         service_version: { type: string, example: 0.1.0 }
         git_commit: { type: string, example: ac23c0b4d042e8d430ea6880f6b66ed1a9d4580a }
         api_version: { type: string, const: v1 }
-        required_database_migration: { type: integer, format: int64, example: 31 }
+        required_database_migration: { type: integer, format: int64, example: 32 }
     Organization:
       type: object
       additionalProperties: false
