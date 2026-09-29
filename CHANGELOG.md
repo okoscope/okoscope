@@ -51,6 +51,9 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Upgrade notes
 
+- Database migration 32 expands thread-window uniqueness to include the
+  project and observing agent, and updates the process lookup index. Migration
+  31 is unchanged so installations that already applied it can upgrade safely.
 - Database migration 31 adds idempotent, tenant-scoped thread activity storage.
   Existing runtime events and historical mixed process-exit evidence remain
   unchanged. Upgrade backend compatibility before the dependent web interface

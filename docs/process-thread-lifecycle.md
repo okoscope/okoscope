@@ -95,8 +95,10 @@ Incomplete baselines, observation gaps, and truncation remain explicit. Clients
 label affected counts as lower bounds and show unavailable counts separately. The authoritative request and response schemas are in
 `openapi/okoscope-v1.yaml`.
 
-Migration 31 creates dedicated idempotent storage keyed by tenant,
-Application, process identity, generation, epoch, and window bounds. Disabling
+Migration 31 creates dedicated thread-window storage. Migration 32 extends
+uniqueness to the Project and observing agent and updates the process lookup
+index; existing windows are preserved. Idempotency is keyed by tenant,
+Project, Application, agent, process identity, generation, epoch, and window bounds. Disabling
 the capability or rolling back the agent requires no destructive migration;
 already stored evidence remains readable until its normal retention boundary.
 Thread windows follow the Project's effective raw-runtime retention horizon
