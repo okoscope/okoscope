@@ -442,6 +442,7 @@ async fn observed_process(pool: &sqlx::PgPool, ids: &BootstrapIds) -> (Uuid, Uui
             command: "sh".into(),
         },
         payload: EventPayload::ProcessExec(ProcessExec {
+            generation: None,
             executable: "/bin/sh".into(),
             parent_command: None,
         }),

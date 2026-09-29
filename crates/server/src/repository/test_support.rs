@@ -112,6 +112,7 @@ pub fn exec(tenant: &Tenant, executable: &str, observed_at: DateTime<Utc>) -> Ru
     event(
         tenant,
         EventPayload::ProcessExec(ProcessExec {
+            generation: None,
             executable: executable.into(),
             parent_command: None,
         }),

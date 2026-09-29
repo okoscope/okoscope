@@ -57,3 +57,5 @@ pub mod resources;
 pub mod retention;
 pub mod runtime_groups;
 pub mod runtime_retention;
+
+pub mod thread_activity;

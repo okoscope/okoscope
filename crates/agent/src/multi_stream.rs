@@ -83,9 +83,19 @@ impl ApplicationStreams {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return false;
         };
+        let lifecycle = matches!(
+            event.payload,
+            event_model::EventPayload::ThreadActivityWindow(_)
+        );
+        record_lifecycle_diagnostics(application_counters, &event);
         match sender.try_send(StreamItem::Event(Box::new(event))) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                if lifecycle {
+                    application_counters
+                        .lifecycle_output_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.counters
                     .capacity_dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -168,6 +178,37 @@ impl ApplicationStreams {
 
     pub fn route_count(&self) -> usize {
         self.routes.len()
+    }
+}
+
+fn record_lifecycle_diagnostics(counters: &ApplicationCounters, event: &RuntimeEvent) {
+    let event_model::EventPayload::ThreadActivityWindow(window) = &event.payload else {
+        return;
+    };
+    let add = |counter: &std::sync::atomic::AtomicU64, value: u64| {
+        counter.fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+    };
+    if !window.generation.start_observed {
+        add(&counters.lifecycle_generation_miss, 1);
+    }
+    add(&counters.lifecycle_name_overflow, window.name_overflow);
+    if !window.baseline_complete || !window.gaps.is_empty() {
+        add(&counters.lifecycle_incomplete_window, 1);
+    }
+    for gap in &window.gaps {
+        match gap {
+            event_model::ThreadGapReason::SnapshotPermission
+            | event_model::ThreadGapReason::SnapshotRace => {
+                add(&counters.lifecycle_snapshot_failed, 1);
+            }
+            event_model::ThreadGapReason::SnapshotTruncated => {
+                add(&counters.lifecycle_snapshot_truncated, 1);
+            }
+            event_model::ThreadGapReason::DeliveryGap => {
+                add(&counters.lifecycle_delivery_gap, 1);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -652,6 +693,7 @@ mod tests {
             payload: EventPayload::ProcessExec(ProcessExec {
                 executable: "/app".into(),
                 parent_command: None,
+                generation: None,
             }),
         }
     }

@@ -169,6 +169,16 @@ impl RuntimeRetentionRepository {
             .await
     }
 
+    /// Expires bounded thread aggregates with the project's raw retention horizon.
+    pub async fn expire_thread_windows<'e, E: PgExecutor<'e>>(
+        executor: E,
+        project_id: Uuid,
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
+        Ok(sqlx::query("DELETE FROM thread_activity_windows WHERE id IN (SELECT w.id FROM thread_activity_windows w JOIN projects p ON p.id=w.project_id WHERE p.id=$1 AND w.observed_at<p.runtime_closed_before ORDER BY w.observed_at,w.id LIMIT $2)")
+            .bind(project_id).bind(limit).execute(executor).await?.rows_affected())
+    }
+
     /// Folds the events into daily history snapshots per group and day, and
     /// per release when `released`, adding to existing snapshots. With an
     /// `expired_before` horizon, days already past it are skipped.
@@ -257,7 +267,7 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN projects p ON p.id=e.project_id WHERE p.id=$1 AND e.observed_at<p.runtime_closed_before)")
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN projects p ON p.id=e.project_id WHERE p.id=$1 AND e.observed_at<p.runtime_closed_before) OR EXISTS(SELECT 1 FROM thread_activity_windows w JOIN projects p ON p.id=w.project_id WHERE p.id=$1 AND w.observed_at<p.runtime_closed_before)")
             .bind(project_id)
             .fetch_one(executor)
             .await

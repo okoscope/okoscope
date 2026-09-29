@@ -55,9 +55,21 @@ pub enum GenerationCorrelation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessExit {
     pub source: EvidenceSource,
+    #[serde(default)]
+    pub classification: ProcessExitClassification,
     pub raw_wait_status: i32,
     pub termination: ProcessTermination,
     pub correlation: GenerationCorrelation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<crate::ProcessGenerationIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessExitClassification {
+    Leader,
+    #[default]
+    LegacyUnclassified,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,10 +186,30 @@ impl ProcessExit {
     ) -> Self {
         Self {
             source: EvidenceSource::Kernel,
+            classification: ProcessExitClassification::LegacyUnclassified,
             raw_wait_status,
             termination,
             correlation,
+            generation: None,
         }
+    }
+
+    #[must_use]
+    pub fn classified_leader(
+        raw_wait_status: i32,
+        termination: ProcessTermination,
+        correlation: GenerationCorrelation,
+    ) -> Self {
+        Self {
+            classification: ProcessExitClassification::Leader,
+            ..Self::new(raw_wait_status, termination, correlation)
+        }
+    }
+
+    #[must_use]
+    pub fn with_generation(mut self, generation: crate::ProcessGenerationIdentity) -> Self {
+        self.generation = Some(generation);
+        self
     }
 }
 

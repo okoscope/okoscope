@@ -48,7 +48,8 @@ fn agent_capabilities(hello: &AgentHello) -> AgentCapabilities {
         mask: u8::from(has(protocol::FILE_ACTIVITY_CAPABILITY))
             | u8::from(has(protocol::KUBERNETES_RELEASE_DISCOVERY_CAPABILITY)) << 1
             | u8::from(has(protocol::ONBOARDING_STATUS_CAPABILITY)) << 2
-            | u8::from(has(protocol::RESOURCE_UTILIZATION_CAPABILITY)) << 3,
+            | u8::from(has(protocol::RESOURCE_UTILIZATION_CAPABILITY)) << 3
+            | u8::from(has(protocol::TASK_LIFECYCLE_CAPABILITY)) << 4,
     }
 }
 
@@ -62,6 +63,39 @@ fn status(error: AgentSessionError) -> Status {
             Status::internal("internal server error")
         }
     }
+}
+
+fn validate_event_capabilities(
+    capabilities: AgentCapabilities,
+    events: &[event_model::RuntimeEvent],
+) -> Result<(), Status> {
+    let requires_files = events.iter().any(|event| {
+        matches!(
+            event.payload,
+            event_model::EventPayload::FileCreate(_)
+                | event_model::EventPayload::FileModify(_)
+                | event_model::EventPayload::FileDelete(_)
+                | event_model::EventPayload::FileRename(_)
+        )
+    });
+    if !capabilities.has(1) && requires_files {
+        return Err(Status::failed_precondition(
+            "file activity event requires file.activity.syscall-path/v1 capability",
+        ));
+    }
+    let requires_lifecycle = events.iter().any(|event| {
+        matches!(
+            event.payload,
+            event_model::EventPayload::ProcessStart(_)
+                | event_model::EventPayload::ThreadActivityWindow(_)
+        )
+    });
+    if !capabilities.has(1 << 4) && requires_lifecycle {
+        return Err(Status::failed_precondition(
+            "task lifecycle evidence requires task.lifecycle/v1 capability",
+        ));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
@@ -119,13 +153,7 @@ impl AgentService for AgentSessionService {
                     match message.message {
                         Some(agent_message::Message::EventBatch(batch)) => {
                             let mut events = batch.events.into_iter().map(event_model::RuntimeEvent::try_from).collect::<Result<Vec<_>, _>>().map_err(|error| Status::invalid_argument(error.to_string()))?;
-                            if !capabilities.has(1) && events.iter().any(|event| matches!(event.payload,
-                                event_model::EventPayload::FileCreate(_)
-                                | event_model::EventPayload::FileModify(_)
-                                | event_model::EventPayload::FileDelete(_)
-                                | event_model::EventPayload::FileRename(_))) {
-                                return Err(Status::failed_precondition("file activity event requires file.activity.syscall-path/v1 capability"));
-                            }
+                            validate_event_capabilities(capabilities, &events)?;
                             let (accepted, retention_expired_events) = intake.persist_events(session, application_scope, &mut events).await.map_err(status)?;
                             sender.send(Ok(ServerMessage { protocol_version: event_model::PROTOCOL_VERSION, message: Some(server_message::Message::BatchAcknowledgement(BatchAcknowledgement { sequence: batch.sequence, accepted_events: accepted, retention_expired_events })) })).await.map_err(|_| Status::unavailable("session response channel closed"))?;
                         }

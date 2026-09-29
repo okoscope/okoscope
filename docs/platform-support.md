@@ -23,3 +23,4 @@ uname -m
 
 Other kernels, cgroup v1, CRI-O, ARM64, Pods without a Deployment owner, and managed-provider-specific hardened nodes are not claimed as supported by this MVP.
 
+The optional `observation.processExit` profile also loads task-creation and task-rename BTF hooks. The runtime advertises `task.lifecycle/v1` only after all lifecycle programs load and attach successfully; failures withhold the profile without disabling other configured observation. Userspace tests do not verify kernel attachment. See [process and thread lifecycle](process-thread-lifecycle.md) for collection limits and evidence quality.

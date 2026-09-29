@@ -8,6 +8,20 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- Capability-gated `task.lifecycle/v1` observation distinguishes process creation,
+  executable replacement, and leader termination. Named-thread transitions are
+  stored as bounded, replay-safe 60-second windows rather than process exits or
+  new Runtime Group identities.
+- Authenticated Application APIs expose thread windows and summaries with
+  baseline provenance, completeness, overflow, and observation gaps. Created
+  and exited totals span the selected windows; active and peak counts are
+  unavailable when multiple qualified processes or observation epochs prevent
+  a reliable population or simultaneous peak from being established.
+- Lifecycle evidence carries a PID-reuse-safe generation. Historical payloads
+  remain readable without synthetic starts or inferred generation identities.
+
 ### Changed
 
 - Every paginated list now refuses a `limit` outside its range with
@@ -31,6 +45,16 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
   answers `404 user_not_found` instead of `500`.
 - Creating or renaming a webhook destination to a name already used in the
   project now answers `409 destination_name_conflict` instead of `500`.
+
+### Upgrade notes
+
+- Database migration 31 adds idempotent, tenant-scoped thread activity storage.
+  Existing runtime events and historical mixed process-exit evidence remain
+  unchanged. Upgrade backend compatibility before the dependent web interface
+  and before enabling lifecycle-capable agents.
+- The runtime agent advertises `task.lifecycle/v1` only when the required
+  creation, rename, and exit programs load and attach. Existing observation
+  continues when the capability is unavailable.
 
 ## [0.3.3] - 2026-09-18
 

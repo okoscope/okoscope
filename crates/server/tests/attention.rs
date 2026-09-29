@@ -137,6 +137,7 @@ fn event(
         payload: EventPayload::ProcessExec(ProcessExec {
             executable: executable.into(),
             parent_command: None,
+            generation: None,
         }),
     }
 }
