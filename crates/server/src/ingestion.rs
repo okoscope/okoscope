@@ -27,6 +27,8 @@ pub enum IngestionError {
     RevokedCredential,
     #[error("event cgroup ID exceeds PostgreSQL signed integer range")]
     CgroupOverflow,
+    #[error("lifecycle counter exceeds PostgreSQL signed integer range")]
+    LifecycleCounterOverflow,
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("event payload serialization failed: {0}")]
@@ -153,6 +155,9 @@ async fn persist_event(
     if !owned {
         return Err(IngestionError::InvalidOwnership);
     }
+    if let EventPayload::ThreadActivityWindow(window) = &event.payload {
+        return persist_thread_window(tx, context, event, window).await;
+    }
     let release_id = resolve_release(tx, context, event).await?;
     crate::metrics::record_release_attribution(
         event.attribution.release.is_some() || event.attribution.release_identity.is_some(),
@@ -246,6 +251,60 @@ async fn persist_event(
     .await?;
     record_event_metrics(event, grouping.group_created);
     Ok(1)
+}
+
+async fn persist_thread_window(
+    tx: &mut Transaction<'_, Postgres>,
+    context: IngestionContext,
+    event: &RuntimeEvent,
+    window: &event_model::ThreadActivityWindow,
+) -> Result<u32, IngestionError> {
+    window
+        .validate()
+        .map_err(|_| IngestionError::InvalidTermination)?;
+    let signed =
+        |value: u64| i64::try_from(value).map_err(|_| IngestionError::LifecycleCounterOverflow);
+    let cgroup_id = signed(event.process.cgroup_id)?;
+    let inserted = crate::repository::thread_activity::ThreadActivityRepository::insert(
+        &mut **tx,
+        crate::repository::thread_activity::NewWindow {
+            id: window.id,
+            organization_id: context.scope.organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id: context.scope.cluster_id,
+            agent_id: context.agent_id,
+            observed_at: event.observed_at,
+            process_cgroup_id: cgroup_id,
+            process_pid: i64::from(event.process.pid),
+            process_tgid: i64::from(event.process.tgid),
+            process_command: &event.process.command,
+            process_generation: signed(window.generation.generation)?,
+            observation_epoch: window.generation.observation_epoch,
+            start_observed: window.generation.start_observed,
+            window_started_at: window.window_started_at,
+            window_ended_at: window.window_ended_at,
+            created_count: signed(window.created)?,
+            exited_count: signed(window.exited)?,
+            active_at_start: signed(window.active_at_start)?,
+            active_at_end: signed(window.active_at_end)?,
+            peak_active: signed(window.peak_active)?,
+            baseline_provenance: match window.baseline_provenance {
+                event_model::BaselineProvenance::Observed => "observed",
+                event_model::BaselineProvenance::Snapshot => "snapshot",
+                event_model::BaselineProvenance::Unavailable => "unavailable",
+            },
+            baseline_complete: window.baseline_complete,
+            name_overflow: signed(window.name_overflow)?,
+            names: to_value(&window.names)?,
+            gaps: to_value(&window.gaps)?,
+        },
+    )
+    .await?;
+    if inserted.is_none() {
+        crate::metrics::record_duplicate_event();
+    }
+    Ok(u32::from(inserted.is_some()))
 }
 
 fn record_event_metrics(event: &RuntimeEvent, group_created: bool) {
@@ -345,7 +404,9 @@ fn validate_dns_event(event: &RuntimeEvent) -> Result<(), IngestionError> {
             .dns_context
             .as_ref()
             .is_none_or(|context| context.validate().is_ok()),
-        EventPayload::ProcessExec(_)
+        EventPayload::ProcessStart(_)
+        | EventPayload::ThreadActivityWindow(_)
+        | EventPayload::ProcessExec(_)
         | EventPayload::Syscall(_)
         | EventPayload::NetworkListen(_)
         | EventPayload::NetworkAccept(_)
@@ -365,6 +426,23 @@ fn validate_termination_event(event: &RuntimeEvent) -> Result<(), IngestionError
     use event_model::{EvidenceSource, GenerationCorrelation, ProcessTermination};
 
     let valid = match &event.payload {
+        EventPayload::ProcessStart(value) => {
+            value.validate().is_ok()
+                && event.process.pid > 0
+                && event.process.pid == event.process.tgid
+                && !event.process.command.is_empty()
+                && event.process.command.len() <= event_model::MAX_THREAD_NAME_BYTES
+        }
+        EventPayload::ProcessExec(value) => value
+            .generation
+            .as_ref()
+            .is_none_or(|generation| generation.validate().is_ok()),
+        EventPayload::ThreadActivityWindow(value) => {
+            value.validate().is_ok()
+                && value.process == event.process
+                && value.id == event.id
+                && event.observed_at >= value.window_ended_at
+        }
         EventPayload::ProcessExit(value) => {
             let termination_valid = match &value.termination {
                 ProcessTermination::Exited { status } => {
@@ -393,7 +471,15 @@ fn validate_termination_event(event: &RuntimeEvent) -> Result<(), IngestionError
                 }
                 GenerationCorrelation::Unresolved { .. } => true,
             };
-            value.source == EvidenceSource::Kernel && termination_valid && correlation_valid
+            value.source == EvidenceSource::Kernel
+                && termination_valid
+                && correlation_valid
+                && value
+                    .generation
+                    .as_ref()
+                    .is_none_or(|generation| generation.validate().is_ok())
+                && (value.classification != event_model::ProcessExitClassification::Leader
+                    || (event.process.pid > 0 && event.process.pid == event.process.tgid))
         }
         EventPayload::ContainerTermination(value) => event_model::ContainerTermination::new(
             value.runtime_container_id.clone(),
@@ -426,6 +512,27 @@ mod termination_tests {
         EvidenceSource, GenerationCorrelation, KubernetesAttribution, ProcessExit, ProcessIdentity,
         ProcessTermination, UnresolvedGenerationReason,
     };
+
+    #[test]
+    fn process_start_rejects_nonleader_and_zero_process_identity() {
+        let start = event_model::ProcessStart {
+            generation: event_model::ProcessGenerationIdentity {
+                generation: 1,
+                observation_epoch: Uuid::new_v4(),
+                start_observed: true,
+            },
+            parent_pid: 1,
+            parent_tgid: 1,
+            parent_command: "parent".into(),
+        };
+        let mut value = event(EventPayload::ProcessStart(start));
+        assert!(validate_termination_event(&value).is_ok());
+        value.process.pid = 3;
+        assert!(validate_termination_event(&value).is_err());
+        value.process.pid = 0;
+        value.process.tgid = 0;
+        assert!(validate_termination_event(&value).is_err());
+    }
 
     fn event(payload: EventPayload) -> RuntimeEvent {
         RuntimeEvent {

@@ -4,6 +4,8 @@ Runtime retention has two observation-age horizons. Details remain for `raw_days
 
 Organization owners manage the default policy. A Project either inherits the complete Organization policy or overrides it completely. An explicit disabled override pauses that Project's cleanup. Other roles can read effective settings only for Projects in their inherited or explicit effective access; policy writes remain owner-only. Initial settings are disabled with 30 days of details and 365 days of numerical history. Notification retention is independent.
 
+Named-thread activity windows follow the effective Project raw retention horizon. Cleanup deletes them in bounded batches; they do not create Runtime Group history snapshots. Expired thread populations and transitions cannot be reconstructed from numerical event history. Thread-window backlog contributes to the sampled raw-backlog Project metric.
+
 ## Policy API
 
 | Route | Methods |

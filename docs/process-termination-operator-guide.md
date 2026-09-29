@@ -15,6 +15,8 @@ waiting/backoff state, not a termination cause. Correlation requires matching
 tenant, workload, Pod UID, container name/runtime ID and the documented
 30-second event-time tolerance; multiple candidates remain ambiguous.
 
+With `task.lifecycle/v1`, new `process.exit` evidence describes thread-group leaders only. Non-leader thread creation, rename and exit contribute to bounded named-thread windows instead of stopped-process evidence. Historical mixed exits retain their identities and are labeled `legacy_unclassified`; they are not retrospectively classified. The `observation.processExit` profile requires successful exit, task-creation and task-rename hook attachment before advertising the lifecycle capability. See [process and thread lifecycle](process-thread-lifecycle.md).
+
 ## Scope and blind spots
 
 Version 1 observes regular app containers, not init or ephemeral containers.

@@ -379,6 +379,20 @@ pub struct InventoryItem {
     group_count: i64,
 }
 
+impl InventoryItem {
+    fn classify_legacy_exit(&mut self) {
+        if let Some(summary) = self.semantic_summary.as_object_mut()
+            && summary.get("event_kind").and_then(Value::as_str) == Some("process.exit")
+            && !summary.contains_key("classification")
+        {
+            summary.insert(
+                "classification".into(),
+                Value::String("legacy_unclassified".into()),
+            );
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct InventoryItemPage {
     coverage: crate::runtime_retention::history::Coverage,
@@ -393,13 +407,11 @@ pub struct KindCount {
     occurrence_count: i64,
 }
 
-#[derive(Debug, FromRow)]
-struct KindAggregate {
-    kind: String,
-    item_count: i64,
-    occurrence_count: i64,
-    first_seen_at: DateTime<Utc>,
-    last_seen_at: DateTime<Utc>,
+#[derive(Debug, Default, Serialize)]
+struct ProcessLifecycleCounts {
+    created: i64,
+    executed: i64,
+    terminated: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,6 +423,7 @@ pub struct InventorySummary {
     first_seen_at: Option<DateTime<Utc>>,
     last_seen_at: Option<DateTime<Utc>>,
     kinds: Vec<KindCount>,
+    process_lifecycle: ProcessLifecycleCounts,
 }
 
 #[derive(Debug, Serialize)]
@@ -963,16 +976,17 @@ impl InventoryService {
         )?;
         let version = CURRENT_INVENTORY_IDENTITY_VERSION.get();
         let search = scope.search_pattern();
-        let rows: Vec<KindAggregate> = InventoryRepository::kind_summary(
-            &self.pool,
-            scope.filter(
-                principal.organization_id,
-                project_id,
-                application_id,
-                search.as_deref(),
-            ),
-        )
-        .await?;
+        let rows: Vec<crate::repository::inventory::KindAggregate> =
+            InventoryRepository::kind_summary(
+                &self.pool,
+                scope.filter(
+                    principal.organization_id,
+                    project_id,
+                    application_id,
+                    search.as_deref(),
+                ),
+            )
+            .await?;
         let mut kinds: Vec<_> = [
             "destination",
             "domain",
@@ -991,7 +1005,11 @@ impl InventoryService {
         .collect();
         let mut first_seen_at: Option<DateTime<Utc>> = None;
         let mut last_seen_at: Option<DateTime<Utc>> = None;
+        let mut process_lifecycle = ProcessLifecycleCounts::default();
         for row in rows {
+            process_lifecycle.created += row.process_start_count;
+            process_lifecycle.executed += row.process_exec_count;
+            process_lifecycle.terminated += row.process_exit_count;
             let kind = kinds
                 .iter_mut()
                 .find(|kind| kind.kind == row.kind)
@@ -1026,6 +1044,7 @@ impl InventoryService {
             first_seen_at,
             last_seen_at,
             kinds,
+            process_lifecycle,
         })
     }
 
@@ -1314,6 +1333,9 @@ impl InventoryService {
             limit + 1,
         )
         .await?;
+        for item in &mut items {
+            item.classify_legacy_exit();
+        }
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
             items.pop();
             items.last().map(|item| item.id)
@@ -1622,7 +1644,7 @@ impl InventoryService {
         application_id: Uuid,
         item_id: Uuid,
     ) -> Result<InventoryItem, InventoryServiceError> {
-        InventoryRepository::item::<_, InventoryItem>(
+        let mut item = InventoryRepository::item::<_, InventoryItem>(
             &self.pool,
             principal.organization_id,
             project_id,
@@ -1631,7 +1653,9 @@ impl InventoryService {
             CURRENT_INVENTORY_IDENTITY_VERSION.get(),
         )
         .await?
-        .ok_or(InventoryServiceError::NotFound)
+        .ok_or(InventoryServiceError::NotFound)?;
+        item.classify_legacy_exit();
+        Ok(item)
     }
 }
 
