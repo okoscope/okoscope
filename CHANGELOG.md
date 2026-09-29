@@ -24,6 +24,9 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Changed
 
+- DNS group queries now reuse scoped evidence and select each occurrence's
+  longest eligible name once, reducing repeated database work without changing
+  grouping results.
 - Every paginated list now refuses a `limit` outside its range with
   `400 invalid_request` ("limit must be between 1 and N"). Organization and
   project members, eligible members, organization and platform audit, the
