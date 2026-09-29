@@ -12,7 +12,8 @@ application.
 
 ## What Okoscope observes
 
-- Process execution, termination, and restart evidence.
+- Process creation, executable replacement, termination, and restart evidence.
+- Bounded named-thread activity windows with explicit observation quality.
 - File activity from a bounded, documented syscall profile.
 - Inbound and outbound network activity and DNS resolution.
 - Optional cgroup v2 CPU, memory, and I/O utilization aggregates.
@@ -34,11 +35,37 @@ Outbound destinations, DNS behavior, syscalls, and file activity are grouped by
 canonical behavior across all Linux thread commands in an Application. Raw
 occurrences and process-aware Runtime Groups retain the originating command for
 investigation, while managed policies for these behaviors apply across threads.
-The Application domain view can additionally present logical DNS destinations:
-A/AAAA questions and Kubernetes `cluster.local` search expansions corroborated
-by an exact base question or multiple search suffixes in one resolver context
-are grouped for display, while their exact resolver questions remain available
-for policy evaluation, history, and audit.
+Process lifecycle observation distinguishes kernel task creation
+(`process.start`), executable replacement (`process.exec`), and leader
+termination (`process.exit`). When the running kernel accepts all required
+CO-RE programs, the agent advertises `task.lifecycle/v1` and emits bounded
+60-second thread-activity aggregates by current Linux task name. Enable
+`observation.processExit` to collect task creation, rename, and exit evidence;
+`processExec` remains independent. Aggregate APIs
+carry explicit baseline provenance, completeness, overflow, and observation-gap
+evidence; thread names do not become Runtime Groups or policy identities. See
+[`docs/process-thread-lifecycle.md`](docs/process-thread-lifecycle.md).
+Lifecycle-capable evidence uses one PID-reuse-safe generation across creation,
+repeated exec, thread activity, and leader exit. Older evidence remains readable
+without an inferred generation or synthetic start. Thread windows follow the
+Project's effective raw-runtime retention and have no separate historical
+snapshot after expiry.
+Task lifecycle specifically uses the BTF tracepoints
+`task_newtask` and `task_rename`; inability to load either hook withholds
+that capability without disabling existing exec, network, DNS, file, resource,
+or Kubernetes lifecycle observation. Each observed node must accept all required
+programs before the capability is advertised.
+Application heartbeats expose only lifecycle diagnostics that already have a
+trusted Application route. Pre-route kernel loss, decode failure, and
+attribution failure remain node-local metrics/readiness/log evidence and are
+never guessed onto a tenant Application.
+The Application domain view presents every exact DNS inventory identity directly,
+including its observed question name and A/AAAA type. Each identity remains
+independently available for filtering, pagination, policy evaluation, history,
+and audit. The web application's non-interactive top-five overview uses the
+server's logical DNS grouping endpoint so Kubernetes resolver variants do not
+crowd other frequently observed destinations out of the summary. The exact
+inventory list remains the primary domain view and overview groups do not filter it.
 Application health includes only diagnostic evidence assigned after workload
 attribution to that Application's authenticated stream. Host activity,
 unselected workloads, and other node-wide observer diagnostics are retained for
@@ -62,6 +89,10 @@ protocol, event model, and server. The web UI is maintained in the separate
 | Server | Authenticates ingestion and users, persists data, builds projections, and serves health and HTTP APIs. |
 | PostgreSQL | Stores configuration, runtime evidence, projections, retention summaries, and migration state. |
 | Web UI | Presents onboarding, runtime insights, operations, and access management through the public API. |
+
+HTTP and gRPC transport call services that own authorization, validation, and
+transaction boundaries. Repositories own SQL and tenant-scoping predicates. Thread activity responses
+are projected separately from concrete persistence rows.
 
 See [Architecture](ARCHITECTURE.md) for the data flow and trust boundaries. The
 authoritative HTTP contract is [`openapi/okoscope-v1.yaml`](openapi/okoscope-v1.yaml).
@@ -100,6 +131,18 @@ make build-ebpf
 ```
 
 `make check` runs formatting checks and strict Clippy for the supported workspace.
+Changes to browser-facing APIs update the backend contract first, then the web
+contract copy and generated types. The web verification workflow compares its
+contract against the configured backend revision and checks generated types
+without rewriting files. Deploy compatible backend support before its dependent
+web interface; lifecycle storage requires database migration 31.
+The web repository also provides a dedicated PostgreSQL-backed thread-activity
+browser suite. It starts this server with an isolated local database and seeds
+windows through authenticated ingestion using `browser_thread_fixture`; see
+the web README for the command and prerequisites. This suite verifies browser,
+API, and persistence behavior, while live kernel attachment requires a
+supported Linux host.
+
 The manifests under `deploy/kubernetes` remain for existing Kustomize-based
 environments but are not recommended for new installations.
 
@@ -111,6 +154,7 @@ environments but are not recommended for new installations.
 - [Runtime event retention](docs/runtime-events-retention.md)
 - [Resource utilization](docs/resource-utilization.md)
 - [Process termination and restart evidence](docs/process-termination-operator-guide.md)
+- [Process and named-thread lifecycle](docs/process-thread-lifecycle.md)
 - [Outbound network observation](docs/outbound-network-observation.md)
 - [Inbound network observation](docs/inbound-network-observation.md)
 - [DNS resolution observation](docs/dns-resolution-observation.md)

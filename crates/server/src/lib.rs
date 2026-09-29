@@ -36,6 +36,7 @@ pub mod resources;
 pub mod service;
 pub mod session;
 pub mod termination_projection;
+pub mod thread_activity_api;
 pub mod transactional_mail;
 pub mod transport;
 pub mod user_auth;

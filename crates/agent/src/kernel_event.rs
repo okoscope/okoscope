@@ -13,6 +13,109 @@ use event_model::{
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum TaskDecodeError {
+    #[error(transparent)]
+    Layout(#[from] DecodeError),
+    #[error("task event contains an invalid identifier")]
+    InvalidIdentifier,
+    #[error("task event command is not valid bounded UTF-8")]
+    InvalidCommand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedTaskCreation {
+    pub kernel: agent_ebpf_common::TaskCreationEvent,
+    pub child_command: String,
+    pub parent_command: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedTaskRename {
+    pub kernel: agent_ebpf_common::TaskRenameEvent,
+    pub command: String,
+}
+
+pub fn decode_task_creation(bytes: &[u8]) -> Result<DecodedTaskCreation, TaskDecodeError> {
+    require_task_size(bytes, agent_ebpf_common::TaskCreationEvent::SIZE)?;
+    let kernel = agent_ebpf_common::TaskCreationEvent {
+        timestamp_ns: task_u64(bytes, 0),
+        cgroup_id: task_u64(bytes, 8),
+        child_pid: task_u32(bytes, 16),
+        child_tgid: task_u32(bytes, 20),
+        parent_pid: task_u32(bytes, 24),
+        parent_tgid: task_u32(bytes, 28),
+        child_command: bytes[32..48].try_into().expect("validated layout"),
+        parent_command: bytes[48..64].try_into().expect("validated layout"),
+    };
+    if kernel.child_pid == 0
+        || kernel.child_tgid == 0
+        || kernel.parent_pid == 0
+        || kernel.parent_tgid == 0
+    {
+        return Err(TaskDecodeError::InvalidIdentifier);
+    }
+    Ok(DecodedTaskCreation {
+        child_command: decode_task_command(&kernel.child_command),
+        parent_command: decode_task_command(&kernel.parent_command),
+        kernel,
+    })
+}
+
+pub fn decode_task_rename(bytes: &[u8]) -> Result<DecodedTaskRename, TaskDecodeError> {
+    require_task_size(bytes, agent_ebpf_common::TaskRenameEvent::SIZE)?;
+    let kernel = agent_ebpf_common::TaskRenameEvent {
+        timestamp_ns: task_u64(bytes, 0),
+        pid: task_u32(bytes, 8),
+        tgid: task_u32(bytes, 12),
+        command: bytes[16..32].try_into().expect("validated layout"),
+    };
+    if kernel.pid == 0 || kernel.tgid == 0 {
+        return Err(TaskDecodeError::InvalidIdentifier);
+    }
+    Ok(DecodedTaskRename {
+        command: decode_task_command(&kernel.command),
+        kernel,
+    })
+}
+
+fn require_task_size(bytes: &[u8], expected: usize) -> Result<(), DecodeError> {
+    if bytes.len() != expected {
+        return Err(DecodeError::InvalidSize {
+            actual: bytes.len(),
+            expected,
+        });
+    }
+    Ok(())
+}
+
+fn task_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_ne_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("validated layout"),
+    )
+}
+
+fn task_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_ne_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("validated layout"),
+    )
+}
+
+fn decode_task_command(bytes: &[u8; COMMAND_LEN]) -> String {
+    let end = bytes
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(bytes.len());
+    if end == 0 || bytes[end..].iter().any(|value| *value != 0) {
+        return "unknown".to_owned();
+    }
+    std::str::from_utf8(&bytes[..end]).map_or_else(|_| "unknown".to_owned(), str::to_owned)
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DecodeError {
     #[error("kernel event has size {actual}, expected {expected}")]
     InvalidSize { actual: usize, expected: usize },
@@ -781,5 +884,44 @@ mod tests {
             decode_file(&[0; 2]),
             Err(FileDecodeError::Layout(_))
         ));
+    }
+
+    #[test]
+    fn task_records_are_strictly_sized_classified_and_utf8_bounded() {
+        let mut creation = vec![0_u8; agent_ebpf_common::TaskCreationEvent::SIZE];
+        creation[0..8].copy_from_slice(&1_u64.to_ne_bytes());
+        creation[8..16].copy_from_slice(&2_u64.to_ne_bytes());
+        creation[16..20].copy_from_slice(&11_u32.to_ne_bytes());
+        creation[20..24].copy_from_slice(&10_u32.to_ne_bytes());
+        creation[24..28].copy_from_slice(&10_u32.to_ne_bytes());
+        creation[28..32].copy_from_slice(&10_u32.to_ne_bytes());
+        creation[32..38].copy_from_slice(b"worker");
+        creation[48..51].copy_from_slice(b"app");
+        let decoded = decode_task_creation(&creation).unwrap();
+        assert_eq!(
+            (decoded.kernel.child_pid, decoded.kernel.child_tgid),
+            (11, 10)
+        );
+        assert_eq!(decoded.child_command, "worker");
+        assert!(matches!(
+            decode_task_creation(&creation[..63]),
+            Err(TaskDecodeError::Layout(_))
+        ));
+        creation[32] = 0xff;
+        assert_eq!(
+            decode_task_creation(&creation).unwrap().child_command,
+            "unknown"
+        );
+
+        let mut rename = vec![0_u8; agent_ebpf_common::TaskRenameEvent::SIZE];
+        rename[8..12].copy_from_slice(&11_u32.to_ne_bytes());
+        rename[12..16].copy_from_slice(&10_u32.to_ne_bytes());
+        rename[16..28].copy_from_slice(b"tokio-worker");
+        assert_eq!(decode_task_rename(&rename).unwrap().command, "tokio-worker");
+        rename[8..12].fill(0);
+        assert_eq!(
+            decode_task_rename(&rename),
+            Err(TaskDecodeError::InvalidIdentifier)
+        );
     }
 }

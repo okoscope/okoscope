@@ -1,24 +1,41 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use event_model::{GenerationCorrelation, UnresolvedGenerationReason};
+use event_model::{GenerationCorrelation, ProcessGenerationIdentity, UnresolvedGenerationReason};
 use uuid::Uuid;
 
-#[derive(Clone, Debug)]
-struct ExecGeneration {
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ProcessKey {
     cgroup_id: u64,
+    tgid: u32,
+}
+
+#[derive(Clone, Debug)]
+struct ProcessGeneration {
+    identity: ProcessGenerationIdentity,
     observed_at_ns: u64,
-    generation: u64,
+    exec: Option<ExecEvidence>,
+}
+
+#[derive(Clone, Debug)]
+struct ExecEvidence {
     event_id: Uuid,
     executable: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConsumedGeneration {
+    pub identity: Option<ProcessGenerationIdentity>,
+    pub correlation: GenerationCorrelation,
 }
 
 #[derive(Debug)]
 pub struct ProcessGenerationStore {
     capacity: usize,
-    entries: HashMap<u64, ExecGeneration>,
-    last_generation: HashMap<u64, u64>,
-    lru: VecDeque<(u64, u64)>,
-    evicted: HashSet<u64>,
+    epoch: Uuid,
+    next_generation: u64,
+    entries: HashMap<ProcessKey, ProcessGeneration>,
+    lru: VecDeque<(ProcessKey, u64)>,
+    evicted: HashSet<ProcessKey>,
 }
 
 impl ProcessGenerationStore {
@@ -26,105 +43,143 @@ impl ProcessGenerationStore {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
+            epoch: Uuid::new_v4(),
+            next_generation: 1,
             entries: HashMap::with_capacity(capacity),
-            last_generation: HashMap::with_capacity(capacity),
             lru: VecDeque::with_capacity(capacity),
             evicted: HashSet::with_capacity(capacity),
         }
     }
 
-    pub fn observe_exec(
+    pub fn observe_start(
         &mut self,
-        pid_tgid: u64,
         cgroup_id: u64,
-        observed_at_ns: u64,
-        event_id: Uuid,
-        executable: String,
-    ) -> u64 {
-        let generation = self
-            .last_generation
-            .get(&pid_tgid)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
-        self.last_generation.insert(pid_tgid, generation);
-        self.entries.insert(
-            pid_tgid,
-            ExecGeneration {
-                cgroup_id,
-                observed_at_ns,
-                generation,
-                event_id,
-                executable,
-            },
-        );
-        self.evicted.remove(&pid_tgid);
-        self.lru.push_back((pid_tgid, generation));
-        self.enforce_capacity();
-        generation
+        tgid: u32,
+        at: u64,
+    ) -> ProcessGenerationIdentity {
+        self.allocate(ProcessKey { cgroup_id, tgid }, at, true)
     }
 
-    pub fn consume_exit(
+    pub fn ensure_generation(
         &mut self,
-        pid_tgid: u64,
         cgroup_id: u64,
-        observed_at_ns: u64,
-    ) -> GenerationCorrelation {
-        let Some(entry) = self.entries.get(&pid_tgid) else {
-            return GenerationCorrelation::Unresolved {
-                reason: if self.evicted.contains(&pid_tgid) {
-                    UnresolvedGenerationReason::Evicted
-                } else {
-                    UnresolvedGenerationReason::BeforeObservation
-                },
-            };
+        tgid: u32,
+        at: u64,
+    ) -> ProcessGenerationIdentity {
+        let key = ProcessKey { cgroup_id, tgid };
+        if let Some(entry) = self.entries.get(&key) {
+            return entry.identity.clone();
+        }
+        self.allocate(key, at, false)
+    }
+
+    pub fn observe_exec(
+        &mut self,
+        cgroup_id: u64,
+        tgid: u32,
+        at: u64,
+        event_id: Uuid,
+        executable: String,
+    ) -> ProcessGenerationIdentity {
+        let identity = self.ensure_generation(cgroup_id, tgid, at);
+        let key = ProcessKey { cgroup_id, tgid };
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.exec = Some(ExecEvidence {
+                event_id,
+                executable,
+            });
+        }
+        identity
+    }
+
+    pub fn consume_exit(&mut self, cgroup_id: u64, tgid: u32, at: u64) -> ConsumedGeneration {
+        let key = ProcessKey { cgroup_id, tgid };
+        if self.evicted.contains(&key) && !self.entries.contains_key(&key) {
+            return unresolved(None, UnresolvedGenerationReason::Evicted);
+        }
+        self.ensure_generation(cgroup_id, tgid, at);
+        let Some(entry) = self.entries.get(&key) else {
+            return unresolved(None, UnresolvedGenerationReason::BeforeObservation);
         };
-        if entry.cgroup_id != cgroup_id {
-            return GenerationCorrelation::Unresolved {
-                reason: UnresolvedGenerationReason::ContainerLifetimeMismatch,
-            };
+        if entry.observed_at_ns > at {
+            return unresolved(None, UnresolvedGenerationReason::GenerationMismatch);
         }
-        if entry.observed_at_ns > observed_at_ns {
-            return GenerationCorrelation::Unresolved {
-                reason: UnresolvedGenerationReason::GenerationMismatch,
-            };
+        let entry = self.entries.remove(&key).expect("entry was present");
+        let correlation = entry.exec.map_or(
+            GenerationCorrelation::Unresolved {
+                reason: UnresolvedGenerationReason::BeforeObservation,
+            },
+            |exec| {
+                GenerationCorrelation::observed(
+                    entry.identity.generation,
+                    exec.event_id,
+                    exec.executable,
+                )
+                .expect("stored exec evidence is valid")
+            },
+        );
+        ConsumedGeneration {
+            identity: Some(entry.identity),
+            correlation,
         }
-        let entry = self.entries.remove(&pid_tgid).expect("entry was present");
-        GenerationCorrelation::observed(entry.generation, entry.event_id, entry.executable)
-            .expect("store admits only valid observed generations")
+    }
+
+    fn allocate(
+        &mut self,
+        key: ProcessKey,
+        at: u64,
+        start_observed: bool,
+    ) -> ProcessGenerationIdentity {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1).max(1);
+        let identity = ProcessGenerationIdentity {
+            generation,
+            observation_epoch: self.epoch,
+            start_observed,
+        };
+        self.entries.insert(
+            key,
+            ProcessGeneration {
+                identity: identity.clone(),
+                observed_at_ns: at,
+                exec: None,
+            },
+        );
+        self.evicted.remove(&key);
+        self.lru.push_back((key, generation));
+        self.enforce_capacity();
+        identity
     }
 
     fn enforce_capacity(&mut self) {
         while self.entries.len() > self.capacity {
-            let Some((pid_tgid, generation)) = self.lru.pop_front() else {
+            let Some((key, generation)) = self.lru.pop_front() else {
                 break;
             };
             if self
                 .entries
-                .get(&pid_tgid)
-                .is_some_and(|entry| entry.generation == generation)
+                .get(&key)
+                .is_some_and(|entry| entry.identity.generation == generation)
             {
-                self.entries.remove(&pid_tgid);
-                self.evicted.insert(pid_tgid);
-                while self.evicted.len() > self.capacity.max(1) {
-                    if let Some(value) = self.evicted.iter().next().copied() {
-                        self.evicted.remove(&value);
-                    }
-                }
+                self.entries.remove(&key);
+                self.evicted.insert(key);
             }
         }
-        while self.last_generation.len() > self.capacity.max(1) * 2 {
-            if let Some(key) = self
-                .last_generation
-                .keys()
-                .find(|key| !self.entries.contains_key(key))
-                .copied()
-            {
-                self.last_generation.remove(&key);
-            } else {
-                break;
+        while self.evicted.len() > self.capacity.max(1) {
+            if let Some(key) = self.evicted.iter().next().copied() {
+                self.evicted.remove(&key);
             }
         }
+    }
+}
+
+fn unresolved(
+    identity: Option<ProcessGenerationIdentity>,
+    reason: UnresolvedGenerationReason,
+) -> ConsumedGeneration {
+    ConsumedGeneration {
+        identity,
+        correlation: GenerationCorrelation::Unresolved { reason },
     }
 }
 
@@ -133,58 +188,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_generation_is_consumed_once() {
+    fn start_exec_repeated_exec_and_exit_share_one_generation() {
         let mut store = ProcessGenerationStore::new(2);
-        let event_id = Uuid::new_v4();
+        let start = store.observe_start(20, 10, 100);
+        let first = Uuid::new_v4();
+        assert_eq!(store.observe_exec(20, 10, 101, first, "/one".into()), start);
+        let second = Uuid::new_v4();
         assert_eq!(
-            store.observe_exec(10, 20, 100, event_id, "/app/worker".into()),
-            1
+            store.observe_exec(20, 10, 102, second, "/two".into()),
+            start
         );
-        assert!(matches!(
-            store.consume_exit(10, 20, 101),
-            GenerationCorrelation::Observed {
-                generation: 1,
-                exec_event_id,
-                ..
-            } if exec_event_id == event_id
-        ));
-        assert!(matches!(
-            store.consume_exit(10, 20, 102),
-            GenerationCorrelation::Unresolved {
-                reason: UnresolvedGenerationReason::BeforeObservation
-            }
-        ));
+        let exit = store.consume_exit(20, 10, 103);
+        assert_eq!(exit.identity, Some(start));
+        assert!(
+            matches!(exit.correlation, GenerationCorrelation::Observed { exec_event_id, executable, .. } if exec_event_id == second && executable == "/two")
+        );
     }
 
     #[test]
-    fn delayed_exit_cannot_attach_a_reused_pid_generation() {
+    fn exec_first_is_synthetic_and_pid_reuse_allocates_new_generation() {
         let mut store = ProcessGenerationStore::new(2);
-        store.observe_exec(10, 20, 100, Uuid::new_v4(), "/old".into());
-        store.observe_exec(10, 20, 200, Uuid::new_v4(), "/new".into());
-        assert!(matches!(
-            store.consume_exit(10, 20, 150),
-            GenerationCorrelation::Unresolved {
-                reason: UnresolvedGenerationReason::GenerationMismatch
-            }
-        ));
+        let first = store.observe_exec(20, 10, 100, Uuid::new_v4(), "/one".into());
+        assert!(!first.start_observed);
+        store.consume_exit(20, 10, 101);
+        let reused = store.observe_start(20, 10, 200);
+        assert!(reused.start_observed);
+        assert_eq!(reused.generation, first.generation + 1);
     }
 
     #[test]
-    fn eviction_and_container_mismatch_are_explicit() {
+    fn exit_first_is_synthetic_and_eviction_is_not_rejoined() {
         let mut store = ProcessGenerationStore::new(1);
-        store.observe_exec(10, 20, 100, Uuid::new_v4(), "/one".into());
-        store.observe_exec(11, 20, 101, Uuid::new_v4(), "/two".into());
+        let exit = store.consume_exit(20, 10, 100);
+        assert!(exit.identity.is_some_and(|value| !value.start_observed));
+        store.observe_start(20, 10, 101);
+        store.observe_start(20, 11, 102);
+        let evicted = store.consume_exit(20, 10, 103);
+        assert!(evicted.identity.is_none());
         assert!(matches!(
-            store.consume_exit(10, 20, 102),
+            evicted.correlation,
             GenerationCorrelation::Unresolved {
                 reason: UnresolvedGenerationReason::Evicted
             }
         ));
+    }
+
+    #[test]
+    fn delayed_exit_cannot_consume_a_reused_pid_generation() {
+        let mut store = ProcessGenerationStore::new(2);
+        store.observe_start(20, 10, 100);
+        let current = store.observe_start(20, 10, 200);
+        let delayed = store.consume_exit(20, 10, 150);
+        assert_eq!(delayed.identity, None);
         assert!(matches!(
-            store.consume_exit(11, 99, 102),
+            delayed.correlation,
             GenerationCorrelation::Unresolved {
-                reason: UnresolvedGenerationReason::ContainerLifetimeMismatch
+                reason: UnresolvedGenerationReason::GenerationMismatch
             }
         ));
+        assert_eq!(store.consume_exit(20, 10, 201).identity, Some(current));
+    }
+
+    #[test]
+    fn agent_restart_uses_a_distinct_observation_epoch() {
+        let mut first = ProcessGenerationStore::new(1);
+        let mut restarted = ProcessGenerationStore::new(1);
+        let before = first.observe_start(20, 10, 100);
+        let after = restarted.ensure_generation(20, 10, 101);
+        assert_ne!(before.observation_epoch, after.observation_epoch);
+        assert!(!after.start_observed);
     }
 }

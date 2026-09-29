@@ -74,3 +74,5 @@ pub use projects::{LockedProject, ProjectRepository, StoredProject};
 pub use releases::{ApplicationScope, ReleaseRepository};
 pub use sessions::SessionRepository;
 pub use users::UserRepository;
+
+pub mod thread_activity;
