@@ -189,7 +189,10 @@ async fn expire(
         limit.clamp(1, 1000),
     )
     .await?;
-    Ok(groups.len() as u64)
+    let windows =
+        RuntimeRetentionRepository::expire_thread_windows(&mut **tx, project, limit.clamp(1, 1000))
+            .await?;
+    Ok(groups.len() as u64 + windows)
 }
 
 async fn recount_groups(

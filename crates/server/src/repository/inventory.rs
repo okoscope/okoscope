@@ -64,6 +64,17 @@ fn bind_scope<'q, T>(
 }
 
 /// Runtime inventory items, their sightings and group links.
+#[derive(Debug, FromRow)]
+pub struct KindAggregate {
+    pub kind: String,
+    pub item_count: i64,
+    pub occurrence_count: i64,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub process_start_count: i64,
+    pub process_exec_count: i64,
+    pub process_exit_count: i64,
+}
 #[derive(Clone, Copy, Debug)]
 pub struct InventoryRepository;
 
@@ -388,15 +399,14 @@ impl InventoryRepository {
     ///
     /// Selects `kind`, `item_count`, `occurrence_count`, `first_seen_at` and
     /// `last_seen_at`.
-    pub async fn kind_summary<'e, E, T>(
+    pub async fn kind_summary<'e, E>(
         executor: E,
         filter: InventoryFilter<'_>,
-    ) -> Result<Vec<T>, sqlx::Error>
+    ) -> Result<Vec<KindAggregate>, sqlx::Error>
     where
         E: PgExecutor<'e>,
-        T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
-        let query = sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
+        let query = sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.start'),0)::bigint process_start_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.inventory_kind='process'),0)::bigint process_exec_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.exit'),0)::bigint process_exit_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
             .bind(filter.organization_id)
             .bind(filter.project_id)
             .bind(filter.application_id)
@@ -984,13 +994,6 @@ mod tests {
     }
 
     #[derive(Debug, FromRow)]
-    struct KindAggregate {
-        kind: String,
-        item_count: i64,
-        occurrence_count: i64,
-    }
-
-    #[derive(Debug, FromRow)]
     struct Distribution {
         id: Uuid,
         identity_digest: Vec<u8>,
@@ -1366,9 +1369,10 @@ mod tests {
     async fn aggregates_summarise_by_kind_and_facet(pool: PgPool) {
         let own = tenant(&pool, "inventory-aggregates").await;
         let (a, _) = seed(&pool, &own).await;
-        let mut kinds: Vec<KindAggregate> = InventoryRepository::kind_summary(&pool, filter(&own))
-            .await
-            .unwrap();
+        let mut kinds: Vec<super::KindAggregate> =
+            InventoryRepository::kind_summary(&pool, filter(&own))
+                .await
+                .unwrap();
         kinds.sort_by(|x, y| x.kind.cmp(&y.kind));
         assert_eq!(
             kinds

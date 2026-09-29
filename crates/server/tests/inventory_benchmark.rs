@@ -6,12 +6,14 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use event_model::{
-    EVENT_SCHEMA_VERSION, EventPayload, KubernetesAttribution, NetworkAccept, NetworkAddressFamily,
-    ProcessExec, ProcessIdentity, RuntimeEvent,
+    DnsDirection, DnsName, DnsQueryType, DnsTransport, EVENT_SCHEMA_VERSION, EventPayload,
+    KubernetesAttribution, NetworkAccept, NetworkAddressFamily, NetworkDnsQuery, ProcessExec,
+    ProcessIdentity, RuntimeEvent,
 };
 use server::{
     auth::{SESSION_COOKIE, SessionScope, SessionToken},
     bootstrap::{BootstrapConfig, BootstrapIds, bootstrap},
+    dns_group_api,
     ingestion::{IngestionContext, persist_batch},
     inventory_api, releases,
 };
@@ -25,6 +27,7 @@ const MAX_PROJECTION_DURATION: Duration = Duration::from_secs(60);
 const MAX_LIST_QUERY_DURATION: Duration = Duration::from_secs(2);
 const MAX_DETAIL_QUERY_DURATION: Duration = Duration::from_secs(2);
 const MAX_AGGREGATE_QUERY_DURATION: Duration = Duration::from_secs(2);
+const MAX_CONCURRENT_DNS_GROUP_QUERY_DURATION: Duration = Duration::from_millis(500);
 const SAMPLE_COUNT: usize = 30;
 
 fn config() -> BootstrapConfig {
@@ -102,6 +105,7 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
             payload: EventPayload::ProcessExec(ProcessExec {
                 executable: format!("/app/bin/{}", index % ITEM_COUNT),
                 parent_command: None,
+                generation: None,
             }),
         })
         .collect();
@@ -389,6 +393,101 @@ async fn inbound_remote_cardinality_does_not_expand_inventory_identity(pool: sql
             i64::try_from(ENDPOINT_COUNT).unwrap(),
             i64::try_from(ACCEPT_COUNT).unwrap()
         )
+    );
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL; run explicitly for acceptance"]
+async fn concurrent_dns_group_queries_meet_aggregate_latency_limit(pool: sqlx::PgPool) {
+    const DNS_EVENT_COUNT: usize = 2_000;
+    let ids = bootstrap(&pool, &config()).await.unwrap();
+    let agent_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','benchmark')")
+        .bind(agent_id)
+        .bind(ids.organization_id)
+        .bind(ids.cluster_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let names = [
+        "api.internal",
+        "api.internal.production.svc.cluster.local",
+        "api.internal.svc.cluster.local",
+        "api.internal.cluster.local",
+    ];
+    let events: Vec<_> = (0..DNS_EVENT_COUNT)
+        .map(|index| RuntimeEvent {
+            id: Uuid::new_v4(),
+            observed_at: Utc::now(),
+            schema_version: EVENT_SCHEMA_VERSION,
+            attribution: KubernetesAttribution {
+                project_id: ids.project_id,
+                application_id: ids.application_id,
+                node_name: "benchmark-node".into(),
+                namespace: "production".into(),
+                pod_uid: format!("pod-{}", index % POD_COUNT),
+                pod_name: format!("benchmark-{}", index % POD_COUNT),
+                container_id: format!("container-{}", index % POD_COUNT),
+                container_name: "benchmark".into(),
+                workload_uid: "benchmark-workload".into(),
+                workload_kind: "Deployment".into(),
+                workload_name: "benchmark".into(),
+                release: None,
+                release_identity: None,
+            },
+            process: ProcessIdentity {
+                cgroup_id: 1,
+                pid: 1,
+                tgid: 1,
+                command: "benchmark".into(),
+            },
+            payload: EventPayload::NetworkDnsQuery(NetworkDnsQuery {
+                transaction_id: u16::try_from(index % usize::from(u16::MAX)).unwrap(),
+                direction: DnsDirection::Egress,
+                transport: DnsTransport::Udp,
+                resolver_address: "10.96.0.10".parse().unwrap(),
+                name: DnsName::new(names[index % names.len()]).unwrap(),
+                query_type: DnsQueryType::A,
+            }),
+        })
+        .collect();
+    persist_batch(
+        &pool,
+        IngestionContext {
+            scope: SessionScope {
+                organization_id: ids.organization_id,
+                cluster_id: ids.cluster_id,
+            },
+            agent_id,
+        },
+        &events,
+    )
+    .await
+    .unwrap();
+    let credential = owner_session(&pool, &ids).await;
+    let app = dns_group_api::router(pool);
+    let base = format!(
+        "/api/v1/projects/{}/applications/{}/runtime-inventory/dns-groups",
+        ids.project_id, ids.application_id
+    );
+    let started = Instant::now();
+    let (groups, distribution) = tokio::join!(
+        app.clone().oneshot(authenticated_request(
+            &format!("{base}?limit=50"),
+            &credential
+        )),
+        app.oneshot(authenticated_request(
+            &format!("{base}/distribution?limit=5"),
+            &credential,
+        )),
+    );
+    assert!(groups.unwrap().status().is_success());
+    assert!(distribution.unwrap().status().is_success());
+    let duration = started.elapsed();
+    eprintln!("concurrent DNS group query duration: {duration:?}");
+    assert!(
+        duration <= MAX_CONCURRENT_DNS_GROUP_QUERY_DURATION,
+        "concurrent DNS group queries took {duration:?}"
     );
 }
 

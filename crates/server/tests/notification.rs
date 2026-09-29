@@ -277,6 +277,7 @@ async fn destination_schema_lifecycle_and_tenant_ownership(pool: sqlx::PgPool) {
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/echo".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
@@ -440,6 +441,7 @@ async fn live_delivery_is_signed_idempotent_and_completes_outbox(pool: sqlx::PgP
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/sh".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
@@ -494,6 +496,7 @@ async fn live_delivery_is_signed_idempotent_and_completes_outbox(pool: sqlx::PgP
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/sh".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
@@ -600,6 +603,7 @@ async fn retries_suppresses_backfill_and_test_is_outbox_independent(pool: sqlx::
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/zsh".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
@@ -628,6 +632,7 @@ async fn retries_suppresses_backfill_and_test_is_outbox_independent(pool: sqlx::
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/bin/bash".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
@@ -673,6 +678,7 @@ async fn retries_suppresses_backfill_and_test_is_outbox_independent(pool: sqlx::
             EventPayload::ProcessExec(ProcessExec {
                 executable: "/usr/bin/id".into(),
                 parent_command: None,
+                generation: None,
             }),
         )],
     )
