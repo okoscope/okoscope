@@ -88,9 +88,11 @@ Committing that generated layout would therefore compile an offset from the
 6.8 reference BTF without establishing the cross-kernel relocation guarantee
 required by this change. It MUST NOT be used as a hard-coded-layout fallback.
 
-The selected path is the minimal C CO-RE companion under
-`spikes/process-exit-core`. The same locally built object was accepted without
-recompilation by all live reference kernels:
+The selected path is a minimal C CO-RE companion. It now lives in
+`crates/agent-ebpf-core/process_exit.bpf.c`. The results below were measured on
+its original prototype, `spikes/process-exit-core` as of commit `a7784b0`. The
+same locally built prototype object was accepted without recompilation by all
+live reference kernels:
 
 | Node/kernel | Verifier result | Translated | JIT |
 |---|---|---:|---:|
