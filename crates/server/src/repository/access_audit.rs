@@ -7,30 +7,48 @@
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`AccessAuditRepository::insert`].
+#[derive(Debug)]
+pub struct NewAccessAuditRecord<'a> {
+    pub id: Uuid,
+    pub actor_kind: &'a str,
+    pub actor_user_id: Option<Uuid>,
+    pub action: &'a str,
+    pub organization_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub target_user_id: Option<Uuid>,
+    pub invitation_id: Option<Uuid>,
+    pub previous_role: Option<&'a str>,
+    pub new_role: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+}
+
 /// Access audit records.
 #[derive(Clone, Copy, Debug)]
 pub struct AccessAuditRepository;
 
 impl AccessAuditRepository {
     /// Appends a successful access control change, kept for a year.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        actor_kind: &str,
-        actor_user_id: Option<Uuid>,
-        action: &str,
-        organization_id: Option<Uuid>,
-        project_id: Option<Uuid>,
-        target_user_id: Option<Uuid>,
-        invitation_id: Option<Uuid>,
-        previous_role: Option<&str>,
-        new_role: Option<&str>,
-        request_id: Option<&str>,
+        input: NewAccessAuditRecord<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewAccessAuditRecord {
+            id,
+            actor_kind,
+            actor_user_id,
+            action,
+            organization_id,
+            project_id,
+            target_user_id,
+            invitation_id,
+            previous_role,
+            new_role,
+            request_id,
+        } = input;
         sqlx::query("INSERT INTO access_audit_records(id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded',$11,now()+interval '365 days')")
             .bind(id)
             .bind(actor_kind)
@@ -165,7 +183,7 @@ mod insert_tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use super::AccessAuditRepository;
+    use super::{AccessAuditRepository, NewAccessAuditRecord};
     use crate::repository::test_support::{tenant, user};
 
     /// A record is appended as succeeded and retained for a year.
@@ -177,17 +195,19 @@ mod insert_tests {
         let id = Uuid::new_v4();
         AccessAuditRepository::insert(
             &pool,
-            id,
-            "user",
-            Some(actor),
-            "organization_member.role_changed",
-            Some(own.organization_id),
-            None,
-            Some(actor),
-            None,
-            Some("member"),
-            Some("admin"),
-            Some("request-1"),
+            NewAccessAuditRecord {
+                id,
+                actor_kind: "user",
+                actor_user_id: Some(actor),
+                action: "organization_member.role_changed",
+                organization_id: Some(own.organization_id),
+                project_id: None,
+                target_user_id: Some(actor),
+                invitation_id: None,
+                previous_role: Some("member"),
+                new_role: Some("admin"),
+                request_id: Some("request-1"),
+            },
         )
         .await
         .unwrap();

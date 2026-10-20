@@ -14,6 +14,79 @@ const PROJECT_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destina
 
 const GLOBAL_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destinations WHERE enabled=true) enabled_destination_count, count(*) FILTER (WHERE status='pending') pending_count, count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count, count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count, count(*) FILTER (WHERE status='in_flight') in_flight_count, count(*) FILTER (WHERE status='in_flight' AND lease_expires_at<=now()) expired_lease_count, count(*) FILTER (WHERE status='failed') failed_count, CASE WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0 THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now()-min(available_at) FILTER (WHERE status='pending' AND available_at<=now())))::bigint,0) END oldest_due_age_seconds FROM notification_deliveries";
 
+/// Input to [`NotificationDeliveryRepository::failed_for_retry`].
+#[derive(Debug)]
+pub struct RetryCandidateQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub destination_id: Option<Uuid>,
+    pub failed_before: Option<DateTime<Utc>>,
+    pub failed_after: Option<DateTime<Utc>>,
+    pub error_class: Option<&'a str>,
+    pub limit: i64,
+}
+
+/// Input to [`NotificationDeliveryRepository::insert_for_outbox`].
+#[derive(Debug)]
+pub struct NewOutboxDelivery<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub destination_id: Uuid,
+    pub outbox_message_id: Uuid,
+    pub source: &'a str,
+    pub payload: Value,
+    pub status: &'a str,
+    pub max_attempts: i32,
+    pub terminal_at: Option<DateTime<Utc>>,
+    pub last_error_class: Option<&'a str>,
+    pub last_error: Option<&'a str>,
+}
+
+/// Input to [`NotificationDeliveryRepository::insert_test`].
+#[derive(Debug)]
+pub struct NewTestDelivery<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub destination_id: Uuid,
+    pub payload: &'a Value,
+    pub lease_owner: Uuid,
+    pub lease_seconds: i64,
+}
+
+/// Input to [`NotificationDeliveryRepository::page`].
+#[derive(Debug)]
+pub struct DeliveryPageQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub destination_id: Option<Uuid>,
+    pub status: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub origin: Option<&'a str>,
+    pub since: Option<DateTime<Utc>>,
+    pub cursor_created_at: Option<DateTime<Utc>>,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`NotificationDeliveryRepository::insert_attempt`].
+#[derive(Debug)]
+pub struct NewDeliveryAttempt<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub delivery_id: Uuid,
+    pub recovery_generation: i32,
+    pub attempt_number: i32,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub outcome: &'a str,
+    pub http_status: Option<i32>,
+    pub error_class: Option<&'a str>,
+    pub response_excerpt: Option<String>,
+}
+
 /// Notification deliveries and their attempts.
 #[derive(Clone, Copy, Debug)]
 pub struct NotificationDeliveryRepository;
@@ -101,20 +174,22 @@ impl NotificationDeliveryRepository {
 
     /// Locks up to `limit` of the project's failed deliveries to enabled
     /// destinations matching the filter, with their recovery generation.
-    #[allow(clippy::too_many_arguments)]
     pub async fn failed_for_retry<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        destination_id: Option<Uuid>,
-        failed_before: Option<DateTime<Utc>>,
-        failed_after: Option<DateTime<Utc>>,
-        error_class: Option<&str>,
-        limit: i64,
+        input: RetryCandidateQuery<'_>,
     ) -> Result<Vec<(Uuid, i32)>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let RetryCandidateQuery {
+            organization_id,
+            project_id,
+            destination_id,
+            failed_before,
+            failed_after,
+            error_class,
+            limit,
+        } = input;
         sqlx::query_as::<_, (Uuid, i32)>("SELECT d.id,d.recovery_generation FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.status='failed' AND w.enabled=true AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::timestamptz IS NULL OR d.terminal_at<$4) AND ($5::timestamptz IS NULL OR d.terminal_at>=$5) AND ($6::text IS NULL OR d.last_error_class=$6) ORDER BY d.terminal_at,d.created_at,d.id FOR UPDATE OF d SKIP LOCKED LIMIT $7")
             .bind(organization_id)
             .bind(project_id)
@@ -178,25 +253,27 @@ impl NotificationDeliveryRepository {
     /// Creates the delivery of a first-seen message to one destination, once
     /// per message and destination: a repeat affects no row. A suppressed
     /// backfill is created already terminal.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_for_outbox<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        destination_id: Uuid,
-        outbox_message_id: Uuid,
-        source: &str,
-        payload: Value,
-        status: &str,
-        max_attempts: i32,
-        terminal_at: Option<DateTime<Utc>>,
-        last_error_class: Option<&str>,
-        last_error: Option<&str>,
+        input: NewOutboxDelivery<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewOutboxDelivery {
+            id,
+            organization_id,
+            project_id,
+            destination_id,
+            outbox_message_id,
+            source,
+            payload,
+            status,
+            max_attempts,
+            terminal_at,
+            last_error_class,
+            last_error,
+        } = input;
         sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,outbox_message_id,origin,source,event_name,payload,status,max_attempts,terminal_at,last_error_class,last_error) VALUES ($1,$2,$3,$4,$5,'outbox',$6,'runtime_group.first_seen',$7,$8,$9,$10,$11,$12) ON CONFLICT (outbox_message_id,destination_id) WHERE outbox_message_id IS NOT NULL DO NOTHING")
             .bind(id)
             .bind(organization_id)
@@ -244,20 +321,22 @@ impl NotificationDeliveryRepository {
 
     /// Creates a single-attempt test delivery already leased to
     /// `lease_owner`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_test<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        destination_id: Uuid,
-        payload: &Value,
-        lease_owner: Uuid,
-        lease_seconds: i64,
+        input: NewTestDelivery<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewTestDelivery {
+            id,
+            organization_id,
+            project_id,
+            destination_id,
+            payload,
+            lease_owner,
+            lease_seconds,
+        } = input;
         sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,max_attempts) VALUES ($1,$2,$3,$4,'test','test','okoscope.test',$5,'in_flight',$6,now()+make_interval(secs=>$7),1)")
             .bind(id)
             .bind(organization_id)
@@ -295,24 +374,26 @@ impl NotificationDeliveryRepository {
     ///
     /// Selects the delivery with its destination's `destination_name` and
     /// `destination_enabled`; see [`Self::get`].
-    #[allow(clippy::too_many_arguments)]
     pub async fn page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        destination_id: Option<Uuid>,
-        status: Option<&str>,
-        source: Option<&str>,
-        origin: Option<&str>,
-        since: Option<DateTime<Utc>>,
-        cursor_created_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: DeliveryPageQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let DeliveryPageQuery {
+            organization_id,
+            project_id,
+            destination_id,
+            status,
+            source,
+            origin,
+            since,
+            cursor_created_at,
+            cursor_id,
+            fetch_limit,
+        } = input;
         sqlx::query_as("SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,d.event_name,d.payload,w.name destination_name,w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count,d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,d.last_recovery_operation_id FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::text IS NULL OR d.status=$4) AND ($5::text IS NULL OR d.source=$5) AND ($6::text IS NULL OR d.origin=$6) AND ($7::timestamptz IS NULL OR d.created_at >= $7) AND ($8::timestamptz IS NULL OR (d.created_at,d.id)<($8,$9)) ORDER BY d.created_at DESC,d.id DESC LIMIT $10")
             .bind(organization_id)
             .bind(project_id)
@@ -371,25 +452,27 @@ impl NotificationDeliveryRepository {
     }
 
     /// Records one delivery attempt, finished now.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_attempt<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        delivery_id: Uuid,
-        recovery_generation: i32,
-        attempt_number: i32,
-        started_at: DateTime<Utc>,
-        duration_ms: i64,
-        outcome: &str,
-        http_status: Option<i32>,
-        error_class: Option<&str>,
-        response_excerpt: Option<String>,
+        input: NewDeliveryAttempt<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewDeliveryAttempt {
+            id,
+            organization_id,
+            project_id,
+            delivery_id,
+            recovery_generation,
+            attempt_number,
+            started_at,
+            duration_ms,
+            outcome,
+            http_status,
+            error_class,
+            response_excerpt,
+        } = input;
         sqlx::query("INSERT INTO notification_delivery_attempts (id,organization_id,project_id,delivery_id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,http_status,error_class,response_excerpt) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12)")
             .bind(id)
             .bind(organization_id)
@@ -474,6 +557,11 @@ impl NotificationDeliveryRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        DeliveryPageQuery, NewDeliveryAttempt, NewOutboxDelivery, NewTestDelivery,
+        RetryCandidateQuery,
+    };
+    use crate::repository::notification_recovery::NewRecoveryOperation;
     use chrono::{DateTime, Utc};
     use serde_json::json;
     use sqlx::{FromRow, PgPool};
@@ -539,18 +627,20 @@ mod tests {
         let terminal = matches!(status, "failed" | "cancelled" | "succeeded" | "suppressed");
         let inserted = NotificationDeliveryRepository::insert_for_outbox(
             pool,
-            id,
-            own.organization_id,
-            own.project_id,
-            destination_id,
-            message,
-            "live",
-            json!({}),
-            status,
-            3,
-            terminal.then(Utc::now),
-            terminal.then_some("http_5xx"),
-            terminal.then_some("server error"),
+            NewOutboxDelivery {
+                id,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                destination_id,
+                outbox_message_id: message,
+                source: "live",
+                payload: json!({}),
+                status,
+                max_attempts: 3,
+                terminal_at: terminal.then(Utc::now),
+                last_error_class: terminal.then_some("http_5xx"),
+                last_error: terminal.then_some("server error"),
+            },
         )
         .await
         .unwrap();
@@ -585,18 +675,20 @@ mod tests {
         let first = delivery(&pool, &own, kept, message, "pending").await;
         let repeated = NotificationDeliveryRepository::insert_for_outbox(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            kept,
-            message,
-            "live",
-            json!({}),
-            "pending",
-            3,
-            None,
-            None,
-            None,
+            NewOutboxDelivery {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                destination_id: kept,
+                outbox_message_id: message,
+                source: "live",
+                payload: json!({}),
+                status: "pending",
+                max_attempts: 3,
+                terminal_at: None,
+                last_error_class: None,
+                last_error: None,
+            },
         )
         .await
         .unwrap();
@@ -641,18 +733,20 @@ mod tests {
 
         NotificationDeliveryRepository::insert_attempt(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            first,
-            0,
-            1,
-            Utc::now(),
-            5,
-            "retryable",
-            Some(503),
-            Some("http_5xx"),
-            None,
+            NewDeliveryAttempt {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                delivery_id: first,
+                recovery_generation: 0,
+                attempt_number: 1,
+                started_at: Utc::now(),
+                duration_ms: 5,
+                outcome: "retryable",
+                http_status: Some(503),
+                error_class: Some("http_5xx"),
+                response_excerpt: None,
+            },
         )
         .await
         .unwrap();
@@ -761,13 +855,15 @@ mod tests {
         let probe = Uuid::new_v4();
         NotificationDeliveryRepository::insert_test(
             &pool,
-            probe,
-            own.organization_id,
-            own.project_id,
-            one,
-            &json!({"event": "okoscope.test"}),
-            Uuid::new_v4(),
-            60,
+            NewTestDelivery {
+                id: probe,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                destination_id: one,
+                payload: &json!({"event": "okoscope.test"}),
+                lease_owner: Uuid::new_v4(),
+                lease_seconds: 60,
+            },
         )
         .await
         .unwrap();
@@ -781,16 +877,18 @@ mod tests {
             async move {
                 NotificationDeliveryRepository::page::<_, Delivery>(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    destination_id,
-                    status,
-                    None,
-                    origin,
-                    None,
-                    cursor.map(|c| c.0),
-                    cursor.map(|c| c.1),
-                    10,
+                    DeliveryPageQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        destination_id,
+                        status,
+                        source: None,
+                        origin,
+                        since: None,
+                        cursor_created_at: cursor.map(|c| c.0),
+                        cursor_id: cursor.map(|c| c.1),
+                        fetch_limit: 10,
+                    },
                 )
                 .await
                 .unwrap()
@@ -867,13 +965,15 @@ mod tests {
             async move {
                 NotificationDeliveryRepository::failed_for_retry(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    None,
-                    None,
-                    None,
-                    error_class,
-                    10,
+                    RetryCandidateQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        destination_id: None,
+                        failed_before: None,
+                        failed_after: None,
+                        error_class,
+                        limit: 10,
+                    },
                 )
                 .await
                 .unwrap()
@@ -901,23 +1001,25 @@ mod tests {
         let actor = user(&pool).await;
         crate::repository::notification_recovery::NotificationRecoveryRepository::insert(
             &pool,
-            operation,
-            own.organization_id,
-            own.project_id,
-            "retry",
-            Some(failed),
-            actor,
-            "request",
-            &[1; 32],
-            &[2; 32],
-            json!({}),
-            1,
-            1,
-            0,
-            0,
-            0,
-            json!({}),
-            Utc::now(),
+            NewRecoveryOperation {
+                id: operation,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                command_type: "retry",
+                target_delivery_id: Some(failed),
+                actor_id: actor,
+                request_id: "request",
+                idempotency_key_hash: &[1; 32],
+                request_fingerprint: &[2; 32],
+                safe_filters: json!({}),
+                selected_count: 1,
+                retried_count: 1,
+                cancelled_count: 0,
+                skipped_count: 0,
+                remaining_count: 0,
+                result: json!({}),
+                completed_at: Utc::now(),
+            },
         )
         .await
         .unwrap();

@@ -75,6 +75,132 @@ pub struct KindAggregate {
     pub process_exec_count: i64,
     pub process_exit_count: i64,
 }
+/// Input to [`InventoryRepository::projection_backfill_page`].
+#[derive(Debug)]
+pub struct ProjectionBackfillPageQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Option<Uuid>,
+    pub identity_version: i16,
+    pub cursor: Option<Uuid>,
+    pub upper_bound: Uuid,
+    pub limit: i64,
+}
+
+/// Input to [`InventoryRepository::insert_item`].
+#[derive(Debug)]
+pub struct NewInventoryItem<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub inventory_kind: &'a str,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub semantic_summary: &'a serde_json::Value,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Input to [`InventoryRepository::record_sighting`].
+#[derive(Debug)]
+pub struct NewSighting<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub cluster_id: Uuid,
+    pub namespace: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: &'a str,
+    pub pod_uid: &'a str,
+    pub pod_name: &'a str,
+    pub container_name: &'a str,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Input to [`InventoryRepository::facet_options`].
+#[derive(Debug)]
+pub struct FacetOptionsQuery<'a> {
+    pub column: FacetColumn,
+    pub filter: InventoryFilter<'a>,
+    pub kind: Option<&'a str>,
+    pub facet_search: Option<&'a str>,
+    pub cursor_item_count: Option<i64>,
+    pub cursor_label: Option<&'a str>,
+    pub cursor_value: Option<&'a str>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`InventoryRepository::item_page`].
+#[derive(Debug)]
+pub struct ItemPageQuery<'a> {
+    pub filter: InventoryFilter<'a>,
+    pub kind: Option<&'a str>,
+    pub identity_item_id: Option<Uuid>,
+    pub identity_digest: Option<Vec<u8>>,
+    pub verdict: Option<&'a str>,
+    pub suppressed: Option<bool>,
+    pub evaluation_pending: Option<bool>,
+    pub cursor_last_seen_at: Option<DateTime<Utc>>,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`InventoryRepository::put_user_label`].
+#[derive(Debug)]
+pub struct NewUserLabel {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub display_name: String,
+    pub user_id: Uuid,
+    pub expected_updated_at: Option<DateTime<Utc>>,
+}
+
+/// Input to [`InventoryRepository::release_presence_page`].
+#[derive(Debug)]
+pub struct ReleasePresencePageQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub cursor_deployed_at: Option<DateTime<Utc>>,
+    pub cursor_release_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`InventoryRepository::sighting_page`].
+#[derive(Debug)]
+pub struct SightingPageQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub cursor_last_seen_at: Option<DateTime<Utc>>,
+    pub cursor_cluster_id: Option<Uuid>,
+    pub cursor_namespace: Option<&'a str>,
+    pub cursor_workload_kind: Option<&'a str>,
+    pub cursor_workload_name: Option<&'a str>,
+    pub cursor_pod_uid: Option<&'a str>,
+    pub cursor_container_name: Option<&'a str>,
+    pub fetch_limit: i64,
+    pub evaluator_version: i16,
+}
+
+/// Input to [`InventoryRepository::occurrence_page`].
+#[derive(Debug)]
+pub struct OccurrencePageQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub identity_version: i16,
+    pub cursor_observed_at: Option<DateTime<Utc>>,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct InventoryRepository;
 
@@ -84,21 +210,23 @@ impl InventoryRepository {
     /// inventory under `identity_version`, at most `limit`.
     ///
     /// Selects the event row with its `group_id`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn projection_backfill_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Option<Uuid>,
-        identity_version: i16,
-        cursor: Option<Uuid>,
-        upper_bound: Uuid,
-        limit: i64,
+        input: ProjectionBackfillPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let ProjectionBackfillPageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            identity_version,
+            cursor,
+            upper_bound,
+            limit,
+        } = input;
         sqlx::query_as("SELECT e.id,e.event_id,e.organization_id,e.project_id,e.cluster_id,e.application_id,e.release_id,m.group_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=1 LEFT JOIN runtime_inventory_event_memberships im ON im.event_id=e.id AND im.identity_version=$4 WHERE e.organization_id=$1 AND e.project_id=$2 AND ($3::uuid IS NULL OR e.application_id=$3) AND im.event_id IS NULL AND ($5::uuid IS NULL OR e.id>$5) AND e.id<=$6 ORDER BY e.id LIMIT $7")
             .bind(organization_id)
             .bind(project_id)
@@ -170,22 +298,24 @@ impl InventoryRepository {
 
     /// Records a new inventory item for an identity, returning its id; `None`
     /// when the application already has that identity.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_item<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        inventory_kind: &str,
-        identity_version: i16,
-        identity_digest: &[u8],
-        semantic_summary: &serde_json::Value,
-        observed_at: DateTime<Utc>,
+        input: NewInventoryItem<'_>,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewInventoryItem {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            inventory_kind,
+            identity_version,
+            identity_digest,
+            semantic_summary,
+            observed_at,
+        } = input;
         sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1) ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO NOTHING RETURNING id")
             .bind(id)
             .bind(organization_id)
@@ -333,25 +463,27 @@ impl InventoryRepository {
     }
 
     /// Counts an occurrence of an item at one placement.
-    #[allow(clippy::too_many_arguments)]
     pub async fn record_sighting<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        cluster_id: Uuid,
-        namespace: &str,
-        workload_kind: &str,
-        workload_name: &str,
-        pod_uid: &str,
-        pod_name: &str,
-        container_name: &str,
-        observed_at: DateTime<Utc>,
+        input: NewSighting<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewSighting {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            cluster_id,
+            namespace,
+            workload_kind,
+            workload_name,
+            pod_uid,
+            pod_name,
+            container_name,
+            observed_at,
+        } = input;
         sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12,$12) ON CONFLICT (item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET occurrence_count=runtime_inventory_sightings.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_sightings.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_sightings.last_seen_at,EXCLUDED.last_seen_at),pod_name=EXCLUDED.pod_name,updated_at=now()")
             .bind(organization_id)
             .bind(project_id)
@@ -446,22 +578,24 @@ impl InventoryRepository {
     /// given. `facet_search` is an `ILIKE` pattern over label and value.
     ///
     /// Selects `value`, `label`, `item_count` and `occurrence_count`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn facet_options<'e, E, T>(
         executor: E,
-        column: FacetColumn,
-        filter: InventoryFilter<'_>,
-        kind: Option<&str>,
-        facet_search: Option<&str>,
-        cursor_item_count: Option<i64>,
-        cursor_label: Option<&str>,
-        cursor_value: Option<&str>,
-        fetch_limit: i64,
+        input: FacetOptionsQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
+        let FacetOptionsQuery {
+            column,
+            filter,
+            kind,
+            facet_search,
+            cursor_item_count,
+            cursor_label,
+            cursor_value,
+            fetch_limit,
+        } = input;
         let (value_sql, label_sql, cluster_join) = match column {
             FacetColumn::Cluster => (
                 "s.cluster_id::text",
@@ -502,24 +636,26 @@ impl InventoryRepository {
     /// `last_seen_at`, `occurrence_count`, and the `release_count`,
     /// `cluster_count`, `namespace_count`, `workload_count`, `pod_count`,
     /// `container_count` and `group_count` of the item.
-    #[allow(clippy::too_many_arguments)]
     pub async fn item_page<'e, E, T>(
         executor: E,
-        filter: InventoryFilter<'_>,
-        kind: Option<&str>,
-        identity_item_id: Option<Uuid>,
-        identity_digest: Option<Vec<u8>>,
-        verdict: Option<&str>,
-        suppressed: Option<bool>,
-        evaluation_pending: Option<bool>,
-        cursor_last_seen_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: ItemPageQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
+        let ItemPageQuery {
+            filter,
+            kind,
+            identity_item_id,
+            identity_digest,
+            verdict,
+            suppressed,
+            evaluation_pending,
+            cursor_last_seen_at,
+            cursor_id,
+            fetch_limit,
+        } = input;
         let query = sqlx::query_as("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::text IS NULL OR i.inventory_kind=$5) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$10)) AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$11)) AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $15 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $15)) AND ($16::uuid IS NULL OR (i.id=$16 AND i.identity_digest=$17)) AND ($18::text IS NULL OR EXISTS(SELECT 1 FROM runtime_sighting_policy_evaluations e JOIN runtime_policy_states ps ON ps.organization_id=e.organization_id AND ps.project_id=e.project_id AND ps.application_id=e.application_id WHERE e.item_id=i.id AND e.policy_state_version=ps.state_version AND e.evaluator_version=$21 AND e.verdict=$18)) AND ($19::bool IS NULL OR $19=EXISTS(SELECT 1 FROM runtime_inventory_sightings s JOIN runtime_policy_suppressions z ON z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) WHERE s.item_id=i.id)) AND ($20::bool IS NULL OR $20=EXISTS(SELECT 1 FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.item_id=i.id AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$21))) AND ($22::timestamptz IS NULL OR (i.last_seen_at,i.id)<($22,$23)) ORDER BY i.last_seen_at DESC,i.id DESC LIMIT $24")
             .bind(filter.organization_id)
             .bind(filter.project_id)
@@ -548,21 +684,23 @@ impl InventoryRepository {
     ///
     /// Selects `display_name`, `created_by_user_id`, `updated_by_user_id`,
     /// `created_at` and `updated_at`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn put_user_label<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        display_name: String,
-        user_id: Uuid,
-        expected_updated_at: Option<DateTime<Utc>>,
+        input: NewUserLabel,
     ) -> Result<Option<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let NewUserLabel {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            display_name,
+            user_id,
+            expected_updated_at,
+        } = input;
         sqlx::query_as("INSERT INTO runtime_behavior_user_labels(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,display_name,created_by_user_id,updated_by_user_id) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.identity_digest,$5,$6,$6 FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO UPDATE SET display_name=EXCLUDED.display_name,updated_by_user_id=EXCLUDED.updated_by_user_id,updated_at=CASE WHEN runtime_behavior_user_labels.display_name=EXCLUDED.display_name THEN runtime_behavior_user_labels.updated_at ELSE now() END WHERE $7::timestamptz IS NULL OR runtime_behavior_user_labels.updated_at=$7 RETURNING display_name,created_by_user_id,updated_by_user_id,created_at,updated_at")
             .bind(organization_id)
             .bind(project_id)
@@ -711,21 +849,23 @@ impl InventoryRepository {
     /// Selects `release_id`, `release_display_name`, `version`, `deployed_at`,
     /// `presence`, `occurrence_count`, `first_seen_at`, `last_seen_at` and
     /// `release_evidence_count`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn release_presence_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        cursor_deployed_at: Option<DateTime<Utc>>,
-        cursor_release_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: ReleasePresencePageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let ReleasePresencePageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            cursor_deployed_at,
+            cursor_release_id,
+            fetch_limit,
+        } = input;
         sqlx::query_as("SELECT r.id release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,r.version,r.deployed_at,CASE WHEN ir.release_id IS NOT NULL AND ir.occurrence_count>0 THEN 'observed' WHEN EXISTS(SELECT 1 FROM projects p WHERE p.id=r.project_id AND r.deployed_at<p.runtime_closed_before) THEN 'unknown' WHEN EXISTS(SELECT 1 FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) THEN 'not_observed' ELSE 'unknown' END presence,ir.occurrence_count,ir.first_seen_at,ir.last_seen_at,(SELECT count(*) FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) release_evidence_count FROM releases r JOIN applications a ON a.id=r.application_id LEFT JOIN runtime_inventory_releases ir ON ir.release_id=r.id AND ir.item_id=$4 WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($5::timestamptz IS NULL OR (r.deployed_at,r.id)<($5,$6)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $7")
             .bind(organization_id)
             .bind(project_id)
@@ -745,27 +885,29 @@ impl InventoryRepository {
     /// Selects the sighting's placement, `occurrence_count`, `first_seen_at`
     /// and `last_seen_at`, and `policy_evaluation`, `active_suppression` and
     /// `actionable`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn sighting_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        cursor_last_seen_at: Option<DateTime<Utc>>,
-        cursor_cluster_id: Option<Uuid>,
-        cursor_namespace: Option<&str>,
-        cursor_workload_kind: Option<&str>,
-        cursor_workload_name: Option<&str>,
-        cursor_pod_uid: Option<&str>,
-        cursor_container_name: Option<&str>,
-        fetch_limit: i64,
-        evaluator_version: i16,
+        input: SightingPageQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let SightingPageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            cursor_last_seen_at,
+            cursor_cluster_id,
+            cursor_namespace,
+            cursor_workload_kind,
+            cursor_workload_name,
+            cursor_pod_uid,
+            cursor_container_name,
+            fetch_limit,
+            evaluator_version,
+        } = input;
         sqlx::query_as("SELECT s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.pod_name,s.container_name,s.occurrence_count,s.first_seen_at,s.last_seen_at,jsonb_build_object('state',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE 'current' END,'verdict',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN NULL ELSE e.verdict END,'reason_code',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE e.reason_code END,'winning_revision_id',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.winning_revision_id END,'explanation',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.explanation ELSE '{}'::jsonb END,'evaluated_at',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.evaluated_at END) policy_evaluation,x.summary active_suppression,(x.summary IS NULL AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 OR e.verdict<>'expected')) actionable FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id LEFT JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN LATERAL (SELECT jsonb_build_object('id',z.id,'reason',z.reason,'expires_at',z.expires_at,'created_at',z.created_at) summary FROM runtime_policy_suppressions z WHERE z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) ORDER BY z.expires_at,z.id LIMIT 1) x ON true WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4 AND ($5::timestamptz IS NULL OR (s.last_seen_at,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name)<($5,$6,$7,$8,$9,$10,$11)) ORDER BY s.last_seen_at DESC,s.cluster_id DESC,s.namespace DESC,s.workload_kind DESC,s.workload_name DESC,s.pod_uid DESC,s.container_name DESC LIMIT $12")
             .bind(organization_id)
             .bind(project_id)
@@ -844,22 +986,24 @@ impl InventoryRepository {
     /// Selects the event's `id`, `event_id`, `observed_at`, placement,
     /// `process_command`, `event_kind`, `payload` and `release_id`, and
     /// `release_version` and `release_display_name`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn occurrence_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        identity_version: i16,
-        cursor_observed_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: OccurrencePageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let OccurrencePageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            identity_version,
+            cursor_observed_at,
+            cursor_id,
+            fetch_limit,
+        } = input;
         sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.cluster_id,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_name,e.process_command,e.event_kind,e.payload,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.item_id=$4 AND m.identity_version=$5 AND ($6::timestamptz IS NULL OR (e.observed_at,e.id)<($6,$7)) ORDER BY e.observed_at DESC,e.id DESC LIMIT $8")
             .bind(organization_id)
             .bind(project_id)
@@ -963,6 +1107,10 @@ impl InventoryRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        FacetOptionsQuery, ItemPageQuery, NewUserLabel, OccurrencePageQuery,
+        ReleasePresencePageQuery, SightingPageQuery,
+    };
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use event_model::DnsQueryType;
     use serde_json::Value;
@@ -1094,7 +1242,19 @@ mod tests {
 
     async fn page(pool: &PgPool, filter: InventoryFilter<'_>, kind: Option<&str>) -> Vec<Item> {
         InventoryRepository::item_page(
-            pool, filter, kind, None, None, None, None, None, None, None, 10,
+            pool,
+            ItemPageQuery {
+                filter,
+                kind,
+                identity_item_id: None,
+                identity_digest: None,
+                verdict: None,
+                suppressed: None,
+                evaluation_pending: None,
+                cursor_last_seen_at: None,
+                cursor_id: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap()
@@ -1118,13 +1278,15 @@ mod tests {
             async move {
                 InventoryRepository::put_user_label::<_, Label>(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    a,
-                    name.into(),
-                    actor,
-                    expected,
+                    NewUserLabel {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        item_id: a,
+                        display_name: name.into(),
+                        user_id: actor,
+                        expected_updated_at: expected,
+                    },
                 )
                 .await
                 .unwrap()
@@ -1180,13 +1342,15 @@ mod tests {
         let other = tenant(&pool, "inventory-labels-other").await;
         let foreign: Option<Label> = InventoryRepository::put_user_label(
             &pool,
-            other.organization_id,
-            other.project_id,
-            other.application_id,
-            a,
-            "Shell".into(),
-            actor,
-            None,
+            NewUserLabel {
+                organization_id: other.organization_id,
+                project_id: other.project_id,
+                application_id: other.application_id,
+                item_id: a,
+                display_name: "Shell".into(),
+                user_id: actor,
+                expected_updated_at: None,
+            },
         )
         .await
         .unwrap();
@@ -1245,16 +1409,18 @@ mod tests {
             async move {
                 InventoryRepository::item_page::<_, Item>(
                     &pool,
-                    filter(&own),
-                    None,
-                    Some(a),
-                    Some(digest),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    10,
+                    ItemPageQuery {
+                        filter: filter(&own),
+                        kind: None,
+                        identity_item_id: Some(a),
+                        identity_digest: Some(digest),
+                        verdict: None,
+                        suppressed: None,
+                        evaluation_pending: None,
+                        cursor_last_seen_at: None,
+                        cursor_id: None,
+                        fetch_limit: 10,
+                    },
                 )
                 .await
                 .unwrap()
@@ -1270,16 +1436,18 @@ mod tests {
             async move {
                 InventoryRepository::item_page::<_, Item>(
                     &pool,
-                    filter(&own),
-                    None,
-                    None,
-                    None,
-                    verdict,
-                    suppressed,
-                    None,
-                    None,
-                    None,
-                    10,
+                    ItemPageQuery {
+                        filter: filter(&own),
+                        kind: None,
+                        identity_item_id: None,
+                        identity_digest: None,
+                        verdict,
+                        suppressed,
+                        evaluation_pending: None,
+                        cursor_last_seen_at: None,
+                        cursor_id: None,
+                        fetch_limit: 10,
+                    },
                 )
                 .await
                 .unwrap()
@@ -1304,16 +1472,18 @@ mod tests {
         assert_eq!((last_seen_at, cursor_id), (all[0].last_seen_at, all[0].id));
         let after: Vec<Item> = InventoryRepository::item_page(
             &pool,
-            filter(&own),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(last_seen_at),
-            Some(cursor_id),
-            10,
+            ItemPageQuery {
+                filter: filter(&own),
+                kind: None,
+                identity_item_id: None,
+                identity_digest: None,
+                verdict: None,
+                suppressed: None,
+                evaluation_pending: None,
+                cursor_last_seen_at: Some(last_seen_at),
+                cursor_id: Some(cursor_id),
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1405,14 +1575,16 @@ mod tests {
             async move {
                 InventoryRepository::facet_options::<_, FacetOption>(
                     &pool,
-                    column,
-                    filter(&own),
-                    None,
-                    facet_search,
-                    cursor.map(|c| c.0),
-                    cursor.map(|c| c.1),
-                    cursor.map(|c| c.2),
-                    10,
+                    FacetOptionsQuery {
+                        column,
+                        filter: filter(&own),
+                        kind: None,
+                        facet_search,
+                        cursor_item_count: cursor.map(|c| c.0),
+                        cursor_label: cursor.map(|c| c.1),
+                        cursor_value: cursor.map(|c| c.2),
+                        fetch_limit: 10,
+                    },
                 )
                 .await
                 .unwrap()
@@ -1481,13 +1653,15 @@ mod tests {
         .await;
         let presence: Vec<ReleasePresence> = InventoryRepository::release_presence_page(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            a,
-            None,
-            None,
-            10,
+            ReleasePresencePageQuery {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                item_id: a,
+                cursor_deployed_at: None,
+                cursor_release_id: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1516,19 +1690,21 @@ mod tests {
             async move {
                 InventoryRepository::sighting_page::<_, Sighting>(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    a,
-                    cursor.as_ref().map(|c| c.0),
-                    cursor.as_ref().map(|c| c.1),
-                    cursor.as_ref().map(|c| c.2.as_str()),
-                    cursor.as_ref().map(|c| c.3.as_str()),
-                    cursor.as_ref().map(|c| c.4.as_str()),
-                    cursor.as_ref().map(|c| c.5.as_str()),
-                    cursor.as_ref().map(|c| c.6.as_str()),
-                    limit,
-                    crate::policy::POLICY_EVALUATOR_VERSION,
+                    SightingPageQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        item_id: a,
+                        cursor_last_seen_at: cursor.as_ref().map(|c| c.0),
+                        cursor_cluster_id: cursor.as_ref().map(|c| c.1),
+                        cursor_namespace: cursor.as_ref().map(|c| c.2.as_str()),
+                        cursor_workload_kind: cursor.as_ref().map(|c| c.3.as_str()),
+                        cursor_workload_name: cursor.as_ref().map(|c| c.4.as_str()),
+                        cursor_pod_uid: cursor.as_ref().map(|c| c.5.as_str()),
+                        cursor_container_name: cursor.as_ref().map(|c| c.6.as_str()),
+                        fetch_limit: limit,
+                        evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+                    },
                 )
                 .await
                 .unwrap()
@@ -1577,14 +1753,16 @@ mod tests {
             async move {
                 InventoryRepository::occurrence_page::<_, Occurrence>(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    a,
-                    CURRENT_INVENTORY_IDENTITY_VERSION.get(),
-                    cursor.map(|c| c.0),
-                    cursor.map(|c| c.1),
-                    10,
+                    OccurrencePageQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        item_id: a,
+                        identity_version: CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+                        cursor_observed_at: cursor.map(|c| c.0),
+                        cursor_id: cursor.map(|c| c.1),
+                        fetch_limit: 10,
+                    },
                 )
                 .await
                 .unwrap()

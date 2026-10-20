@@ -6,6 +6,28 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`NotificationRecoveryRepository::insert`].
+#[derive(Debug)]
+pub struct NewRecoveryOperation<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub command_type: &'a str,
+    pub target_delivery_id: Option<Uuid>,
+    pub actor_id: Uuid,
+    pub request_id: &'a str,
+    pub idempotency_key_hash: &'a [u8],
+    pub request_fingerprint: &'a [u8],
+    pub safe_filters: Value,
+    pub selected_count: i32,
+    pub retried_count: i32,
+    pub cancelled_count: i32,
+    pub skipped_count: i32,
+    pub remaining_count: i32,
+    pub result: Value,
+    pub completed_at: DateTime<Utc>,
+}
+
 /// Notification recovery operations.
 #[derive(Clone, Copy, Debug)]
 pub struct NotificationRecoveryRepository;
@@ -123,30 +145,32 @@ impl NotificationRecoveryRepository {
     }
 
     /// Records a completed recovery operation under its idempotency key.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        command_type: &str,
-        target_delivery_id: Option<Uuid>,
-        actor_id: Uuid,
-        request_id: &str,
-        idempotency_key_hash: &[u8],
-        request_fingerprint: &[u8],
-        safe_filters: Value,
-        selected_count: i32,
-        retried_count: i32,
-        cancelled_count: i32,
-        skipped_count: i32,
-        remaining_count: i32,
-        result: Value,
-        completed_at: DateTime<Utc>,
+        input: NewRecoveryOperation<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewRecoveryOperation {
+            id,
+            organization_id,
+            project_id,
+            command_type,
+            target_delivery_id,
+            actor_id,
+            request_id,
+            idempotency_key_hash,
+            request_fingerprint,
+            safe_filters,
+            selected_count,
+            retried_count,
+            cancelled_count,
+            skipped_count,
+            remaining_count,
+            result,
+            completed_at,
+        } = input;
         sqlx::query("INSERT INTO notification_recovery_operations (id,organization_id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,idempotency_key_hash,request_fingerprint,safe_filters,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,result,completed_at) VALUES ($1,$2,$3,$4,$5,'user',$6,$7,$8,$9,$10,'completed',$11,$12,$13,$14,$15,$16,$17)")
             .bind(id)
             .bind(organization_id)
@@ -196,13 +220,16 @@ impl NotificationRecoveryRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewRecoveryOperation;
+    use crate::repository::notification_deliveries::{
+        NewOutboxDelivery, NotificationDeliveryRepository,
+    };
     use chrono::{DateTime, Utc};
     use serde_json::{Value, json};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::NotificationRecoveryRepository;
-    use crate::repository::notification_deliveries::NotificationDeliveryRepository;
     use crate::repository::test_support::{
         Tenant, destination, exec, first_seen_messages, ingest, tenant, user,
     };
@@ -241,23 +268,25 @@ mod tests {
         let actor = user(pool).await;
         NotificationRecoveryRepository::insert(
             pool,
-            id,
-            own.organization_id,
-            own.project_id,
-            command,
-            target,
-            actor,
-            "request-1",
-            &[key; 32],
-            &[7; 32],
-            json!({}),
-            1,
-            1,
-            0,
-            0,
-            0,
-            json!({"retried": 1}),
-            Utc::now(),
+            NewRecoveryOperation {
+                id,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                command_type: command,
+                target_delivery_id: target,
+                actor_id: actor,
+                request_id: "request-1",
+                idempotency_key_hash: &[key; 32],
+                request_fingerprint: &[7; 32],
+                safe_filters: json!({}),
+                selected_count: 1,
+                retried_count: 1,
+                cancelled_count: 0,
+                skipped_count: 0,
+                remaining_count: 0,
+                result: json!({"retried": 1}),
+                completed_at: Utc::now(),
+            },
         )
         .await
         .unwrap();
@@ -276,18 +305,20 @@ mod tests {
         let delivery = Uuid::new_v4();
         NotificationDeliveryRepository::insert_for_outbox(
             &pool,
-            delivery,
-            own.organization_id,
-            own.project_id,
-            hook,
-            message,
-            "live",
-            json!({}),
-            "failed",
-            3,
-            Some(Utc::now()),
-            Some("http_5xx"),
-            Some("server error"),
+            NewOutboxDelivery {
+                id: delivery,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                destination_id: hook,
+                outbox_message_id: message,
+                source: "live",
+                payload: json!({}),
+                status: "failed",
+                max_attempts: 3,
+                terminal_at: Some(Utc::now()),
+                last_error_class: Some("http_5xx"),
+                last_error: Some("server error"),
+            },
         )
         .await
         .unwrap();

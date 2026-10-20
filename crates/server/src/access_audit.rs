@@ -1,4 +1,4 @@
-use crate::repository::access_audit::AccessAuditRepository;
+use crate::repository::access_audit::{AccessAuditRepository, NewAccessAuditRecord};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -31,17 +31,19 @@ pub async fn write_access_audit(
     };
     AccessAuditRepository::insert(
         &mut **tx,
-        Uuid::new_v4(),
-        actor_kind,
-        actor_user_id,
-        event.action,
-        event.organization_id,
-        event.project_id,
-        event.target_user_id,
-        event.invitation_id,
-        event.previous_role,
-        event.new_role,
-        event.request_id,
+        NewAccessAuditRecord {
+            id: Uuid::new_v4(),
+            actor_kind,
+            actor_user_id,
+            action: event.action,
+            organization_id: event.organization_id,
+            project_id: event.project_id,
+            target_user_id: event.target_user_id,
+            invitation_id: event.invitation_id,
+            previous_role: event.previous_role,
+            new_role: event.new_role,
+            request_id: event.request_id,
+        },
     )
     .await?;
     Ok(())

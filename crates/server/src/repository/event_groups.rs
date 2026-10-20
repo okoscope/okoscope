@@ -103,6 +103,73 @@ pub mod aggregates {
            AND g.application_id=a.id AND g.occurrence_count>0)";
 }
 
+/// Input to [`EventGroupRepository::add_release_membership`].
+#[derive(Debug)]
+pub struct ReleaseMembership {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub event_id: Uuid,
+    pub group_id: Uuid,
+    pub fingerprint_version: i16,
+    pub release_id: Option<Uuid>,
+}
+
+/// Input to [`EventGroupRepository::record_release_occurrence`].
+#[derive(Debug)]
+pub struct ReleaseOccurrence {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub release_id: Uuid,
+    pub group_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
+/// Input to [`EventGroupRepository::summary_page`].
+#[derive(Debug)]
+pub struct GroupSummaryPageQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub event_kind: Option<String>,
+    pub status: Option<String>,
+    pub namespace: Option<String>,
+    pub workload_kind: Option<String>,
+    pub workload_name: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub first_seen_from: Option<DateTime<Utc>>,
+    pub first_seen_to: Option<DateTime<Utc>>,
+    pub last_seen_to: Option<DateTime<Utc>>,
+    pub release_id: Option<Uuid>,
+    pub cursor_last_seen_at: Option<DateTime<Utc>>,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`EventGroupRepository::insert_if_absent`].
+#[derive(Debug)]
+pub struct NewEventGroup<'a> {
+    pub candidate_id: Uuid,
+    pub key: GroupKey<'a>,
+    pub event_kind: &'a str,
+    pub semantic_summary: &'a Value,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
+/// Input to [`EventGroupRepository::upsert_derived`].
+#[derive(Debug)]
+pub struct DerivedEventGroup<'a> {
+    pub candidate_id: Uuid,
+    pub key: GroupKey<'a>,
+    pub event_kind: &'a str,
+    pub semantic_summary: &'a Value,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
 /// Queries against the `runtime_event_groups` table.
 #[derive(Clone, Copy, Debug)]
 pub struct EventGroupRepository;
@@ -110,20 +177,22 @@ pub struct EventGroupRepository;
 impl EventGroupRepository {
     /// Makes an event a member of a group under a fingerprint version, with
     /// its release, once; `None` when it already was.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_release_membership<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        event_id: Uuid,
-        group_id: Uuid,
-        fingerprint_version: i16,
-        release_id: Option<Uuid>,
+        input: ReleaseMembership,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let ReleaseMembership {
+            organization_id,
+            project_id,
+            application_id,
+            event_id,
+            group_id,
+            fingerprint_version,
+            release_id,
+        } = input;
         sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_event_group_memberships (organization_id, project_id, application_id, event_id, group_id, fingerprint_version, release_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (event_id, fingerprint_version) DO NOTHING RETURNING event_id")
             .bind(organization_id)
             .bind(project_id)
@@ -138,20 +207,22 @@ impl EventGroupRepository {
 
     /// Counts an occurrence of a group in a release, widening its seen
     /// window and making the event its representative when it is the latest.
-    #[allow(clippy::too_many_arguments)]
     pub async fn record_release_occurrence<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        release_id: Uuid,
-        group_id: Uuid,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: ReleaseOccurrence,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let ReleaseOccurrence {
+            organization_id,
+            project_id,
+            application_id,
+            release_id,
+            group_id,
+            observed_at,
+            event_id,
+        } = input;
         sqlx::query("INSERT INTO runtime_event_group_releases (organization_id,project_id,application_id,release_id,group_id,occurrence_count,first_seen_at,last_seen_at,representative_event_id) VALUES ($1,$2,$3,$4,$5,1,$6,$6,$7) ON CONFLICT (release_id,group_id) DO UPDATE SET representative_event_id=COALESCE(runtime_event_group_releases.representative_event_id,EXCLUDED.representative_event_id),occurrence_count=runtime_event_group_releases.occurrence_count+1,first_seen_at=LEAST(runtime_event_group_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_event_group_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()")
             .bind(organization_id)
             .bind(project_id)
@@ -322,30 +393,32 @@ impl EventGroupRepository {
     /// A page of an application's groups, most recently seen first, under
     /// the list filters, after the cursor's `(last_seen_at, id)` when one is
     /// given. Selects the columns of the runtime groups API's group summary.
-    #[allow(clippy::too_many_arguments)]
     pub async fn summary_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        event_kind: Option<String>,
-        status: Option<String>,
-        namespace: Option<String>,
-        workload_kind: Option<String>,
-        workload_name: Option<String>,
-        since: Option<DateTime<Utc>>,
-        first_seen_from: Option<DateTime<Utc>>,
-        first_seen_to: Option<DateTime<Utc>>,
-        last_seen_to: Option<DateTime<Utc>>,
-        release_id: Option<Uuid>,
-        cursor_last_seen_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: GroupSummaryPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let GroupSummaryPageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            event_kind,
+            status,
+            namespace,
+            workload_kind,
+            workload_name,
+            since,
+            first_seen_from,
+            first_seen_to,
+            last_seen_to,
+            release_id,
+            cursor_last_seen_at,
+            cursor_id,
+            fetch_limit,
+        } = input;
         sqlx::query_as("SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by FROM runtime_event_groups g WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND ($4::text IS NULL OR event_kind=$4) AND ($5::text IS NULL OR status=$5) AND ($6::text IS NULL OR namespace=$6) AND ($7::text IS NULL OR workload_kind=$7) AND ($8::text IS NULL OR workload_name=$8) AND ($9::timestamptz IS NULL OR last_seen_at >= $9) AND ($10::timestamptz IS NULL OR first_seen_at >= $10) AND ($11::timestamptz IS NULL OR first_seen_at <= $11) AND ($12::timestamptz IS NULL OR last_seen_at <= $12) AND ($13::uuid IS NULL OR EXISTS (SELECT 1 FROM runtime_event_group_releases gr WHERE gr.group_id=g.id AND gr.release_id=$13)) AND ($14::timestamptz IS NULL OR (last_seen_at,id) < ($14,$15)) ORDER BY last_seen_at DESC,id DESC LIMIT $16")
             .bind(organization_id)
             .bind(project_id)
@@ -543,19 +616,21 @@ impl EventGroupRepository {
     /// both at the observation, and the same event as both representative and
     /// first-seen. A `None` result means another writer won the race; pair this
     /// with [`Self::lock_existing`] to obtain the winner's id.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_if_absent<'e, E>(
         executor: E,
-        candidate_id: Uuid,
-        key: GroupKey<'_>,
-        event_kind: &str,
-        semantic_summary: &Value,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: NewEventGroup<'_>,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewEventGroup {
+            candidate_id,
+            key,
+            event_kind,
+            semantic_summary,
+            observed_at,
+            event_id,
+        } = input;
         sqlx::query_scalar(
             r#"
             INSERT INTO runtime_event_groups (
@@ -691,19 +766,21 @@ impl EventGroupRepository {
     /// the same table, so that difference is a real inconsistency rather than a
     /// property of derived groups; it is preserved as-is because changing it
     /// moves user-visible timestamps.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_derived<'e, E>(
         executor: E,
-        candidate_id: Uuid,
-        key: GroupKey<'_>,
-        event_kind: &str,
-        semantic_summary: &Value,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: DerivedEventGroup<'_>,
     ) -> Result<Uuid, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let DerivedEventGroup {
+            candidate_id,
+            key,
+            event_kind,
+            semantic_summary,
+            observed_at,
+            event_id,
+        } = input;
         sqlx::query_scalar(
             r#"
             INSERT INTO runtime_event_groups (
@@ -769,6 +846,7 @@ impl EventGroupRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{DerivedEventGroup, NewEventGroup};
     use super::{EventGroupRepository, GroupKey};
     use chrono::{DateTime, TimeZone, Utc};
     use serde_json::{Value, json};
@@ -893,12 +971,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -932,12 +1012,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                winner,
-                fixture.key(),
-                "process.exec",
-                &json!({}),
-                at(0),
-                first_event,
+                NewEventGroup {
+                    candidate_id: winner,
+                    key: fixture.key(),
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(0),
+                    event_id: first_event
+                }
             )
             .await
             .unwrap(),
@@ -948,12 +1030,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                Uuid::new_v4(),
-                fixture.key(),
-                "process.exec",
-                &json!({}),
-                at(1),
-                second_event,
+                NewEventGroup {
+                    candidate_id: Uuid::new_v4(),
+                    key: fixture.key(),
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(1),
+                    event_id: second_event
+                }
             )
             .await
             .unwrap(),
@@ -983,12 +1067,14 @@ mod tests {
         let first = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            first,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            event,
+            NewEventGroup {
+                candidate_id: first,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -1000,12 +1086,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                second,
-                key,
-                "process.exec",
-                &json!({}),
-                at(1),
-                event,
+                NewEventGroup {
+                    candidate_id: second,
+                    key,
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(1),
+                    event_id: event
+                }
             )
             .await
             .unwrap(),
@@ -1021,12 +1109,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(10),
-            first_event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(10),
+                event_id: first_event,
+            },
         )
         .await
         .unwrap();
@@ -1061,12 +1151,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            old_event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: old_event,
+            },
         )
         .await
         .unwrap();
@@ -1115,12 +1207,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::upsert_derived(
                 &pool,
-                created,
-                fixture.key(),
-                "container.restart_loop",
-                &json!({"observed_restart_count": 3}),
-                at(0),
-                first_event,
+                DerivedEventGroup {
+                    candidate_id: created,
+                    key: fixture.key(),
+                    event_kind: "container.restart_loop",
+                    semantic_summary: &json!({"observed_restart_count": 3}),
+                    observed_at: at(0),
+                    event_id: first_event
+                }
             )
             .await
             .unwrap(),
@@ -1131,12 +1225,14 @@ mod tests {
         let candidate = Uuid::new_v4();
         let refreshed = EventGroupRepository::upsert_derived(
             &pool,
-            candidate,
-            fixture.key(),
-            "container.restart_loop",
-            &json!({"observed_restart_count": 9}),
-            at(15),
-            later_event,
+            DerivedEventGroup {
+                candidate_id: candidate,
+                key: fixture.key(),
+                event_kind: "container.restart_loop",
+                semantic_summary: &json!({"observed_restart_count": 9}),
+                observed_at: at(15),
+                event_id: later_event,
+            },
         )
         .await
         .unwrap();
@@ -1163,12 +1259,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::upsert_derived(
             &pool,
-            group,
-            fixture.key(),
-            "container.restart_loop",
-            &json!({}),
-            at(0),
-            event,
+            DerivedEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "container.restart_loop",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -1184,7 +1282,7 @@ mod tests {
 
 #[cfg(test)]
 mod api_statement_tests {
-    use super::EventGroupRepository;
+    use super::{EventGroupRepository, GroupSummaryPageQuery};
     use crate::repository::EventRepository;
     use crate::repository::test_support::{
         correlated_termination, exec, exec_in_release, group_ids, ingest, manual_release, restarts,
@@ -1249,22 +1347,24 @@ mod api_statement_tests {
     ) -> Vec<Summary> {
         EventGroupRepository::summary_page(
             pool,
-            organization_id,
-            project_id,
-            application_id,
-            event_kind,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            release_id,
-            cursor.map(|c| c.0),
-            cursor.map(|c| c.1),
-            fetch_limit,
+            GroupSummaryPageQuery {
+                organization_id,
+                project_id,
+                application_id,
+                event_kind,
+                status: None,
+                namespace: None,
+                workload_kind: None,
+                workload_name: None,
+                since: None,
+                first_seen_from: None,
+                first_seen_to: None,
+                last_seen_to: None,
+                release_id,
+                cursor_last_seen_at: cursor.map(|c| c.0),
+                cursor_id: cursor.map(|c| c.1),
+                fetch_limit,
+            },
         )
         .await
         .unwrap()

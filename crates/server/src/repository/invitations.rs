@@ -19,6 +19,20 @@ use uuid::Uuid;
 /// `accepted_by_user_id`, `revoked_at` and `replaced_at`.
 const INVITATION_SELECT: &str = "SELECT i.id,i.organization_id,o.name organization_name,i.project_id,p.name project_name,i.recipient_email,i.role,u.display_name inviter_display_name,i.locale,i.created_at,i.expires_at,i.accepted_at,i.accepted_by_user_id,i.revoked_at,i.replaced_at FROM invitations i JOIN organizations o ON o.id=i.organization_id LEFT JOIN projects p ON p.id=i.project_id JOIN users u ON u.id=i.inviter_user_id";
 
+/// Input to [`InvitationRepository::insert`].
+#[derive(Debug)]
+pub struct NewInvitationRecord<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub recipient_email: &'a str,
+    pub role: &'a str,
+    pub inviter_user_id: Uuid,
+    pub locale: &'a str,
+    pub token_digest: Vec<u8>,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Invitations: issuing, replacing, revoking and accepting them, and the
 /// reads behind the invitation endpoints.
 #[derive(Clone, Copy, Debug)]
@@ -188,22 +202,24 @@ impl InvitationRepository {
     /// Inserts a pending invitation, retained for a year past its expiry. A
     /// live invitation for the same recipient and scope violates a unique
     /// index, which callers report as a conflict.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Option<Uuid>,
-        recipient_email: &str,
-        role: &str,
-        inviter_user_id: Uuid,
-        locale: &str,
-        token_digest: Vec<u8>,
-        expires_at: DateTime<Utc>,
+        input: NewInvitationRecord<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewInvitationRecord {
+            id,
+            organization_id,
+            project_id,
+            recipient_email,
+            role,
+            inviter_user_id,
+            locale,
+            token_digest,
+            expires_at,
+        } = input;
         sqlx::query("INSERT INTO invitations(id,organization_id,project_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9+interval '365 days')")
             .bind(id)
             .bind(organization_id)
@@ -370,6 +386,7 @@ impl InvitationRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewInvitationRecord;
     use chrono::{DateTime, Duration, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
@@ -405,15 +422,17 @@ mod tests {
         let id = Uuid::new_v4();
         InvitationRepository::insert(
             pool,
-            id,
-            own.organization_id,
-            project_id,
-            email,
-            role,
-            inviter,
-            "en",
-            vec![digest; 32],
-            Utc::now() + Duration::days(1),
+            NewInvitationRecord {
+                id,
+                organization_id: own.organization_id,
+                project_id,
+                recipient_email: email,
+                role,
+                inviter_user_id: inviter,
+                locale: "en",
+                token_digest: vec![digest; 32],
+                expires_at: Utc::now() + Duration::days(1),
+            },
         )
         .await?;
         Ok(id)

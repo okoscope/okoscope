@@ -6,6 +6,22 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`TransactionalMailRepository::insert`].
+#[derive(Debug)]
+pub struct NewMailMessage<'a> {
+    pub id: Uuid,
+    pub logical_key: &'a str,
+    pub template_kind: &'a str,
+    pub recipient_email: &'a str,
+    pub locale: &'a str,
+    pub payload_ciphertext: Vec<u8>,
+    pub payload_nonce: Vec<u8>,
+    pub action_id: Option<Uuid>,
+    pub invitation_id: Option<Uuid>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub retention: chrono::Duration,
+}
+
 /// Transactional mail outbox.
 #[derive(Clone, Copy, Debug)]
 pub struct TransactionalMailRepository;
@@ -24,24 +40,26 @@ impl TransactionalMailRepository {
 
     /// Queues an encrypted mail, once per logical key and recipient, kept
     /// for `retention` after it is created.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        logical_key: &str,
-        template_kind: &str,
-        recipient_email: &str,
-        locale: &str,
-        payload_ciphertext: Vec<u8>,
-        payload_nonce: Vec<u8>,
-        action_id: Option<Uuid>,
-        invitation_id: Option<Uuid>,
-        expires_at: Option<DateTime<Utc>>,
-        retention: chrono::Duration,
+        input: NewMailMessage<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewMailMessage {
+            id,
+            logical_key,
+            template_kind,
+            recipient_email,
+            locale,
+            payload_ciphertext,
+            payload_nonce,
+            action_id,
+            invitation_id,
+            expires_at,
+            retention,
+        } = input;
         sqlx::query("INSERT INTO transactional_mail_outbox(id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,payload_nonce,action_id,invitation_id,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+$11) ON CONFLICT(logical_key,recipient_email) DO NOTHING")
             .bind(id)
             .bind(logical_key)
@@ -151,13 +169,14 @@ impl TransactionalMailRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewMailMessage;
+    use crate::repository::invitations::{InvitationRepository, NewInvitationRecord};
     use chrono::{DateTime, Duration, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::TransactionalMailRepository;
     use crate::repository::email_actions::EmailActionRepository;
-    use crate::repository::invitations::InvitationRepository;
     use crate::repository::test_support::{tenant, user};
     use crate::repository::{MembershipRepository, UserRepository};
 
@@ -180,17 +199,19 @@ mod tests {
         let id = Uuid::new_v4();
         TransactionalMailRepository::insert(
             pool,
-            id,
-            key,
-            "verify_email",
-            "someone@example.test",
-            "en",
-            vec![1; 16],
-            vec![2; 24],
-            None,
-            None,
-            None,
-            Duration::days(30),
+            NewMailMessage {
+                id,
+                logical_key: key,
+                template_kind: "verify_email",
+                recipient_email: "someone@example.test",
+                locale: "en",
+                payload_ciphertext: vec![1; 16],
+                payload_nonce: vec![2; 24],
+                action_id: None,
+                invitation_id: None,
+                expires_at: None,
+                retention: Duration::days(30),
+            },
         )
         .await
         .unwrap();
@@ -334,15 +355,17 @@ mod tests {
         ] {
             InvitationRepository::insert(
                 &pool,
-                id,
-                own.organization_id,
-                None,
-                email,
-                "member",
-                actor,
-                "en",
-                vec![digest; 32],
-                Utc::now() + Duration::days(1),
+                NewInvitationRecord {
+                    id,
+                    organization_id: own.organization_id,
+                    project_id: None,
+                    recipient_email: email,
+                    role: "member",
+                    inviter_user_id: actor,
+                    locale: "en",
+                    token_digest: vec![digest; 32],
+                    expires_at: Utc::now() + Duration::days(1),
+                },
             )
             .await
             .unwrap();

@@ -1,4 +1,4 @@
-use crate::repository::events::EventRepository;
+use crate::repository::events::{EventRepository, NewEvent};
 use crate::repository::runtime_retention::RuntimeRetentionRepository;
 use event_model::{EVENT_SCHEMA_VERSION, EventPayload, RuntimeEvent};
 use serde_json::to_value;
@@ -173,31 +173,33 @@ async fn persist_event(
     let raw_event_id = Uuid::new_v4();
     let inserted: Option<Uuid> = EventRepository::insert(
         &mut **tx,
-        raw_event_id,
-        event.id,
-        context.scope.organization_id,
-        event.attribution.project_id,
-        context.scope.cluster_id,
-        event.attribution.application_id,
-        context.agent_id,
-        release_id,
-        event.observed_at,
-        &event.attribution.node_name,
-        &event.attribution.namespace,
-        &event.attribution.pod_uid,
-        &event.attribution.pod_name,
-        &event.attribution.container_id,
-        &event.attribution.container_name,
-        &event.attribution.workload_uid,
-        &event.attribution.workload_kind,
-        &event.attribution.workload_name,
-        cgroup_id,
-        i64::from(event.process.pid),
-        i64::from(event.process.tgid),
-        &event.process.command,
-        event.kind(),
-        i32::try_from(event.schema_version).unwrap_or(i32::MAX),
-        to_value(&event.payload)?,
+        NewEvent {
+            id: raw_event_id,
+            event_id: event.id,
+            organization_id: context.scope.organization_id,
+            project_id: event.attribution.project_id,
+            cluster_id: context.scope.cluster_id,
+            application_id: event.attribution.application_id,
+            agent_id: context.agent_id,
+            release_id,
+            observed_at: event.observed_at,
+            node_name: &event.attribution.node_name,
+            namespace: &event.attribution.namespace,
+            pod_uid: &event.attribution.pod_uid,
+            pod_name: &event.attribution.pod_name,
+            container_id: &event.attribution.container_id,
+            container_name: &event.attribution.container_name,
+            workload_uid: &event.attribution.workload_uid,
+            workload_kind: &event.attribution.workload_kind,
+            workload_name: &event.attribution.workload_name,
+            cgroup_id,
+            pid: i64::from(event.process.pid),
+            tgid: i64::from(event.process.tgid),
+            process_command: &event.process.command,
+            event_kind: event.kind(),
+            schema_version: i32::try_from(event.schema_version).unwrap_or(i32::MAX),
+            payload: to_value(&event.payload)?,
+        },
     )
     .await?;
     let Some(raw_event_id) = inserted else {

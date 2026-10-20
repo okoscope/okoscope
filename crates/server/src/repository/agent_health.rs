@@ -10,6 +10,52 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`AgentHealthRepository::store_counter_baseline`].
+#[derive(Debug)]
+pub struct CounterBaseline {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub agent_id: Uuid,
+    pub sent_at: DateTime<Utc>,
+    pub counters: serde_json::Value,
+}
+
+/// Input to [`AgentHealthRepository::add_diagnostic_deltas`].
+#[derive(Debug)]
+pub struct DiagnosticDeltas {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub agent_id: Uuid,
+    pub bucket_at: DateTime<Utc>,
+    pub reset: bool,
+    pub dropped: i64,
+    pub rate_limited: i64,
+    pub decode_failed: i64,
+    pub attribution_failed: i64,
+    pub capacity: i64,
+    pub kernel_lost: i64,
+    pub correlation: i64,
+    pub delivery_retry: i64,
+    pub unsupported: i64,
+}
+
+/// Input to [`AgentHealthRepository::buckets`].
+#[derive(Debug)]
+pub struct HealthBucketQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub agent_id: Uuid,
+    pub cluster_id: Uuid,
+    pub step_minutes: i64,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
 /// Agent registration, heartbeats, diagnostics and the health reads over them.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentHealthRepository;
@@ -131,20 +177,22 @@ impl AgentHealthRepository {
     }
 
     /// Replaces the agent's diagnostic counter snapshot.
-    #[allow(clippy::too_many_arguments)]
     pub async fn store_counter_baseline<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        agent_id: Uuid,
-        sent_at: DateTime<Utc>,
-        counters: serde_json::Value,
+        input: CounterBaseline,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let CounterBaseline {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            agent_id,
+            sent_at,
+            counters,
+        } = input;
         sqlx::query("INSERT INTO application_agent_counter_baselines(organization_id,project_id,application_id,cluster_id,agent_id,sent_at,counters) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id) DO UPDATE SET sent_at=EXCLUDED.sent_at,counters=EXCLUDED.counters")
             .bind(organization_id)
             .bind(project_id)
@@ -160,29 +208,31 @@ impl AgentHealthRepository {
     /// Adds diagnostic counter deltas into their one-minute bucket. `reset`
     /// marks a bucket in which the agent's counters went backwards, so its
     /// deltas could not be computed.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_diagnostic_deltas<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        agent_id: Uuid,
-        bucket_at: DateTime<Utc>,
-        reset: bool,
-        dropped: i64,
-        rate_limited: i64,
-        decode_failed: i64,
-        attribution_failed: i64,
-        capacity: i64,
-        kernel_lost: i64,
-        correlation: i64,
-        delivery_retry: i64,
-        unsupported: i64,
+        input: DiagnosticDeltas,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let DiagnosticDeltas {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            agent_id,
+            bucket_at,
+            reset,
+            dropped,
+            rate_limited,
+            decode_failed,
+            attribution_failed,
+            capacity,
+            kernel_lost,
+            correlation,
+            delivery_retry,
+            unsupported,
+        } = input;
         sqlx::query("INSERT INTO application_agent_diagnostic_buckets(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at,reset,dropped,rate_limited,decode_failed,attribution_failed,capacity,kernel_lost,correlation,delivery_retry,unsupported) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(organization_id,project_id,application_id,cluster_id,agent_id,bucket_at) DO UPDATE SET reset=application_agent_diagnostic_buckets.reset OR EXCLUDED.reset,dropped=application_agent_diagnostic_buckets.dropped+EXCLUDED.dropped,rate_limited=application_agent_diagnostic_buckets.rate_limited+EXCLUDED.rate_limited,decode_failed=application_agent_diagnostic_buckets.decode_failed+EXCLUDED.decode_failed,attribution_failed=application_agent_diagnostic_buckets.attribution_failed+EXCLUDED.attribution_failed,capacity=application_agent_diagnostic_buckets.capacity+EXCLUDED.capacity,kernel_lost=application_agent_diagnostic_buckets.kernel_lost+EXCLUDED.kernel_lost,correlation=application_agent_diagnostic_buckets.correlation+EXCLUDED.correlation,delivery_retry=application_agent_diagnostic_buckets.delivery_retry+EXCLUDED.delivery_retry,unsupported=application_agent_diagnostic_buckets.unsupported+EXCLUDED.unsupported")
             .bind(organization_id)
             .bind(project_id)
@@ -319,22 +369,24 @@ impl AgentHealthRepository {
 
     /// An agent's signal and diagnostic buckets rolled up to `step_minutes`
     /// over `[start, end)`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn buckets<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        agent_id: Uuid,
-        cluster_id: Uuid,
-        step_minutes: i64,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        input: HealthBucketQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let HealthBucketQuery {
+            organization_id,
+            project_id,
+            application_id,
+            agent_id,
+            cluster_id,
+            step_minutes,
+            start,
+            end,
+        } = input;
         sqlx::query_as("WITH signals AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,TRUE received FROM application_agent_signal_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1), diagnostics AS (SELECT date_bin(($6::text || ' minutes')::interval,bucket_at,'1970-01-01'::timestamptz) bucket_at,bool_or(reset) reset,sum(dropped)::bigint dropped,sum(rate_limited)::bigint rate_limited,sum(decode_failed)::bigint decode_failed,sum(attribution_failed)::bigint attribution_failed,sum(capacity)::bigint capacity,sum(kernel_lost)::bigint kernel_lost,sum(correlation)::bigint correlation,sum(delivery_retry)::bigint delivery_retry,sum(unsupported)::bigint unsupported FROM application_agent_diagnostic_buckets WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$5 AND agent_id=$4 AND bucket_at >= $7 AND bucket_at < $8 GROUP BY 1) SELECT COALESCE(s.bucket_at,d.bucket_at) bucket_at,COALESCE(s.received,FALSE) received,COALESCE(d.reset,FALSE) reset,COALESCE(d.dropped,0) dropped,COALESCE(d.rate_limited,0) rate_limited,COALESCE(d.decode_failed,0) decode_failed,COALESCE(d.attribution_failed,0) attribution_failed,COALESCE(d.capacity,0) capacity,COALESCE(d.kernel_lost,0) kernel_lost,COALESCE(d.correlation,0) correlation,COALESCE(d.delivery_retry,0) delivery_retry,COALESCE(d.unsupported,0) unsupported FROM signals s FULL OUTER JOIN diagnostics d USING(bucket_at) ORDER BY bucket_at")
             .bind(organization_id)
             .bind(project_id)
@@ -351,6 +403,7 @@ impl AgentHealthRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{CounterBaseline, DiagnosticDeltas, HealthBucketQuery};
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use serde_json::json;
     use sqlx::PgPool;
@@ -425,14 +478,16 @@ mod tests {
     async fn buckets(pool: &PgPool, own: &Tenant, step_minutes: i64) -> Vec<Rollup> {
         AgentHealthRepository::buckets(
             pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.agent_id,
-            own.cluster_id,
-            step_minutes,
-            at(0),
-            at(60),
+            HealthBucketQuery {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                agent_id: own.agent_id,
+                cluster_id: own.cluster_id,
+                step_minutes,
+                start: at(0),
+                end: at(60),
+            },
         )
         .await
         .unwrap()
@@ -634,13 +689,15 @@ mod tests {
         for (minute, dropped) in [(1, 3), (2, 7)] {
             AgentHealthRepository::store_counter_baseline(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                own.cluster_id,
-                own.agent_id,
-                at(minute),
-                json!([dropped]),
+                CounterBaseline {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    cluster_id: own.cluster_id,
+                    agent_id: own.agent_id,
+                    sent_at: at(minute),
+                    counters: json!([dropped]),
+                },
             )
             .await
             .unwrap();
@@ -697,22 +754,24 @@ mod tests {
             async move {
                 AgentHealthRepository::add_diagnostic_deltas(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    own.cluster_id,
-                    own.agent_id,
-                    at(minute),
-                    reset,
-                    dropped,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    1,
+                    DiagnosticDeltas {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        cluster_id: own.cluster_id,
+                        agent_id: own.agent_id,
+                        bucket_at: at(minute),
+                        reset,
+                        dropped,
+                        rate_limited: 0,
+                        decode_failed: 0,
+                        attribution_failed: 0,
+                        capacity: 0,
+                        kernel_lost: 0,
+                        correlation: 0,
+                        delivery_retry: 0,
+                        unsupported: 1,
+                    },
                 )
                 .await
                 .unwrap();

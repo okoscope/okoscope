@@ -6,6 +6,59 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`DeploymentRepository::insert_revision`].
+#[derive(Debug)]
+pub struct NewDeploymentRevision<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub release_id: Uuid,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub namespace: &'a str,
+    pub workload_uid: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: &'a str,
+    pub replica_set_uid: &'a str,
+    pub replica_set_name: &'a str,
+    pub pod_template_hash: Option<&'a str>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Input to [`DeploymentRepository::insert_episode`].
+#[derive(Debug)]
+pub struct NewDeploymentEpisode<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub release_id: Uuid,
+    pub revision_id: Uuid,
+    pub occurrence_number: i64,
+    pub transition_kind: &'a str,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Input to [`DeploymentRepository::insert_snapshot`].
+#[derive(Debug)]
+pub struct NewDeploymentSnapshot<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub revision_id: Uuid,
+    pub snapshot_id: &'a str,
+    pub observed_at: DateTime<Utc>,
+    pub initialized: bool,
+    pub continuous: bool,
+    pub pod_count: i32,
+    pub ready_pod_count: i32,
+    pub workload_ready_pod_count: i32,
+}
+
 /// Workload revisions, readiness snapshots and deployment episodes.
 #[derive(Clone, Copy, Debug)]
 pub struct DeploymentRepository;
@@ -15,29 +68,31 @@ impl DeploymentRepository {
     /// and replica set, and returns its id. Reporting it again refreshes its
     /// last observation; `None` when the replica set was recorded with a
     /// different release or identity digest.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_revision<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        release_id: Uuid,
-        identity_version: i16,
-        identity_digest: &[u8],
-        namespace: &str,
-        workload_uid: &str,
-        workload_kind: &str,
-        workload_name: &str,
-        replica_set_uid: &str,
-        replica_set_name: &str,
-        pod_template_hash: Option<&str>,
-        observed_at: DateTime<Utc>,
+        input: NewDeploymentRevision<'_>,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewDeploymentRevision {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            release_id,
+            identity_version,
+            identity_digest,
+            namespace,
+            workload_uid,
+            workload_kind,
+            workload_name,
+            replica_set_uid,
+            replica_set_name,
+            pod_template_hash,
+            observed_at,
+        } = input;
         sqlx::query_scalar::<_, Uuid>("INSERT INTO kubernetes_workload_revisions(id,organization_id,project_id,application_id,cluster_id,release_id,identity_version,identity_digest,namespace,workload_uid,workload_kind,workload_name,replica_set_uid,replica_set_name,pod_template_hash,first_observed_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16) ON CONFLICT(application_id,cluster_id,workload_uid,replica_set_uid) DO UPDATE SET last_observed_at=GREATEST(kubernetes_workload_revisions.last_observed_at,EXCLUDED.last_observed_at) WHERE kubernetes_workload_revisions.release_id=EXCLUDED.release_id AND kubernetes_workload_revisions.identity_digest=EXCLUDED.identity_digest RETURNING id")
             .bind(id)
             .bind(organization_id)
@@ -140,23 +195,25 @@ impl DeploymentRepository {
     }
 
     /// Opens an active, ready episode of a revision.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_episode<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        release_id: Uuid,
-        revision_id: Uuid,
-        occurrence_number: i64,
-        transition_kind: &str,
-        observed_at: DateTime<Utc>,
+        input: NewDeploymentEpisode<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewDeploymentEpisode {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            release_id,
+            revision_id,
+            occurrence_number,
+            transition_kind,
+            observed_at,
+        } = input;
         sqlx::query("INSERT INTO deployment_episodes(id,organization_id,project_id,application_id,cluster_id,release_id,revision_id,occurrence_number,state,transition_kind,first_observed_at,first_ready_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$10,$10)")
             .bind(id)
             .bind(organization_id)
@@ -219,25 +276,27 @@ impl DeploymentRepository {
     }
 
     /// Records a readiness snapshot of a revision, once per snapshot id.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_snapshot<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        revision_id: Uuid,
-        snapshot_id: &str,
-        observed_at: DateTime<Utc>,
-        initialized: bool,
-        continuous: bool,
-        pod_count: i32,
-        ready_pod_count: i32,
-        workload_ready_pod_count: i32,
+        input: NewDeploymentSnapshot<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewDeploymentSnapshot {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            revision_id,
+            snapshot_id,
+            observed_at,
+            initialized,
+            continuous,
+            pod_count,
+            ready_pod_count,
+            workload_ready_pod_count,
+        } = input;
         sqlx::query("INSERT INTO kubernetes_revision_snapshots(organization_id,project_id,application_id,cluster_id,revision_id,snapshot_id,observed_at,initialized,continuous,pod_count,ready_pod_count,workload_ready_pod_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING")
             .bind(organization_id)
             .bind(project_id)
@@ -301,6 +360,8 @@ impl DeploymentRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{NewDeploymentEpisode, NewDeploymentRevision, NewDeploymentSnapshot};
+    use crate::repository::releases::ObservedRelease;
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use serde_json::json;
     use sqlx::PgPool;
@@ -313,15 +374,17 @@ mod tests {
     async fn release(pool: &PgPool, own: &Tenant, digest: u8) -> Uuid {
         ReleaseRepository::insert_observed(
             pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            format!("sha-{digest}"),
-            Utc::now(),
-            1,
-            &[digest; 32],
-            json!([{"container": "app"}]),
+            ObservedRelease {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                version: format!("sha-{digest}"),
+                deployed_at: Utc::now(),
+                identity_version: 1,
+                identity_digest: &[digest; 32],
+                identity_components: json!([{"container": "app"}]),
+            },
         )
         .await
         .unwrap()
@@ -330,22 +393,24 @@ mod tests {
     async fn revision(pool: &PgPool, own: &Tenant, release_id: Uuid, digest: u8) -> Option<Uuid> {
         DeploymentRepository::insert_revision(
             pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            release_id,
-            1,
-            &[digest; 32],
-            "production",
-            "workload-a",
-            "Deployment",
-            "api",
-            &format!("rs-{digest}"),
-            &format!("api-{digest}"),
-            Some("abc"),
-            Utc::now(),
+            NewDeploymentRevision {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                release_id,
+                identity_version: 1,
+                identity_digest: &[digest; 32],
+                namespace: "production",
+                workload_uid: "workload-a",
+                workload_kind: "Deployment",
+                workload_name: "api",
+                replica_set_uid: &format!("rs-{digest}"),
+                replica_set_name: &format!("api-{digest}"),
+                pod_template_hash: Some("abc"),
+                observed_at: Utc::now(),
+            },
         )
         .await
         .unwrap()
@@ -380,22 +445,24 @@ mod tests {
         );
         let conflicting = DeploymentRepository::insert_revision(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            first,
-            1,
-            &[9; 32],
-            "production",
-            "workload-a",
-            "Deployment",
-            "api",
-            "rs-7",
-            "api-7",
-            None,
-            Utc::now(),
+            NewDeploymentRevision {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                release_id: first,
+                identity_version: 1,
+                identity_digest: &[9; 32],
+                namespace: "production",
+                workload_uid: "workload-a",
+                workload_kind: "Deployment",
+                workload_name: "api",
+                replica_set_uid: "rs-7",
+                replica_set_name: "api-7",
+                pod_template_hash: None,
+                observed_at: Utc::now(),
+            },
         )
         .await
         .unwrap();
@@ -453,16 +520,18 @@ mod tests {
         let first = Uuid::new_v4();
         DeploymentRepository::insert_episode(
             &pool,
-            first,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            first_release,
-            rev,
-            1,
-            "unknown",
-            now,
+            NewDeploymentEpisode {
+                id: first,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                release_id: first_release,
+                revision_id: rev,
+                occurrence_number: 1,
+                transition_kind: "unknown",
+                observed_at: now,
+            },
         )
         .await
         .unwrap();
@@ -494,16 +563,18 @@ mod tests {
         let second = Uuid::new_v4();
         DeploymentRepository::insert_episode(
             &pool,
-            second,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            second_release,
-            second_rev,
-            1,
-            "rollout",
-            now + Duration::minutes(6),
+            NewDeploymentEpisode {
+                id: second,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                release_id: second_release,
+                revision_id: second_rev,
+                occurrence_number: 1,
+                transition_kind: "rollout",
+                observed_at: now + Duration::minutes(6),
+            },
         )
         .await
         .unwrap();
@@ -542,18 +613,20 @@ mod tests {
 
         DeploymentRepository::insert_snapshot(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            rev,
-            "snapshot-1",
-            now + Duration::minutes(7),
-            true,
-            true,
-            2,
-            1,
-            1,
+            NewDeploymentSnapshot {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                revision_id: rev,
+                snapshot_id: "snapshot-1",
+                observed_at: now + Duration::minutes(7),
+                initialized: true,
+                continuous: true,
+                pod_count: 2,
+                ready_pod_count: 1,
+                workload_ready_pod_count: 1,
+            },
         )
         .await
         .unwrap();

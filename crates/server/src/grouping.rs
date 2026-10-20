@@ -1,6 +1,7 @@
 use crate::repository::outbox::OutboxRepository;
 use std::fmt;
 
+use crate::repository::event_groups::{NewEventGroup, ReleaseMembership, ReleaseOccurrence};
 use crate::repository::{EventGroupRepository, GroupKey};
 use event_model::{
     EventPayload, GenerationCorrelation, NetworkAddressFamily, ProcessTermination, RuntimeEvent,
@@ -125,12 +126,14 @@ pub async fn assign_event(
     };
     let created_group_id = EventGroupRepository::insert_if_absent(
         &mut **tx,
-        candidate_group_id,
-        key,
-        &fingerprint.summary.event_kind,
-        &fingerprint.summary.semantic,
-        event.observed_at,
-        raw_event_id,
+        NewEventGroup {
+            candidate_id: candidate_group_id,
+            key,
+            event_kind: &fingerprint.summary.event_kind,
+            semantic_summary: &fingerprint.summary.semantic,
+            observed_at: event.observed_at,
+            event_id: raw_event_id,
+        },
     )
     .await?;
 
@@ -143,13 +146,15 @@ pub async fn assign_event(
 
     let membership_created = EventGroupRepository::add_release_membership(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        raw_event_id,
-        group_id,
-        version,
-        release_id,
+        ReleaseMembership {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            event_id: raw_event_id,
+            group_id,
+            fingerprint_version: version,
+            release_id,
+        },
     )
     .await?
     .is_some();
@@ -210,13 +215,15 @@ async fn update_release_summary(
 ) -> Result<(), sqlx::Error> {
     EventGroupRepository::record_release_occurrence(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        release_id,
-        group_id,
-        event.observed_at,
-        raw_event_id,
+        ReleaseOccurrence {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            release_id,
+            group_id,
+            observed_at: event.observed_at,
+            event_id: raw_event_id,
+        },
     )
     .await?;
     crate::metrics::record_release_summary();

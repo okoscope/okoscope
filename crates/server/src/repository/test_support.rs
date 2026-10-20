@@ -21,6 +21,7 @@ use crate::auth::SessionScope;
 use crate::bootstrap::{BootstrapConfig, bootstrap};
 use crate::ingestion::{IngestionContext, persist_batch};
 use crate::release_discovery::persist_revision_evidence;
+use crate::repository::webhook_destinations::NewWebhookDestination;
 
 /// A bootstrapped organization, project, cluster and application, with an
 /// agent registered in the cluster to report events.
@@ -351,14 +352,16 @@ pub async fn destination(pool: &PgPool, tenant: &Tenant, name: &str) -> Uuid {
     let created: Created =
         crate::repository::webhook_destinations::WebhookDestinationRepository::insert(
             pool,
-            Uuid::new_v4(),
-            tenant.organization_id,
-            tenant.project_id,
-            name,
-            "https://hooks.example.test/okoscope",
-            vec![1; 48],
-            &[2; 24],
-            false,
+            NewWebhookDestination {
+                id: Uuid::new_v4(),
+                organization_id: tenant.organization_id,
+                project_id: tenant.project_id,
+                name,
+                url: "https://hooks.example.test/okoscope",
+                encrypted_secret: vec![1; 48],
+                secret_nonce: &[2; 24],
+                deliver_backfill: false,
+            },
         )
         .await
         .unwrap();

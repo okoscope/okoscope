@@ -5,6 +5,18 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`ApplicationCredentialRepository::insert`].
+#[derive(Debug)]
+pub struct NewApplicationCredential<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub name: &'a str,
+    pub credential_hash: &'a [u8],
+    pub token_hint: &'a str,
+}
+
 /// Application ingestion credentials.
 #[derive(Clone, Copy, Debug)]
 pub struct ApplicationCredentialRepository;
@@ -14,21 +26,23 @@ impl ApplicationCredentialRepository {
     ///
     /// Selects `id`, `name`, `token_hint`, `created_at`, `last_used_at` and
     /// `revoked_at`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E, T>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        name: &str,
-        credential_hash: &[u8],
-        token_hint: &str,
+        input: NewApplicationCredential<'_>,
     ) -> Result<T, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let NewApplicationCredential {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            name,
+            credential_hash,
+            token_hint,
+        } = input;
         sqlx::query_as("INSERT INTO application_ingestion_credentials(id,organization_id,project_id,application_id,name,credential_hash,token_hint) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,name,token_hint,created_at,last_used_at,revoked_at")
             .bind(id)
             .bind(organization_id)
@@ -134,6 +148,7 @@ impl ApplicationCredentialRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewApplicationCredential;
     use chrono::{DateTime, Utc};
     use sqlx::FromRow;
     use sqlx::PgPool;
@@ -160,13 +175,15 @@ mod tests {
         let other = tenant(&pool, "credentials-lifecycle-other").await;
         let created: Summary = ApplicationCredentialRepository::insert(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            "ci",
-            &[4; 32],
-            "okt_…abcd",
+            NewApplicationCredential {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                name: "ci",
+                credential_hash: &[4; 32],
+                token_hint: "okt_…abcd",
+            },
         )
         .await
         .unwrap();

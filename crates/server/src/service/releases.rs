@@ -10,6 +10,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::auth::IdentityPrincipal;
+use crate::repository::releases::{DiffPageQuery, ManualRelease};
 use crate::repository::transaction::TransactionRepository;
 use crate::repository::{ApplicationRepository, ApplicationScope, ReleaseRepository};
 use crate::runtime_retention::history::Coverage;
@@ -220,13 +221,15 @@ impl ReleaseService {
         }
         let result = ReleaseRepository::create_manual::<_, Release>(
             &self.pool,
-            Uuid::new_v4(),
-            organization_id,
-            path.project_id,
-            path.application_id,
-            version,
-            input.description,
-            input.deployed_at,
+            ManualRelease {
+                id: Uuid::new_v4(),
+                organization_id,
+                project_id: path.project_id,
+                application_id: path.application_id,
+                version,
+                description: input.description,
+                deployed_at: input.deployed_at,
+            },
         )
         .await;
         match result {
@@ -369,13 +372,15 @@ impl ReleaseService {
         let baseline_id = baseline.as_ref().map(|release| release.id);
         let mut items = ReleaseRepository::diff_page::<_, DiffEntry>(
             &self.pool,
-            baseline_id,
-            target.id,
-            organization_id,
-            path.project_id,
-            path.application_id,
-            cursor,
-            limit + 1,
+            DiffPageQuery {
+                baseline_id,
+                target_id: target.id,
+                organization_id,
+                project_id: path.project_id,
+                application_id: path.application_id,
+                cursor_id: cursor,
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         let next_cursor = if i64::try_from(items.len()).unwrap_or(i64::MAX) > limit {

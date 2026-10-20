@@ -210,14 +210,18 @@ impl NotificationRetentionRepository {
 
 #[cfg(test)]
 mod tests {
+    use crate::repository::notification_deliveries::{
+        NewOutboxDelivery, NotificationDeliveryRepository,
+    };
+    use crate::repository::notification_recovery::{
+        NewRecoveryOperation, NotificationRecoveryRepository,
+    };
     use chrono::Utc;
     use serde_json::json;
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::NotificationRetentionRepository;
-    use crate::repository::notification_deliveries::NotificationDeliveryRepository;
-    use crate::repository::notification_recovery::NotificationRecoveryRepository;
     use crate::repository::test_support::{
         Tenant, destination, exec, first_seen_messages, ingest, tenant, user,
     };
@@ -376,18 +380,20 @@ mod tests {
             let id = Uuid::new_v4();
             NotificationDeliveryRepository::insert_for_outbox(
                 &pool,
-                id,
-                own.organization_id,
-                own.project_id,
-                target,
-                message,
-                "live",
-                json!({}),
-                "failed",
-                3,
-                Some(Utc::now()),
-                Some("http_5xx"),
-                Some("server error"),
+                NewOutboxDelivery {
+                    id,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    destination_id: target,
+                    outbox_message_id: message,
+                    source: "live",
+                    payload: json!({}),
+                    status: "failed",
+                    max_attempts: 3,
+                    terminal_at: Some(Utc::now()),
+                    last_error_class: Some("http_5xx"),
+                    last_error: Some("server error"),
+                },
             )
             .await
             .unwrap();
@@ -406,23 +412,25 @@ mod tests {
                 let id = Uuid::new_v4();
                 NotificationRecoveryRepository::insert(
                     &pool,
-                    id,
-                    own.organization_id,
-                    own.project_id,
-                    command,
-                    target,
-                    actor,
-                    "request",
-                    &[key; 32],
-                    &[0; 32],
-                    json!({}),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    json!({}),
-                    Utc::now(),
+                    NewRecoveryOperation {
+                        id,
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        command_type: command,
+                        target_delivery_id: target,
+                        actor_id: actor,
+                        request_id: "request",
+                        idempotency_key_hash: &[key; 32],
+                        request_fingerprint: &[0; 32],
+                        safe_filters: json!({}),
+                        selected_count: 0,
+                        retried_count: 0,
+                        cancelled_count: 0,
+                        skipped_count: 0,
+                        remaining_count: 0,
+                        result: json!({}),
+                        completed_at: Utc::now(),
+                    },
                 )
                 .await
                 .unwrap();

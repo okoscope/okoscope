@@ -1,4 +1,6 @@
-use crate::repository::application_credentials::ApplicationCredentialRepository;
+use crate::repository::application_credentials::{
+    ApplicationCredentialRepository, NewApplicationCredential,
+};
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -148,13 +150,15 @@ pub async fn issue(
     let token = ApplicationToken::generate();
     let summary = ApplicationCredentialRepository::insert::<_, ApplicationCredentialSummary>(
         &mut **tx,
-        Uuid::new_v4(),
-        organization_id,
-        project_id,
-        application_id,
-        name,
-        token.digest().as_slice(),
-        token.hint(),
+        NewApplicationCredential {
+            id: Uuid::new_v4(),
+            organization_id,
+            project_id,
+            application_id,
+            name,
+            credential_hash: token.digest().as_slice(),
+            token_hint: token.hint(),
+        },
     )
     .await?;
     Ok(IssuedApplicationCredential { summary, token })

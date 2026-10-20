@@ -185,6 +185,9 @@ impl OutboxRepository {
 
 #[cfg(test)]
 mod tests {
+    use crate::repository::notification_deliveries::{
+        NewOutboxDelivery, NotificationDeliveryRepository,
+    };
     use chrono::{DateTime, Utc};
     use serde_json::{Value, json};
     use sqlx::{FromRow, PgPool};
@@ -192,7 +195,6 @@ mod tests {
 
     use super::OutboxRepository;
     use crate::repository::EventGroupRepository;
-    use crate::repository::notification_deliveries::NotificationDeliveryRepository;
     use crate::repository::test_support::{
         Tenant, destination, exec, first_seen_messages, ingest, tenant, user,
     };
@@ -326,18 +328,20 @@ mod tests {
         let delivery = Uuid::new_v4();
         NotificationDeliveryRepository::insert_for_outbox(
             &pool,
-            delivery,
-            own.organization_id,
-            own.project_id,
-            target,
-            message,
-            "live",
-            json!({}),
-            "pending",
-            3,
-            None,
-            None,
-            None,
+            NewOutboxDelivery {
+                id: delivery,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                destination_id: target,
+                outbox_message_id: message,
+                source: "live",
+                payload: json!({}),
+                status: "pending",
+                max_attempts: 3,
+                terminal_at: None,
+                last_error_class: None,
+                last_error: None,
+            },
         )
         .await
         .unwrap();

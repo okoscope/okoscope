@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::access_control::resolve_project_access;
 use crate::auth::IdentityPrincipal;
 use crate::repository::ApplicationRepository;
-use crate::repository::event_groups::EventGroupRepository;
+use crate::repository::event_groups::{EventGroupRepository, GroupSummaryPageQuery};
 use crate::repository::events::EventRepository;
 use crate::service::project_access::project_scope;
 
@@ -338,31 +338,7 @@ impl RuntimeGroupService {
             query.application_id,
         )
         .await?;
-        let limit = query.limit.unwrap_or(50);
-        if !(1..=200).contains(&limit) {
-            return Err(RuntimeGroupServiceError::Invalid(
-                "limit must be between 1 and 200".into(),
-            ));
-        }
-        if query
-            .status
-            .as_deref()
-            .is_some_and(|status| !matches!(status, "open" | "acknowledged" | "resolved"))
-        {
-            return Err(RuntimeGroupServiceError::Invalid(
-                "unsupported status".into(),
-            ));
-        }
-        if query.verdict.as_deref().is_some_and(|verdict| {
-            !matches!(
-                verdict,
-                "unclassified" | "expected" | "requires_review" | "policy_conflict"
-            )
-        }) {
-            return Err(RuntimeGroupServiceError::Invalid(
-                "unsupported policy verdict".into(),
-            ));
-        }
+        let limit = validate_list_filters(&query)?;
         let cursor = if let Some(cursor) = query.cursor {
             let position = EventGroupRepository::list_cursor(
                 &self.pool,
@@ -382,22 +358,24 @@ impl RuntimeGroupService {
         let (cursor_time, cursor_id) = cursor.unzip();
         let mut items = EventGroupRepository::summary_page::<_, GroupSummary>(
             &self.pool,
-            organization_id,
-            query.project_id,
-            query.application_id,
-            query.event_kind,
-            query.status,
-            query.namespace,
-            query.workload_kind,
-            query.workload_name,
-            query.since,
-            query.first_seen_from,
-            query.first_seen_to,
-            query.last_seen_to,
-            query.release_id,
-            cursor_time,
-            cursor_id,
-            limit + 1,
+            GroupSummaryPageQuery {
+                organization_id,
+                project_id: query.project_id,
+                application_id: query.application_id,
+                event_kind: query.event_kind,
+                status: query.status,
+                namespace: query.namespace,
+                workload_kind: query.workload_kind,
+                workload_name: query.workload_name,
+                since: query.since,
+                first_seen_from: query.first_seen_from,
+                first_seen_to: query.first_seen_to,
+                last_seen_to: query.last_seen_to,
+                release_id: query.release_id,
+                cursor_last_seen_at: cursor_time,
+                cursor_id,
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         attach_group_policy(&self.pool, organization_id, &mut items).await?;
@@ -660,6 +638,37 @@ impl RuntimeGroupService {
         self.transition_group(principal, group_id, "open", &["acknowledged", "resolved"])
             .await
     }
+}
+
+/// Checks the list filters that the statement cannot reject itself and returns
+/// the page size.
+fn validate_list_filters(query: &ListQuery) -> Result<i64, RuntimeGroupServiceError> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return Err(RuntimeGroupServiceError::Invalid(
+            "limit must be between 1 and 200".into(),
+        ));
+    }
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "open" | "acknowledged" | "resolved"))
+    {
+        return Err(RuntimeGroupServiceError::Invalid(
+            "unsupported status".into(),
+        ));
+    }
+    if query.verdict.as_deref().is_some_and(|verdict| {
+        !matches!(
+            verdict,
+            "unclassified" | "expected" | "requires_review" | "policy_conflict"
+        )
+    }) {
+        return Err(RuntimeGroupServiceError::Invalid(
+            "unsupported policy verdict".into(),
+        ));
+    }
+    Ok(limit)
 }
 
 #[cfg(test)]

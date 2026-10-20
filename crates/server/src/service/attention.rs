@@ -17,7 +17,7 @@ use crate::notification::health::{
     NotificationHealthState, NotificationQueueSnapshot, derive_state,
 };
 use crate::repository::MembershipRepository;
-use crate::repository::attention::AttentionRepository;
+use crate::repository::attention::{AttentionRepository, DiscoveryQuery};
 use crate::repository::resources::ResourceRepository;
 use crate::repository::transaction::TransactionRepository;
 use crate::service::project_access::project_scope;
@@ -680,13 +680,15 @@ async fn load_discoveries(
 ) -> Result<Vec<DiscoveryRow>, sqlx::Error> {
     AttentionRepository::discoveries(
         &mut **tx,
-        organization_id,
-        project_ids,
-        application_id,
-        from,
-        to,
-        limit,
-        crate::policy::POLICY_EVALUATOR_VERSION,
+        DiscoveryQuery {
+            organization_id,
+            project_ids,
+            application_id,
+            from,
+            to,
+            limit,
+            evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+        },
     )
     .await
 }

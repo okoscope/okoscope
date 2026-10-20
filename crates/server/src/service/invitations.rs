@@ -19,7 +19,7 @@ use crate::auth::{
     IdentityPrincipal, OrganizationRole, SessionToken, hash_password, normalize_email,
     validate_password,
 };
-use crate::repository::invitations::InvitationRepository;
+use crate::repository::invitations::{InvitationRepository, NewInvitationRecord};
 use crate::repository::{
     MembershipRepository, OrganizationRepository, ProjectRepository, UserRepository,
 };
@@ -1182,15 +1182,17 @@ async fn insert_invitation(
 ) -> Result<()> {
     InvitationRepository::insert(
         &mut **tx,
-        id,
-        request.scope.organization_id,
-        request.scope.project_id,
-        &request.recipient_email,
-        &request.role,
-        request.inviter_user_id,
-        request.locale.as_str(),
-        token.digest.to_vec(),
-        expires_at,
+        NewInvitationRecord {
+            id,
+            organization_id: request.scope.organization_id,
+            project_id: request.scope.project_id,
+            recipient_email: &request.recipient_email,
+            role: &request.role,
+            inviter_user_id: request.inviter_user_id,
+            locale: request.locale.as_str(),
+            token_digest: token.digest.to_vec(),
+            expires_at,
+        },
     )
     .await
     .map_err(|error| map_unique(error, InvitationConflict::InvitationExists))?;
@@ -1480,15 +1482,17 @@ mod tests {
             let token = InvitationToken::generate();
             InvitationRepository::insert(
                 pool,
-                id,
-                tenant.organization_id,
-                None,
-                email,
-                "member",
-                inviter,
-                "en",
-                token.digest.to_vec(),
-                Utc::now() + Duration::days(1),
+                NewInvitationRecord {
+                    id,
+                    organization_id: tenant.organization_id,
+                    project_id: None,
+                    recipient_email: email,
+                    role: "member",
+                    inviter_user_id: inviter,
+                    locale: "en",
+                    token_digest: token.digest.to_vec(),
+                    expires_at: Utc::now() + Duration::days(1),
+                },
             )
             .await
             .unwrap();

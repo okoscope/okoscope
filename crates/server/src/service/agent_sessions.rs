@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::application_credentials::{ApplicationCredentialScope, authenticate};
 use crate::auth::SessionScope;
 use crate::ingestion::{IngestionError, persist_application_batch_outcome};
-use crate::repository::clusters::ClusterRepository;
-use crate::repository::installations::InstallationRepository;
+use crate::repository::clusters::{AgentRegistration, ClusterRepository};
+use crate::repository::installations::{InstallationRepository, InstallationStatusReport};
 
 /// Why an agent session step failed.
 #[derive(Debug, Error)]
@@ -353,14 +353,16 @@ async fn register(
     let kernel_release = platform_value(&hello.kernel_release, 255);
     let agent_id: Uuid = ClusterRepository::register_agent(
         pool,
-        Uuid::new_v4(),
-        scope.organization_id,
-        scope.cluster_id,
-        &hello.node_name,
-        &hello.agent_version,
-        architecture,
-        kernel_release,
-        serde_json::json!(capabilities),
+        AgentRegistration {
+            id: Uuid::new_v4(),
+            organization_id: scope.organization_id,
+            cluster_id: scope.cluster_id,
+            node_name: &hello.node_name,
+            agent_version: &hello.agent_version,
+            architecture,
+            kernel_release,
+            capabilities: serde_json::json!(capabilities),
+        },
     )
     .await?;
     let session_id = Uuid::new_v4();
@@ -425,13 +427,15 @@ async fn persist_onboarding_status(
     }
     InstallationRepository::record_status(
         pool,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        node_name,
-        state,
-        reason,
-        observed_at,
+        InstallationStatusReport {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            node_name,
+            state,
+            reason,
+            observed_at,
+        },
     )
     .await
     .map_err(internal)?;

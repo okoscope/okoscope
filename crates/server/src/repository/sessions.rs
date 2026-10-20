@@ -24,6 +24,17 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`SessionRepository::insert`].
+#[derive(Debug)]
+pub struct NewSession<'a> {
+    pub session_id: Uuid,
+    pub user_id: Uuid,
+    pub organization_id: Option<Uuid>,
+    pub token_digest: &'a [u8],
+    pub expires_at: DateTime<Utc>,
+    pub privileged_until: Option<DateTime<Utc>>,
+}
+
 /// Queries against the `user_sessions` table.
 #[derive(Clone, Copy, Debug)]
 pub struct SessionRepository;
@@ -53,19 +64,18 @@ impl SessionRepository {
     ///
     /// Only the digest is stored. The plaintext token goes to the client once
     /// and is never persisted, so a copy of this table does not grant access.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn insert<'e, E>(
-        executor: E,
-        session_id: Uuid,
-        user_id: Uuid,
-        organization_id: Option<Uuid>,
-        token_digest: &[u8],
-        expires_at: DateTime<Utc>,
-        privileged_until: Option<DateTime<Utc>>,
-    ) -> Result<(), sqlx::Error>
+    pub async fn insert<'e, E>(executor: E, input: NewSession<'_>) -> Result<(), sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewSession {
+            session_id,
+            user_id,
+            organization_id,
+            token_digest,
+            expires_at,
+            privileged_until,
+        } = input;
         sqlx::query(
             r#"
             INSERT INTO user_sessions(id, user_id, organization_id, token_hash,
@@ -188,6 +198,7 @@ impl SessionRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewSession;
     use super::SessionRepository;
     use chrono::{DateTime, Duration, Utc};
     use sqlx::PgPool;
@@ -234,12 +245,14 @@ mod tests {
         full[16..].copy_from_slice(Uuid::new_v4().as_bytes());
         SessionRepository::insert(
             pool,
-            id,
-            user,
-            organization,
-            &full,
-            Utc::now() + Duration::hours(1),
-            None,
+            NewSession {
+                session_id: id,
+                user_id: user,
+                organization_id: organization,
+                token_digest: &full,
+                expires_at: Utc::now() + Duration::hours(1),
+                privileged_until: None,
+            },
         )
         .await
         .unwrap();
@@ -359,7 +372,7 @@ mod authenticate_tests {
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
-    use super::SessionRepository;
+    use super::{NewSession, SessionRepository};
     use crate::repository::MembershipRepository;
     use crate::repository::test_support::{tenant, user};
 
@@ -392,12 +405,14 @@ mod authenticate_tests {
         let session = Uuid::new_v4();
         SessionRepository::insert(
             &pool,
-            session,
-            member,
-            Some(own.organization_id),
-            &[1; 32],
-            Utc::now() + Duration::hours(1),
-            None,
+            NewSession {
+                session_id: session,
+                user_id: member,
+                organization_id: Some(own.organization_id),
+                token_digest: &[1; 32],
+                expires_at: Utc::now() + Duration::hours(1),
+                privileged_until: None,
+            },
         )
         .await
         .unwrap();

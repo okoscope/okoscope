@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::application_credentials::ApplicationCredentialScope;
 use crate::auth::UserPrincipal;
-use crate::repository::agent_health::AgentHealthRepository;
+use crate::repository::agent_health::{
+    AgentHealthRepository, CounterBaseline, DiagnosticDeltas, HealthBucketQuery,
+};
 
 /// Why reading agent health failed.
 #[derive(Debug, Error)]
@@ -311,13 +313,15 @@ async fn record_application_diagnostics(
         .map(|old| deltas(old, &current));
     AgentHealthRepository::store_counter_baseline(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        cluster_id,
-        agent_id,
-        sent_at,
-        serde_json::json!(current),
+        CounterBaseline {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            cluster_id,
+            agent_id,
+            sent_at,
+            counters: serde_json::json!(current),
+        },
     )
     .await?;
     upsert_diagnostic_bucket(
@@ -344,22 +348,24 @@ async fn upsert_diagnostic_bucket(
     let d = deltas.unwrap_or([0; DIAGNOSTIC_COUNT]);
     AgentHealthRepository::add_diagnostic_deltas(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        cluster_id,
-        agent_id,
-        bucket,
-        reset,
-        d[0],
-        d[1],
-        d[2],
-        d[3],
-        d[4],
-        d[5],
-        d[6],
-        d[7],
-        d[8],
+        DiagnosticDeltas {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            cluster_id,
+            agent_id,
+            bucket_at: bucket,
+            reset,
+            dropped: d[0],
+            rate_limited: d[1],
+            decode_failed: d[2],
+            attribution_failed: d[3],
+            capacity: d[4],
+            kernel_lost: d[5],
+            correlation: d[6],
+            delivery_retry: d[7],
+            unsupported: d[8],
+        },
     )
     .await?;
     Ok(())
@@ -489,14 +495,16 @@ async fn fetch_buckets(
     let step = range.step_minutes();
     AgentHealthRepository::buckets(
         pool,
-        row.organization_id,
-        row.project_id,
-        row.application_id,
-        row.agent_id,
-        row.cluster_id,
-        step,
-        start,
-        end,
+        HealthBucketQuery {
+            organization_id: row.organization_id,
+            project_id: row.project_id,
+            application_id: row.application_id,
+            agent_id: row.agent_id,
+            cluster_id: row.cluster_id,
+            step_minutes: step,
+            start,
+            end,
+        },
     )
     .await
 }

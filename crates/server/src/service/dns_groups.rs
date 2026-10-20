@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::auth::IdentityPrincipal;
 use crate::repository::ApplicationRepository;
-use crate::repository::dns_groups::{DnsGroupFilter, DnsGroupRepository};
+use crate::repository::dns_groups::{DnsGroupFilter, DnsGroupPageQuery, DnsGroupRepository};
 use crate::service::project_access::project_scope;
 
 /// Why a DNS group use case failed.
@@ -417,12 +417,14 @@ impl DnsGroupService {
         let pattern = scope.search.as_ref().map(|value| format!("%{value}%"));
         let mut rows: Vec<GroupRow> = DnsGroupRepository::groups(
             &self.pool,
-            scope.filter(principal, project_id, application_id),
-            pattern,
-            cursor.as_ref().map(|v| v.last_seen_at),
-            cursor.as_ref().map(|v| v.display_name.as_str()),
-            cursor.as_ref().map(|v| v.process_command.as_str()),
-            limit + 1,
+            DnsGroupPageQuery {
+                filter: scope.filter(principal, project_id, application_id),
+                pattern,
+                cursor_last_seen_at: cursor.as_ref().map(|v| v.last_seen_at),
+                cursor_display_name: cursor.as_ref().map(|v| v.display_name.as_str()),
+                cursor_process_command: cursor.as_ref().map(|v| v.process_command.as_str()),
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         let total_group_count = rows.first().map_or(0, |row| row.total_group_count);

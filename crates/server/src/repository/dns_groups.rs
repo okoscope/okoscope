@@ -122,6 +122,17 @@ fn bind_filter<'q, T>(
         .bind(crate::policy::POLICY_EVALUATOR_VERSION)
 }
 
+/// Input to [`DnsGroupRepository::groups`].
+#[derive(Debug)]
+pub struct DnsGroupPageQuery<'a> {
+    pub filter: DnsGroupFilter<'a>,
+    pub pattern: Option<String>,
+    pub cursor_last_seen_at: Option<DateTime<Utc>>,
+    pub cursor_display_name: Option<&'a str>,
+    pub cursor_process_command: Option<&'a str>,
+    pub fetch_limit: i64,
+}
+
 /// Queries over DNS behaviour groups.
 #[derive(Clone, Copy, Debug)]
 pub struct DnsGroupRepository;
@@ -135,20 +146,22 @@ impl DnsGroupRepository {
     /// `LIKE` pattern over the display name; `fetch_limit` is the number of rows
     /// to return, which callers set one above the page size to detect a next
     /// page.
-    #[allow(clippy::too_many_arguments)]
     pub async fn groups<'e, E, T>(
         executor: E,
-        filter: DnsGroupFilter<'_>,
-        pattern: Option<String>,
-        cursor_last_seen_at: Option<DateTime<Utc>>,
-        cursor_display_name: Option<&str>,
-        cursor_process_command: Option<&str>,
-        fetch_limit: i64,
+        input: DnsGroupPageQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
+        let DnsGroupPageQuery {
+            filter,
+            pattern,
+            cursor_last_seen_at,
+            cursor_display_name,
+            cursor_process_command,
+            fetch_limit,
+        } = input;
         let sql = format!(
             "{GROUP_CTE}, filtered AS (SELECT *,count(*) OVER()::bigint total_group_count,sum(observation_count) OVER()::bigint total_observation_count FROM groups WHERE ($17::text IS NULL OR display_name ILIKE $17 OR EXISTS(SELECT 1 FROM unnest(exact_names) n WHERE n ILIKE $17))) SELECT display_name,process_command,grouping_reason,confidence,first_seen_at,last_seen_at,observation_count,variant_count,query_types,release_count,cluster_count,namespace_count,workload_count,pod_count,container_count,total_group_count,total_observation_count FROM filtered WHERE ($18::timestamptz IS NULL OR (last_seen_at,display_name,process_command)<($18,$19,$20)) ORDER BY last_seen_at DESC,display_name DESC,process_command DESC LIMIT $21"
         );
@@ -218,6 +231,7 @@ impl DnsGroupRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::DnsGroupPageQuery;
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use event_model::DnsQueryType;
     use sqlx::PgPool;
@@ -302,12 +316,14 @@ mod tests {
     ) -> Vec<Group> {
         DnsGroupRepository::groups(
             pool,
-            filter,
-            pattern.map(str::to_owned),
-            cursor.map(|g| g.last_seen_at),
-            cursor.map(|g| g.display_name.as_str()),
-            cursor.map(|g| g.process_command.as_str()),
-            fetch_limit,
+            DnsGroupPageQuery {
+                filter,
+                pattern: pattern.map(str::to_owned),
+                cursor_last_seen_at: cursor.map(|g| g.last_seen_at),
+                cursor_display_name: cursor.map(|g| g.display_name.as_str()),
+                cursor_process_command: cursor.map(|g| g.process_command.as_str()),
+                fetch_limit,
+            },
         )
         .await
         .unwrap()

@@ -1,5 +1,5 @@
 use crate::repository::inventory::InventoryRepository;
-use crate::repository::policies::PolicyRepository;
+use crate::repository::policies::{GroupEvaluation, PolicyRepository, SightingEvaluation};
 use event_model::RuntimeEvent;
 use serde_json::{Value, json};
 use sqlx::{FromRow, Postgres, Transaction};
@@ -134,16 +134,18 @@ async fn store_group(
 ) -> Result<(), sqlx::Error> {
     PolicyRepository::store_group_evaluation(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        group_id,
-        value.state_version,
-        POLICY_EVALUATOR_VERSION,
-        &value.verdict,
-        &value.reason,
-        value.winning_revision_id,
-        &value.explanation,
+        GroupEvaluation {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            group_id,
+            policy_state_version: value.state_version,
+            evaluator_version: POLICY_EVALUATOR_VERSION,
+            verdict: &value.verdict,
+            reason_code: &value.reason,
+            winning_revision_id: value.winning_revision_id,
+            explanation: &value.explanation,
+        },
     )
     .await?;
     Ok(())
@@ -161,22 +163,24 @@ async fn store_sighting(
 ) -> Result<(), sqlx::Error> {
     PolicyRepository::store_sighting_evaluation(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        item_id,
-        placement.cluster_id,
-        &placement.namespace,
-        &placement.workload_kind,
-        &placement.workload_name,
-        pod_uid,
-        container_name,
-        value.state_version,
-        POLICY_EVALUATOR_VERSION,
-        &value.verdict,
-        &value.reason,
-        value.winning_revision_id,
-        &value.explanation,
+        SightingEvaluation {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            item_id,
+            cluster_id: placement.cluster_id,
+            namespace: &placement.namespace,
+            workload_kind: &placement.workload_kind,
+            workload_name: &placement.workload_name,
+            pod_uid,
+            container_name,
+            policy_state_version: value.state_version,
+            evaluator_version: POLICY_EVALUATOR_VERSION,
+            verdict: &value.verdict,
+            reason_code: &value.reason,
+            winning_revision_id: value.winning_revision_id,
+            explanation: &value.explanation,
+        },
     )
     .await?;
     Ok(())

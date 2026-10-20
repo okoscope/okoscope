@@ -1,6 +1,6 @@
 use crate::repository::event_groups::EventGroupRepository;
 use crate::repository::events::EventRepository;
-use crate::repository::inventory::InventoryRepository;
+use crate::repository::inventory::{InventoryRepository, ProjectionBackfillPageQuery};
 use std::time::Duration;
 
 use event_model::{EventPayload, KubernetesAttribution, ProcessIdentity, RuntimeEvent};
@@ -142,13 +142,15 @@ pub async fn backfill(
         lock_project(&mut tx, options.organization_id, options.project_id).await?;
         let rows = InventoryRepository::projection_backfill_page::<_, StoredInventoryEvent>(
             &mut *tx,
-            options.organization_id,
-            options.project_id,
-            options.application_id,
-            options.identity_version,
-            cursor,
-            upper_bound,
-            options.batch_size,
+            ProjectionBackfillPageQuery {
+                organization_id: options.organization_id,
+                project_id: options.project_id,
+                application_id: options.application_id,
+                identity_version: options.identity_version,
+                cursor,
+                upper_bound,
+                limit: options.batch_size,
+            },
         )
         .await?;
         if rows.is_empty() {

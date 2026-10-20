@@ -11,6 +11,18 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 
+/// Input to [`RuntimeRetentionRepository::snapshot_page`].
+#[derive(Debug)]
+pub struct SnapshotPageQuery {
+    pub organization_id: Uuid,
+    pub group_id: Uuid,
+    pub day_from: Option<NaiveDate>,
+    pub day_to: Option<NaiveDate>,
+    pub release_id: Option<Uuid>,
+    pub cursor: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
 /// Runtime retention policy and compaction.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeRetentionRepository;
@@ -57,21 +69,23 @@ impl RuntimeRetentionRepository {
     ///
     /// Selects `id`, `group_id`, `release_id`, `day`, `format_version`,
     /// `occurrence_count`, `first_observed_at` and `last_observed_at`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn snapshot_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        group_id: Uuid,
-        day_from: Option<NaiveDate>,
-        day_to: Option<NaiveDate>,
-        release_id: Option<Uuid>,
-        cursor: Option<Uuid>,
-        fetch_limit: i64,
+        input: SnapshotPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let SnapshotPageQuery {
+            organization_id,
+            group_id,
+            day_from,
+            day_to,
+            release_id,
+            cursor,
+            fetch_limit,
+        } = input;
         sqlx::query_as("SELECT id,group_id,release_id,day,format_version,occurrence_count,first_observed_at,last_observed_at FROM runtime_history_snapshots WHERE organization_id=$1 AND group_id=$2 AND ($3::date IS NULL OR day >= $3) AND ($4::date IS NULL OR day < $4) AND ($5::uuid IS NULL OR release_id=$5) AND ($6::uuid IS NULL OR (day,id)<(SELECT day,id FROM runtime_history_snapshots WHERE id=$6 AND organization_id=$1 AND group_id=$2)) ORDER BY day DESC,id DESC LIMIT $7")
             .bind(organization_id)
             .bind(group_id)
@@ -638,6 +652,7 @@ impl RuntimeRetentionRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::SnapshotPageQuery;
     use chrono::{DateTime, Duration, NaiveDate, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
@@ -982,13 +997,15 @@ mod tests {
 
         let snapshots: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
             &pool,
-            own.organization_id,
-            group,
-            None,
-            None,
-            None,
-            None,
-            10,
+            SnapshotPageQuery {
+                organization_id: own.organization_id,
+                group_id: group,
+                day_from: None,
+                day_to: None,
+                release_id: None,
+                cursor: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1005,13 +1022,15 @@ mod tests {
         );
         let for_release: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
             &pool,
-            own.organization_id,
-            group,
-            Some(day),
-            day.succ_opt(),
-            Some(release),
-            None,
-            10,
+            SnapshotPageQuery {
+                organization_id: own.organization_id,
+                group_id: group,
+                day_from: Some(day),
+                day_to: day.succ_opt(),
+                release_id: Some(release),
+                cursor: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();

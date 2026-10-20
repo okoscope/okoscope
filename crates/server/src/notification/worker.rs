@@ -1,5 +1,8 @@
 use crate::repository::event_groups::EventGroupRepository;
-use crate::repository::notification_deliveries::NotificationDeliveryRepository;
+use crate::repository::notification_deliveries::{
+    DeliveryPageQuery, NewDeliveryAttempt, NewOutboxDelivery, NewTestDelivery,
+    NotificationDeliveryRepository,
+};
 use crate::repository::outbox::OutboxRepository;
 use crate::repository::webhook_destinations::WebhookDestinationRepository;
 use std::time::{Duration, Instant};
@@ -348,18 +351,20 @@ async fn materialize_message(
         let terminal_at = suppressed.then(Utc::now);
         let inserted = NotificationDeliveryRepository::insert_for_outbox(
             &mut **tx,
-            delivery_id,
-            outbox.organization_id,
-            outbox.project_id,
-            destination.id,
-            outbox.id,
-            &outbox.source,
-            serde_json::to_value(envelope)?,
-            delivery_status,
-            i32::try_from(service.config.max_attempts).unwrap_or(i32::MAX),
-            terminal_at,
-            suppressed.then_some("backfill_suppressed"),
-            suppressed.then_some("historical delivery is disabled"),
+            NewOutboxDelivery {
+                id: delivery_id,
+                organization_id: outbox.organization_id,
+                project_id: outbox.project_id,
+                destination_id: destination.id,
+                outbox_message_id: outbox.id,
+                source: &outbox.source,
+                payload: serde_json::to_value(envelope)?,
+                status: delivery_status,
+                max_attempts: i32::try_from(service.config.max_attempts).unwrap_or(i32::MAX),
+                terminal_at,
+                last_error_class: suppressed.then_some("backfill_suppressed"),
+                last_error: suppressed.then_some("historical delivery is disabled"),
+            },
         )
         .await?;
         if inserted.rows_affected() == 1 {
@@ -477,13 +482,16 @@ pub async fn test_destination(
     })?;
     NotificationDeliveryRepository::insert_test(
         &service.pool,
-        delivery_id,
-        organization_id,
-        project_id,
-        destination_id,
-        &payload,
-        lease_owner,
-        i64::try_from(service.config.lease_duration.as_secs()).unwrap_or(i64::MAX),
+        NewTestDelivery {
+            id: delivery_id,
+            organization_id,
+            project_id,
+            destination_id,
+            payload: &payload,
+            lease_owner,
+            lease_seconds: i64::try_from(service.config.lease_duration.as_secs())
+                .unwrap_or(i64::MAX),
+        },
     )
     .await?;
     process_claim(
@@ -527,16 +535,18 @@ pub async fn list_deliveries(
     let (cursor_time, cursor_id) = cursor.unzip();
     let mut rows = NotificationDeliveryRepository::page::<_, DeliverySummaryRow>(
         pool,
-        organization_id,
-        project_id,
-        filter.destination_id,
-        filter.status.as_deref(),
-        filter.source.as_deref(),
-        filter.origin.as_deref(),
-        filter.since,
-        cursor_time,
-        cursor_id,
-        limit + 1,
+        DeliveryPageQuery {
+            organization_id,
+            project_id,
+            destination_id: filter.destination_id,
+            status: filter.status.as_deref(),
+            source: filter.source.as_deref(),
+            origin: filter.origin.as_deref(),
+            since: filter.since,
+            cursor_created_at: cursor_time,
+            cursor_id,
+            fetch_limit: limit + 1,
+        },
     )
     .await?;
     let next_cursor = if i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
@@ -682,22 +692,24 @@ async fn persist_attempt(
     );
     NotificationDeliveryRepository::insert_attempt(
         &mut *tx,
-        Uuid::new_v4(),
-        claim.organization_id,
-        claim.project_id,
-        claim.id,
-        claim.recovery_generation,
-        attempt_number,
-        started_at,
-        i64::try_from(result.duration.as_millis()).unwrap_or(i64::MAX),
-        match disposition {
-            AttemptDisposition::Succeeded => "succeeded",
-            AttemptDisposition::Retryable => "retryable",
-            AttemptDisposition::Failed => "failed",
+        NewDeliveryAttempt {
+            id: Uuid::new_v4(),
+            organization_id: claim.organization_id,
+            project_id: claim.project_id,
+            delivery_id: claim.id,
+            recovery_generation: claim.recovery_generation,
+            attempt_number,
+            started_at,
+            duration_ms: i64::try_from(result.duration.as_millis()).unwrap_or(i64::MAX),
+            outcome: match disposition {
+                AttemptDisposition::Succeeded => "succeeded",
+                AttemptDisposition::Retryable => "retryable",
+                AttemptDisposition::Failed => "failed",
+            },
+            http_status: result.http_status.map(i32::from),
+            error_class: result.error_class,
+            response_excerpt: result.response_excerpt,
         },
-        result.http_status.map(i32::from),
-        result.error_class,
-        result.response_excerpt,
     )
     .await?;
     match disposition {

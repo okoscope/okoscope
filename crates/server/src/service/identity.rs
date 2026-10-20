@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::auth::SessionToken;
 use crate::repository::SessionRepository;
+use crate::repository::sessions::NewSession;
 
 /// A slug: 1 to 63 lowercase ASCII letters, digits and single inner hyphens.
 pub fn valid_slug(value: &str) -> bool {
@@ -50,12 +51,14 @@ pub async fn insert_session_with_context(
         Utc::now() + Duration::from_std(lifetime).unwrap_or_else(|_| Duration::hours(12));
     SessionRepository::insert(
         &mut **tx,
-        session_id,
-        user_id,
-        organization_id,
-        token.digest().as_slice(),
-        expires_at,
-        privileged_until,
+        NewSession {
+            session_id,
+            user_id,
+            organization_id,
+            token_digest: token.digest().as_slice(),
+            expires_at,
+            privileged_until,
+        },
     )
     .await?;
     Ok((session_id, token))

@@ -21,7 +21,9 @@ use crate::policy::{
 };
 use crate::repository::ApplicationRepository;
 use crate::repository::inventory::InventoryRepository;
-use crate::repository::policies::PolicyRepository;
+use crate::repository::policies::{
+    NewPolicyCommand, NewPolicyRevision, NewRecomputation, NewSuppression, PolicyRepository,
+};
 use crate::repository::transaction::TransactionRepository;
 use crate::service::project_access::project_scope;
 
@@ -466,50 +468,52 @@ async fn insert_revision(
     .matcher;
     PolicyRepository::insert_revision(
         &mut **tx,
-        revision_id,
-        policy_id,
-        principal.organization_id,
-        path.project_id,
-        path.application_id,
-        revision_number,
-        prior_revision_id,
-        enabled,
-        &identity.inventory_kind,
-        identity.identity_version,
-        &identity.identity_digest,
-        serde_json::to_value(matcher).unwrap(),
-        input
-            .placement
-            .cluster_ids
-            .iter()
-            .copied()
-            .collect::<Vec<_>>(),
-        input
-            .placement
-            .namespaces
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        input
-            .placement
-            .workload_kinds
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        input
-            .placement
-            .workload_names
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
-        match input.inside_effect {
-            PolicyEffect::Expected => "expected",
-            PolicyEffect::RequiresReview => "requires_review",
+        NewPolicyRevision {
+            revision_id,
+            policy_id,
+            organization_id: principal.organization_id,
+            project_id: path.project_id,
+            application_id: path.application_id,
+            revision_number,
+            prior_revision_id,
+            enabled,
+            inventory_kind: &identity.inventory_kind,
+            identity_version: identity.identity_version,
+            identity_digest: &identity.identity_digest,
+            behavior_matcher: serde_json::to_value(matcher).unwrap(),
+            cluster_ids: input
+                .placement
+                .cluster_ids
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            namespaces: input
+                .placement
+                .namespaces
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            workload_kinds: input
+                .placement
+                .workload_kinds
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            workload_names: input
+                .placement
+                .workload_names
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            inside_effect: match input.inside_effect {
+                PolicyEffect::Expected => "expected",
+                PolicyEffect::RequiresReview => "requires_review",
+            },
+            outside_effect: input.outside_effect.map(|_| "requires_review"),
+            source_inventory_item_id: identity.id,
+            source_runtime_group_id: input.source_runtime_group_id,
+            created_by_user_id: principal.user_id,
         },
-        input.outside_effect.map(|_| "requires_review"),
-        identity.id,
-        input.source_runtime_group_id,
-        principal.user_id,
     )
     .await
     .map_err(PolicyServiceError::Database)?;
@@ -526,13 +530,15 @@ async fn insert_revision(
     let version = policy_state_version(tx, principal, path).await?;
     PolicyRepository::request_recomputation(
         &mut **tx,
-        recomputation_id,
-        principal.organization_id,
-        path.project_id,
-        path.application_id,
-        identity.identity_version,
-        &identity.identity_digest,
-        revision_id,
+        NewRecomputation {
+            id: recomputation_id,
+            organization_id: principal.organization_id,
+            project_id: path.project_id,
+            application_id: path.application_id,
+            identity_version: identity.identity_version,
+            identity_digest: &identity.identity_digest,
+            requested_policy_revision_id: revision_id,
+        },
     )
     .await
     .map_err(PolicyServiceError::Database)?;
@@ -552,16 +558,18 @@ async fn record_command<T: Serialize>(
 ) -> Result<(), PolicyServiceError> {
     PolicyRepository::record_command(
         &mut **tx,
-        Uuid::new_v4(),
-        principal.organization_id,
-        path.project_id,
-        path.application_id,
-        key,
-        kind,
-        digest,
-        principal.user_id,
-        resource_id,
-        serde_json::to_value(result).unwrap(),
+        NewPolicyCommand {
+            id: Uuid::new_v4(),
+            organization_id: principal.organization_id,
+            project_id: path.project_id,
+            application_id: path.application_id,
+            idempotency_key: key,
+            command_kind: kind,
+            request_digest: digest,
+            actor_user_id: principal.user_id,
+            result_resource_id: resource_id,
+            result: serde_json::to_value(result).unwrap(),
+        },
     )
     .await
     .map_err(PolicyServiceError::Database)?;
@@ -1192,44 +1200,46 @@ impl PolicyService {
         let id = Uuid::new_v4();
         PolicyRepository::insert_suppression(
             &mut *tx,
-            id,
-            principal.organization_id,
-            path.project_id,
-            path.application_id,
-            &identity.inventory_kind,
-            identity.identity_version,
-            &identity.identity_digest,
-            serde_json::to_value(behavior.matcher).unwrap(),
-            input
-                .placement
-                .cluster_ids
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
-            input
-                .placement
-                .namespaces
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            input
-                .placement
-                .workload_kinds
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            input
-                .placement
-                .workload_names
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            &input.reason,
-            input.expires_at,
-            input.source_inventory_item_id,
-            input.source_runtime_group_id,
-            principal.user_id,
-            now,
+            NewSuppression {
+                id,
+                organization_id: principal.organization_id,
+                project_id: path.project_id,
+                application_id: path.application_id,
+                inventory_kind: &identity.inventory_kind,
+                identity_version: identity.identity_version,
+                identity_digest: &identity.identity_digest,
+                behavior_matcher: serde_json::to_value(behavior.matcher).unwrap(),
+                cluster_ids: input
+                    .placement
+                    .cluster_ids
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                namespaces: input
+                    .placement
+                    .namespaces
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                workload_kinds: input
+                    .placement
+                    .workload_kinds
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                workload_names: input
+                    .placement
+                    .workload_names
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                reason: &input.reason,
+                expires_at: input.expires_at,
+                source_inventory_item_id: input.source_inventory_item_id,
+                source_runtime_group_id: input.source_runtime_group_id,
+                created_by_user_id: principal.user_id,
+                created_at: now,
+            },
         )
         .await
         .map_err(PolicyServiceError::Database)?;

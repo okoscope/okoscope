@@ -1,6 +1,9 @@
 use crate::repository::inventory::InventoryRepository;
 use crate::repository::outbox::OutboxRepository;
-use crate::repository::terminations::TerminationRepository;
+use crate::repository::terminations::{
+    KernelExitCandidateQuery, NewRestart, RestartLoop, RestartLoopGroup, RestartWindowEndQuery,
+    RestartWindowQuery, TerminationRepository,
+};
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
@@ -12,6 +15,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION;
+use crate::repository::event_groups::DerivedEventGroup;
 use crate::repository::{EventGroupRepository, GroupKey};
 
 pub const CORRELATION_TOLERANCE: Duration = Duration::seconds(30);
@@ -55,15 +59,17 @@ async fn correlate_termination(
 ) -> Result<(), sqlx::Error> {
     let candidates: Vec<Uuid> = TerminationRepository::kernel_exit_candidates(
         &mut **tx,
-        organization_id,
-        event.attribution.project_id,
-        event.attribution.application_id,
-        &event.attribution.workload_uid,
-        &event.attribution.pod_uid,
-        &event.attribution.container_name,
-        &event.attribution.container_id,
-        event.observed_at,
-        format!("{} seconds", CORRELATION_TOLERANCE.num_seconds()),
+        KernelExitCandidateQuery {
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            workload_uid: &event.attribution.workload_uid,
+            pod_uid: &event.attribution.pod_uid,
+            container_name: &event.attribution.container_name,
+            container_id: &event.attribution.container_id,
+            observed_at: event.observed_at,
+            tolerance: format!("{} seconds", CORRELATION_TOLERANCE.num_seconds()),
+        },
     )
     .await?;
     let status = match candidates.len() {
@@ -107,13 +113,15 @@ async fn project_restart_loop(
     let delta = i32::try_from(restart.restart_delta).unwrap_or(i32::MAX);
     let inserted = TerminationRepository::add_restart(
         &mut **tx,
-        organization_id,
-        event.attribution.project_id,
-        version,
-        raw_event_id,
-        window_start,
-        event.observed_at,
-        delta,
+        NewRestart {
+            organization_id,
+            project_id: event.attribution.project_id,
+            projection_version: version,
+            event_id: raw_event_id,
+            window_started_at: window_start,
+            window_ended_at: event.observed_at,
+            restart_delta: delta,
+        },
     )
     .await?;
     if inserted.rows_affected() == 0 {
@@ -121,54 +129,60 @@ async fn project_restart_loop(
     }
     let projection_end: DateTime<Utc> = TerminationRepository::restart_window_end(
         &mut **tx,
-        organization_id,
-        event.attribution.project_id,
-        event.attribution.application_id,
-        cluster_id,
-        &event.attribution.pod_uid,
-        &event.attribution.container_name,
-        &event.attribution.container_id,
-        version,
-        event.observed_at,
-        event.observed_at + RESTART_WINDOW,
+        RestartWindowEndQuery {
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id,
+            pod_uid: &event.attribution.pod_uid,
+            container_name: &event.attribution.container_name,
+            container_id: &event.attribution.container_id,
+            projection_version: version,
+            from: event.observed_at,
+            to: event.observed_at + RESTART_WINDOW,
+        },
     )
     .await?;
     let projection_start = projection_end - RESTART_WINDOW;
     let count: i64 = TerminationRepository::restarts_in_window(
         &mut **tx,
-        organization_id,
-        event.attribution.project_id,
-        event.attribution.application_id,
-        cluster_id,
-        &event.attribution.pod_uid,
-        &event.attribution.container_name,
-        &event.attribution.container_id,
-        version,
-        projection_start,
-        projection_end,
+        RestartWindowQuery {
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id,
+            pod_uid: &event.attribution.pod_uid,
+            container_name: &event.attribution.container_name,
+            container_id: &event.attribution.container_id,
+            projection_version: version,
+            start: projection_start,
+            end: projection_end,
+        },
     )
     .await?;
     let observed_count = i32::try_from(count).unwrap_or(i32::MAX);
     TerminationRepository::upsert_restart_loop(
         &mut **tx,
-        organization_id,
-        event.attribution.project_id,
-        event.attribution.application_id,
-        cluster_id,
-        &event.attribution.pod_uid,
-        &event.attribution.container_name,
-        &event.attribution.container_id,
-        version,
-        projection_start,
-        projection_end,
-        observed_count,
-        restart
-            .previous_termination
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
-        restart.waiting_reason.as_deref(),
+        RestartLoop {
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id,
+            pod_uid: &event.attribution.pod_uid,
+            container_name: &event.attribution.container_name,
+            container_id: &event.attribution.container_id,
+            projection_version: version,
+            window_started_at: projection_start,
+            window_ended_at: projection_end,
+            observed_restart_count: observed_count,
+            previous_termination: restart
+                .previous_termination
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
+            waiting_reason: restart.waiting_reason.as_deref(),
+        },
     )
     .await?;
     if count >= i64::from(RESTART_THRESHOLD_V1) {
@@ -220,22 +234,24 @@ async fn upsert_restart_loop_group(
     let candidate = Uuid::new_v4();
     let group_id = EventGroupRepository::upsert_derived(
         &mut **tx,
-        candidate,
-        GroupKey {
-            organization_id,
-            project_id: event.attribution.project_id,
-            application_id: event.attribution.application_id,
-            cluster_id,
-            namespace: &event.attribution.namespace,
-            workload_kind: &event.attribution.workload_kind,
-            workload_name: &event.attribution.workload_name,
-            fingerprint_version: DERIVED_GROUP_FINGERPRINT_VERSION,
-            fingerprint_digest: digest.as_slice(),
+        DerivedEventGroup {
+            candidate_id: candidate,
+            key: GroupKey {
+                organization_id,
+                project_id: event.attribution.project_id,
+                application_id: event.attribution.application_id,
+                cluster_id,
+                namespace: &event.attribution.namespace,
+                workload_kind: &event.attribution.workload_kind,
+                workload_name: &event.attribution.workload_name,
+                fingerprint_version: DERIVED_GROUP_FINGERPRINT_VERSION,
+                fingerprint_digest: digest.as_slice(),
+            },
+            event_kind: "container.restart_loop",
+            semantic_summary: &summary,
+            observed_at: event.observed_at,
+            event_id: raw_event_id,
         },
-        "container.restart_loop",
-        &summary,
-        event.observed_at,
-        raw_event_id,
     )
     .await?;
     if group_id == candidate {
@@ -280,15 +296,17 @@ async fn upsert_restart_loop_group(
     .await?;
     TerminationRepository::attach_restart_loop_group(
         &mut **tx,
-        group_id,
-        organization_id,
-        event.attribution.project_id,
-        event.attribution.application_id,
-        cluster_id,
-        &event.attribution.pod_uid,
-        &event.attribution.container_name,
-        &event.attribution.container_id,
-        i16::try_from(RESTART_PROJECTION_VERSION).unwrap_or(i16::MAX),
+        RestartLoopGroup {
+            group_id,
+            organization_id,
+            project_id: event.attribution.project_id,
+            application_id: event.attribution.application_id,
+            cluster_id,
+            pod_uid: &event.attribution.pod_uid,
+            container_name: &event.attribution.container_name,
+            container_id: &event.attribution.container_id,
+            projection_version: i16::try_from(RESTART_PROJECTION_VERSION).unwrap_or(i16::MAX),
+        },
     )
     .await?;
     Ok(())

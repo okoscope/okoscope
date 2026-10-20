@@ -1,4 +1,4 @@
-use crate::repository::inventory::InventoryRepository;
+use crate::repository::inventory::{InventoryRepository, NewInventoryItem, NewSighting};
 use std::fmt;
 
 use event_model::{
@@ -120,15 +120,17 @@ pub async fn project_event(
     let candidate_id = Uuid::new_v4();
     let created_item_id: Option<Uuid> = InventoryRepository::insert_item(
         &mut **tx,
-        candidate_id,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        fingerprint.kind.as_str(),
-        version,
-        fingerprint.digest.as_slice(),
-        &fingerprint.semantic_summary,
-        event.observed_at,
+        NewInventoryItem {
+            id: candidate_id,
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            inventory_kind: fingerprint.kind.as_str(),
+            identity_version: version,
+            identity_digest: fingerprint.digest.as_slice(),
+            semantic_summary: &fingerprint.semantic_summary,
+            observed_at: event.observed_at,
+        },
     )
     .await?;
 
@@ -219,18 +221,20 @@ pub async fn project_event(
 
     InventoryRepository::record_sighting(
         &mut **tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        item_id,
-        cluster_id,
-        &event.attribution.namespace,
-        &event.attribution.workload_kind,
-        &event.attribution.workload_name,
-        &event.attribution.pod_uid,
-        &event.attribution.pod_name,
-        &event.attribution.container_name,
-        event.observed_at,
+        NewSighting {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            item_id,
+            cluster_id,
+            namespace: &event.attribution.namespace,
+            workload_kind: &event.attribution.workload_kind,
+            workload_name: &event.attribution.workload_name,
+            pod_uid: &event.attribution.pod_uid,
+            pod_name: &event.attribution.pod_name,
+            container_name: &event.attribution.container_name,
+            observed_at: event.observed_at,
+        },
     )
     .await?;
 

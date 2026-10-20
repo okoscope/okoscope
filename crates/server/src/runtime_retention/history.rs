@@ -1,4 +1,4 @@
-use crate::repository::runtime_retention::RuntimeRetentionRepository;
+use crate::repository::runtime_retention::{RuntimeRetentionRepository, SnapshotPageQuery};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
@@ -58,13 +58,15 @@ pub async fn page(
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let mut items: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
         pool,
-        org,
-        group,
-        query.day_from,
-        query.day_to,
-        query.release_id,
-        query.cursor,
-        limit + 1,
+        SnapshotPageQuery {
+            organization_id: org,
+            group_id: group,
+            day_from: query.day_from,
+            day_to: query.day_to,
+            release_id: query.release_id,
+            cursor: query.cursor,
+            fetch_limit: limit + 1,
+        },
     )
     .await?;
     let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(100) {

@@ -19,6 +19,18 @@ use uuid::Uuid;
 /// and ends with the per-application aggregate `agg`.
 const CHANGED_CTE: &str = "WITH ranked AS (SELECT r.*,row_number() OVER(PARTITION BY application_id ORDER BY deployed_at DESC,id DESC) rn FROM releases r WHERE organization_id=$1 AND project_id=ANY($2)), pairs AS (SELECT t.organization_id,t.project_id,t.application_id,t.id target_id,t.version target_version,t.deployed_at target_deployed_at,b.id baseline_id,b.version baseline_version,b.deployed_at baseline_deployed_at FROM ranked t JOIN LATERAL (((SELECT r.*,0 priority FROM deployment_episodes te JOIN deployment_episode_predecessors x ON x.episode_id=te.id JOIN deployment_episodes pe ON pe.id=x.predecessor_episode_id JOIN releases r ON r.id=pe.release_id WHERE te.organization_id=t.organization_id AND te.application_id=t.application_id AND te.release_id=t.id ORDER BY te.first_observed_at DESC,te.id DESC,x.observed_at DESC,pe.id DESC LIMIT 1) UNION ALL (SELECT r.*,1 priority FROM releases r WHERE r.organization_id=t.organization_id AND r.application_id=t.application_id AND (r.deployed_at,r.id)<(t.deployed_at,t.id) ORDER BY r.deployed_at DESC,r.id DESC LIMIT 1)) ORDER BY priority LIMIT 1) b ON true WHERE t.rn=1), diff AS (SELECT p.*,ids.group_id,CASE WHEN b.group_id IS NULL AND EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.baseline_id AND r.deployed_at<pr.runtime_history_expired_before) THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.target_id AND r.deployed_at<pr.runtime_history_expired_before) OR NOT (EXISTS(SELECT 1 FROM runtime_event_group_releases gr WHERE gr.release_id=p.target_id AND gr.occurrence_count>0) OR EXISTS(SELECT 1 FROM runtime_events ev WHERE ev.release_id=p.target_id))) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,coalesce(t.occurrence_count,0) tc,coalesce(b.occurrence_count,0) bc FROM pairs p JOIN LATERAL (SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.target_id AND occurrence_count>0 UNION SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.baseline_id AND occurrence_count>0) ids ON true LEFT JOIN runtime_event_group_releases t ON t.release_id=p.target_id AND t.group_id=ids.group_id LEFT JOIN runtime_event_group_releases b ON b.release_id=p.baseline_id AND b.group_id=ids.group_id), agg AS (SELECT project_id,application_id,target_id,target_version,target_deployed_at,baseline_id,baseline_version,baseline_deployed_at,count(*) FILTER(WHERE classification='new')::bigint new_count,count(*) FILTER(WHERE classification='disappeared')::bigint disappeared_count,count(*) FILTER(WHERE classification='unchanged')::bigint unchanged_count,count(*)::bigint total_item_count,coalesce(sum(abs(tc-bc)),0)::bigint absolute_occurrence_delta_sum,coalesce(max(abs(tc-bc)),0)::bigint max_absolute_occurrence_delta FROM diff WHERE classification<>'unknown' GROUP BY project_id,application_id,target_id,target_version,target_deployed_at,baseline_id,baseline_version,baseline_deployed_at)";
 
+/// Input to [`AttentionRepository::discoveries`].
+#[derive(Debug)]
+pub struct DiscoveryQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_ids: &'a [Uuid],
+    pub application_id: Option<Uuid>,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub limit: i64,
+    pub evaluator_version: i16,
+}
+
 /// Reads behind the attention views.
 #[derive(Clone, Copy, Debug)]
 pub struct AttentionRepository;
@@ -173,21 +185,23 @@ impl AttentionRepository {
     /// `occurrence_count`, `event_kind`, `semantic_summary`, `user_labels`,
     /// placement, `is_new`, `policy_verdict` and
     /// `policy_evaluation_state`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn discoveries<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_ids: &[Uuid],
-        application_id: Option<Uuid>,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-        limit: i64,
-        evaluator_version: i16,
+        input: DiscoveryQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let DiscoveryQuery {
+            organization_id,
+            project_ids,
+            application_id,
+            from,
+            to,
+            limit,
+            evaluator_version,
+        } = input;
         sqlx::query_as("SELECT g.id group_id,g.project_id,p.name project_name,p.slug project_slug,g.application_id,a.name application_name,a.slug application_slug,g.first_seen_at,g.last_seen_at,g.occurrence_count,g.event_kind,g.semantic_summary,COALESCE((SELECT jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at') FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.group_id=g.id ORDER BY l.display_name,l.id LIMIT 20) labels),'[]'::jsonb) user_labels,g.namespace,g.workload_kind,g.workload_name,(g.first_seen_at BETWEEN $4 AND $5) is_new,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN NULL ELSE e.verdict END policy_verdict,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN 'evaluation_pending' ELSE 'current' END policy_evaluation_state FROM runtime_event_groups g JOIN projects p ON p.organization_id=g.organization_id AND p.id=g.project_id JOIN applications a ON a.organization_id=g.organization_id AND a.project_id=g.project_id AND a.id=g.application_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2) AND ($3::uuid IS NULL OR g.application_id=$3) AND g.status='open' AND (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 OR e.verdict<>'expected') AND NOT EXISTS(SELECT 1 FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions s ON s.organization_id=i.organization_id AND s.project_id=i.project_id AND s.application_id=i.application_id AND s.identity_version=i.identity_version AND s.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND s.cancelled_at IS NULL AND s.expires_at>$5 AND (cardinality(s.cluster_ids)=0 OR g.cluster_id=ANY(s.cluster_ids)) AND (cardinality(s.namespaces)=0 OR g.namespace=ANY(s.namespaces)) AND (cardinality(s.workload_kinds)=0 OR g.workload_kind=ANY(s.workload_kinds)) AND (cardinality(s.workload_names)=0 OR g.workload_name=ANY(s.workload_names))) ORDER BY CASE WHEN e.verdict='policy_conflict' THEN 0 WHEN g.event_kind='container.restart_loop' THEN 1 WHEN g.first_seen_at BETWEEN $4 AND $5 THEN 2 ELSE 3 END,g.occurrence_count DESC,CASE WHEN g.first_seen_at BETWEEN $4 AND $5 THEN g.first_seen_at ELSE g.last_seen_at END DESC,g.id LIMIT $6")
             .bind(organization_id)
             .bind(project_ids)
@@ -320,13 +334,14 @@ impl AttentionRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::DiscoveryQuery;
+    use crate::repository::resources::{ResourceFinding, ResourceRepository};
     use chrono::{DateTime, Duration, Utc};
     use serde_json::{Value, json};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::AttentionRepository;
-    use crate::repository::resources::ResourceRepository;
     use crate::repository::test_support::{
         Tenant, exec_in_release, group_ids, ingest, manual_release, tenant,
     };
@@ -549,13 +564,15 @@ mod tests {
 
         let discoveries: Vec<Discovery> = AttentionRepository::discoveries(
             &pool,
-            own.organization_id,
-            &[own.project_id],
-            None,
-            from,
-            to,
-            10,
-            crate::policy::POLICY_EVALUATOR_VERSION,
+            DiscoveryQuery {
+                organization_id: own.organization_id,
+                project_ids: &[own.project_id],
+                application_id: None,
+                from,
+                to,
+                limit: 10,
+                evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+            },
         )
         .await
         .unwrap();
@@ -576,13 +593,15 @@ mod tests {
         );
         let elsewhere: Vec<Discovery> = AttentionRepository::discoveries(
             &pool,
-            own.organization_id,
-            &[own.project_id],
-            Some(Uuid::new_v4()),
-            from,
-            to,
-            10,
-            crate::policy::POLICY_EVALUATOR_VERSION,
+            DiscoveryQuery {
+                organization_id: own.organization_id,
+                project_ids: &[own.project_id],
+                application_id: Some(Uuid::new_v4()),
+                from,
+                to,
+                limit: 10,
+                evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+            },
         )
         .await
         .unwrap();
@@ -692,18 +711,20 @@ mod tests {
         let finding = Uuid::new_v4();
         ResourceRepository::upsert_finding(
             &pool,
-            finding,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            v2,
-            v1,
-            "oom_observed",
-            "urgent",
-            "memory",
-            1,
-            json!({}),
-            Utc::now(),
+            ResourceFinding {
+                id: finding,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                target_release_id: v2,
+                baseline_release_id: v1,
+                reason_code: "oom_observed",
+                priority: "urgent",
+                metric: "memory",
+                rule_version: 1,
+                facts: json!({}),
+                opened_at: Utc::now(),
+            },
         )
         .await
         .unwrap();

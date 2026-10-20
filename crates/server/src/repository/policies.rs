@@ -10,6 +10,131 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`PolicyRepository::store_group_evaluation`].
+#[derive(Debug)]
+pub struct GroupEvaluation<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub group_id: Uuid,
+    pub policy_state_version: i64,
+    pub evaluator_version: i16,
+    pub verdict: &'a str,
+    pub reason_code: &'a str,
+    pub winning_revision_id: Option<Uuid>,
+    pub explanation: &'a serde_json::Value,
+}
+
+/// Input to [`PolicyRepository::store_sighting_evaluation`].
+#[derive(Debug)]
+pub struct SightingEvaluation<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub item_id: Uuid,
+    pub cluster_id: Uuid,
+    pub namespace: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: &'a str,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub policy_state_version: i64,
+    pub evaluator_version: i16,
+    pub verdict: &'a str,
+    pub reason_code: &'a str,
+    pub winning_revision_id: Option<Uuid>,
+    pub explanation: &'a serde_json::Value,
+}
+
+/// Input to [`PolicyRepository::groups_to_evaluate`] and
+/// [`PolicyRepository::sightings_to_evaluate`].
+#[derive(Debug)]
+pub struct PendingEvaluationQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub evaluator_version: i16,
+    pub limit: i64,
+}
+
+/// Input to [`PolicyRepository::record_command`].
+#[derive(Debug)]
+pub struct NewPolicyCommand<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub idempotency_key: Uuid,
+    pub command_kind: &'a str,
+    pub request_digest: &'a [u8],
+    pub actor_user_id: Uuid,
+    pub result_resource_id: Uuid,
+    pub result: Value,
+}
+
+/// Input to [`PolicyRepository::insert_revision`].
+#[derive(Debug)]
+pub struct NewPolicyRevision<'a> {
+    pub revision_id: Uuid,
+    pub policy_id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub revision_number: i64,
+    pub prior_revision_id: Option<Uuid>,
+    pub enabled: bool,
+    pub inventory_kind: &'a str,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub behavior_matcher: Value,
+    pub cluster_ids: Vec<Uuid>,
+    pub namespaces: Vec<String>,
+    pub workload_kinds: Vec<String>,
+    pub workload_names: Vec<String>,
+    pub inside_effect: &'a str,
+    pub outside_effect: Option<&'a str>,
+    pub source_inventory_item_id: Uuid,
+    pub source_runtime_group_id: Option<Uuid>,
+    pub created_by_user_id: Uuid,
+}
+
+/// Input to [`PolicyRepository::request_recomputation`].
+#[derive(Debug)]
+pub struct NewRecomputation<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub requested_policy_revision_id: Uuid,
+}
+
+/// Input to [`PolicyRepository::insert_suppression`].
+#[derive(Debug)]
+pub struct NewSuppression<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub inventory_kind: &'a str,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub behavior_matcher: Value,
+    pub cluster_ids: Vec<Uuid>,
+    pub namespaces: Vec<String>,
+    pub workload_kinds: Vec<String>,
+    pub workload_names: Vec<String>,
+    pub reason: &'a str,
+    pub expires_at: DateTime<Utc>,
+    pub source_inventory_item_id: Uuid,
+    pub source_runtime_group_id: Option<Uuid>,
+    pub created_by_user_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Runtime policies, their revisions and suppressions, and the commands that change them.
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyRepository;
@@ -61,23 +186,25 @@ impl PolicyRepository {
     }
 
     /// Records, or replaces, a group's policy evaluation.
-    #[allow(clippy::too_many_arguments)]
     pub async fn store_group_evaluation<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        group_id: Uuid,
-        policy_state_version: i64,
-        evaluator_version: i16,
-        verdict: &str,
-        reason_code: &str,
-        winning_revision_id: Option<Uuid>,
-        explanation: &serde_json::Value,
+        input: GroupEvaluation<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let GroupEvaluation {
+            organization_id,
+            project_id,
+            application_id,
+            group_id,
+            policy_state_version,
+            evaluator_version,
+            verdict,
+            reason_code,
+            winning_revision_id,
+            explanation,
+        } = input;
         sqlx::query("INSERT INTO runtime_group_policy_evaluations(organization_id,project_id,application_id,group_id,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(group_id) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()")
             .bind(organization_id)
             .bind(project_id)
@@ -94,29 +221,31 @@ impl PolicyRepository {
     }
 
     /// Records, or replaces, a sighting's policy evaluation.
-    #[allow(clippy::too_many_arguments)]
     pub async fn store_sighting_evaluation<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        item_id: Uuid,
-        cluster_id: Uuid,
-        namespace: &str,
-        workload_kind: &str,
-        workload_name: &str,
-        pod_uid: &str,
-        container_name: &str,
-        policy_state_version: i64,
-        evaluator_version: i16,
-        verdict: &str,
-        reason_code: &str,
-        winning_revision_id: Option<Uuid>,
-        explanation: &serde_json::Value,
+        input: SightingEvaluation<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let SightingEvaluation {
+            organization_id,
+            project_id,
+            application_id,
+            item_id,
+            cluster_id,
+            namespace,
+            workload_kind,
+            workload_name,
+            pod_uid,
+            container_name,
+            policy_state_version,
+            evaluator_version,
+            verdict,
+            reason_code,
+            winning_revision_id,
+            explanation,
+        } = input;
         sqlx::query("INSERT INTO runtime_sighting_policy_evaluations(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name,policy_state_version,evaluator_version,verdict,reason_code,winning_revision_id,explanation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET policy_state_version=EXCLUDED.policy_state_version,evaluator_version=EXCLUDED.evaluator_version,verdict=EXCLUDED.verdict,reason_code=EXCLUDED.reason_code,winning_revision_id=EXCLUDED.winning_revision_id,explanation=EXCLUDED.explanation,evaluated_at=now()")
             .bind(organization_id)
             .bind(project_id)
@@ -162,21 +291,23 @@ impl PolicyRepository {
     ///
     /// Selects `item_id`, `group_id`, `cluster_id`, `namespace`,
     /// `workload_kind` and `workload_name`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn groups_to_evaluate<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        identity_version: i16,
-        identity_digest: &[u8],
-        evaluator_version: i16,
-        limit: i64,
+        input: PendingEvaluationQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let PendingEvaluationQuery {
+            organization_id,
+            project_id,
+            application_id,
+            identity_version,
+            identity_digest,
+            evaluator_version,
+            limit,
+        } = input;
         sqlx::query_as("SELECT l.item_id,g.id group_id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_inventory_group_links l JOIN runtime_inventory_items i ON i.id=l.item_id JOIN runtime_event_groups g ON g.id=l.group_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states s ON s.organization_id=g.organization_id AND s.project_id=g.project_id AND s.application_id=g.application_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.group_id IS NULL OR e.policy_state_version<COALESCE(s.state_version,0) OR e.evaluator_version<>$6) ORDER BY g.id LIMIT $7")
             .bind(organization_id)
             .bind(project_id)
@@ -193,21 +324,23 @@ impl PolicyRepository {
     ///
     /// Selects `item_id`, `cluster_id`, `namespace`, `workload_kind`,
     /// `workload_name`, `pod_uid` and `container_name`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn sightings_to_evaluate<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        identity_version: i16,
-        identity_digest: &[u8],
-        evaluator_version: i16,
-        limit: i64,
+        input: PendingEvaluationQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        let PendingEvaluationQuery {
+            organization_id,
+            project_id,
+            application_id,
+            identity_version,
+            identity_digest,
+            evaluator_version,
+            limit,
+        } = input;
         sqlx::query_as("SELECT s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND i.identity_version=$4 AND i.identity_digest=$5 AND (e.item_id IS NULL OR e.policy_state_version<COALESCE(ps.state_version,0) OR e.evaluator_version<>$6) ORDER BY s.item_id,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name LIMIT $7")
             .bind(organization_id)
             .bind(project_id)
@@ -438,23 +571,25 @@ impl PolicyRepository {
     }
 
     /// Records a command's result under its idempotency key.
-    #[allow(clippy::too_many_arguments)]
     pub async fn record_command<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        idempotency_key: Uuid,
-        command_kind: &str,
-        request_digest: &[u8],
-        actor_user_id: Uuid,
-        result_resource_id: Uuid,
-        result: Value,
+        input: NewPolicyCommand<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewPolicyCommand {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            idempotency_key,
+            command_kind,
+            request_digest,
+            actor_user_id,
+            result_resource_id,
+            result,
+        } = input;
         sqlx::query("INSERT INTO runtime_policy_commands(id,organization_id,project_id,application_id,idempotency_key,command_kind,request_digest,actor_user_id,result_resource_id,result) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
             .bind(id)
             .bind(organization_id)
@@ -532,34 +667,36 @@ impl PolicyRepository {
     }
 
     /// Appends a revision to a policy.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_revision<'e, E>(
         executor: E,
-        revision_id: Uuid,
-        policy_id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        revision_number: i64,
-        prior_revision_id: Option<Uuid>,
-        enabled: bool,
-        inventory_kind: &str,
-        identity_version: i16,
-        identity_digest: &[u8],
-        behavior_matcher: Value,
-        cluster_ids: Vec<Uuid>,
-        namespaces: Vec<String>,
-        workload_kinds: Vec<String>,
-        workload_names: Vec<String>,
-        inside_effect: &str,
-        outside_effect: Option<&str>,
-        source_inventory_item_id: Uuid,
-        source_runtime_group_id: Option<Uuid>,
-        created_by_user_id: Uuid,
+        input: NewPolicyRevision<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewPolicyRevision {
+            revision_id,
+            policy_id,
+            organization_id,
+            project_id,
+            application_id,
+            revision_number,
+            prior_revision_id,
+            enabled,
+            inventory_kind,
+            identity_version,
+            identity_digest,
+            behavior_matcher,
+            cluster_ids,
+            namespaces,
+            workload_kinds,
+            workload_names,
+            inside_effect,
+            outside_effect,
+            source_inventory_item_id,
+            source_runtime_group_id,
+            created_by_user_id,
+        } = input;
         sqlx::query("INSERT INTO runtime_policy_revisions(id,policy_id,organization_id,project_id,application_id,revision_number,prior_revision_id,enabled,inventory_kind,identity_version,identity_digest,behavior_matcher,cluster_ids,namespaces,workload_kinds,workload_names,inside_effect,outside_effect,source_inventory_item_id,source_runtime_group_id,created_by_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
             .bind(revision_id)
             .bind(policy_id)
@@ -610,20 +747,22 @@ impl PolicyRepository {
 
     /// Requests recomputation of the evaluations for one inventory identity
     /// after a revision.
-    #[allow(clippy::too_many_arguments)]
     pub async fn request_recomputation<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        identity_version: i16,
-        identity_digest: &[u8],
-        requested_policy_revision_id: Uuid,
+        input: NewRecomputation<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewRecomputation {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            identity_version,
+            identity_digest,
+            requested_policy_revision_id,
+        } = input;
         sqlx::query("INSERT INTO runtime_policy_recomputations(id,organization_id,project_id,application_id,identity_version,identity_digest,requested_policy_revision_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
             .bind(id)
             .bind(organization_id)
@@ -776,31 +915,33 @@ impl PolicyRepository {
 
     /// Inserts a suppression of one inventory identity within a placement
     /// until it expires.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_suppression<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        inventory_kind: &str,
-        identity_version: i16,
-        identity_digest: &[u8],
-        behavior_matcher: Value,
-        cluster_ids: Vec<Uuid>,
-        namespaces: Vec<String>,
-        workload_kinds: Vec<String>,
-        workload_names: Vec<String>,
-        reason: &str,
-        expires_at: DateTime<Utc>,
-        source_inventory_item_id: Uuid,
-        source_runtime_group_id: Option<Uuid>,
-        created_by_user_id: Uuid,
-        created_at: DateTime<Utc>,
+        input: NewSuppression<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewSuppression {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            inventory_kind,
+            identity_version,
+            identity_digest,
+            behavior_matcher,
+            cluster_ids,
+            namespaces,
+            workload_kinds,
+            workload_names,
+            reason,
+            expires_at,
+            source_inventory_item_id,
+            source_runtime_group_id,
+            created_by_user_id,
+            created_at,
+        } = input;
         sqlx::query("INSERT INTO runtime_policy_suppressions(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,behavior_matcher,cluster_ids,namespaces,workload_kinds,workload_names,reason,expires_at,source_inventory_item_id,source_runtime_group_id,created_by_user_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
             .bind(id)
             .bind(organization_id)
@@ -850,6 +991,10 @@ impl PolicyRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        GroupEvaluation, NewPolicyCommand, NewPolicyRevision, NewRecomputation, NewSuppression,
+        PendingEvaluationQuery, SightingEvaluation,
+    };
     use chrono::{DateTime, Duration, Utc};
     use serde_json::{Value, json};
     use sqlx::{FromRow, PgPool};
@@ -959,27 +1104,29 @@ mod tests {
         let revision_id = Uuid::new_v4();
         PolicyRepository::insert_revision(
             pool,
-            revision_id,
-            policy_id,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            number,
-            prior,
-            true,
-            &identity.inventory_kind,
-            identity.identity_version,
-            &identity.identity_digest,
-            matcher(identity),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            "expected",
-            outside,
-            identity.id,
-            None,
-            actor,
+            NewPolicyRevision {
+                revision_id,
+                policy_id,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                revision_number: number,
+                prior_revision_id: prior,
+                enabled: true,
+                inventory_kind: &identity.inventory_kind,
+                identity_version: identity.identity_version,
+                identity_digest: &identity.identity_digest,
+                behavior_matcher: matcher(identity),
+                cluster_ids: Vec::new(),
+                namespaces: Vec::new(),
+                workload_kinds: Vec::new(),
+                workload_names: Vec::new(),
+                inside_effect: "expected",
+                outside_effect: outside,
+                source_inventory_item_id: identity.id,
+                source_runtime_group_id: None,
+                created_by_user_id: actor,
+            },
         )
         .await
         .unwrap();
@@ -1226,13 +1373,15 @@ mod tests {
         let recomputation = Uuid::new_v4();
         PolicyRepository::request_recomputation(
             &pool,
-            recomputation,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            item.identity_version,
-            &item.identity_digest,
-            r2,
+            NewRecomputation {
+                id: recomputation,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                identity_version: item.identity_version,
+                identity_digest: &item.identity_digest,
+                requested_policy_revision_id: r2,
+            },
         )
         .await
         .unwrap();
@@ -1292,16 +1441,18 @@ mod tests {
         let record = || {
             PolicyRepository::record_command(
                 &pool,
-                Uuid::new_v4(),
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                key,
-                "create",
-                &[3; 32],
-                actor,
-                Uuid::new_v4(),
-                json!({"ok": true}),
+                NewPolicyCommand {
+                    id: Uuid::new_v4(),
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    idempotency_key: key,
+                    command_kind: "create",
+                    request_digest: &[3; 32],
+                    actor_user_id: actor,
+                    result_resource_id: Uuid::new_v4(),
+                    result: json!({"ok": true}),
+                },
             )
         };
         record().await.unwrap();
@@ -1336,24 +1487,26 @@ mod tests {
             let now = Utc::now();
             PolicyRepository::insert_suppression(
                 &pool,
-                id,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                &item.inventory_kind,
-                item.identity_version,
-                &item.identity_digest,
-                matcher(&item),
-                Vec::new(),
-                vec!["production".into()],
-                Vec::new(),
-                Vec::new(),
-                "known noise",
-                now + Duration::days(1),
-                item.id,
-                None,
-                actor,
-                now,
+                NewSuppression {
+                    id,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    inventory_kind: &item.inventory_kind,
+                    identity_version: item.identity_version,
+                    identity_digest: &item.identity_digest,
+                    behavior_matcher: matcher(&item),
+                    cluster_ids: Vec::new(),
+                    namespaces: vec!["production".into()],
+                    workload_kinds: Vec::new(),
+                    workload_names: Vec::new(),
+                    reason: "known noise",
+                    expires_at: now + Duration::days(1),
+                    source_inventory_item_id: item.id,
+                    source_runtime_group_id: None,
+                    created_by_user_id: actor,
+                    created_at: now,
+                },
             )
             .await
             .unwrap();
@@ -1608,13 +1761,15 @@ mod tests {
         let recomputation = Uuid::new_v4();
         PolicyRepository::request_recomputation(
             &pool,
-            recomputation,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            item.identity_version,
-            &item.identity_digest,
-            revision,
+            NewRecomputation {
+                id: recomputation,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                identity_version: item.identity_version,
+                identity_digest: &item.identity_digest,
+                requested_policy_revision_id: revision,
+            },
         )
         .await
         .unwrap();
@@ -1638,25 +1793,29 @@ mod tests {
         let groups = || {
             PolicyRepository::groups_to_evaluate::<_, GroupTarget>(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                item.identity_version,
-                &item.identity_digest,
-                crate::policy::POLICY_EVALUATOR_VERSION,
-                10,
+                PendingEvaluationQuery {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    identity_version: item.identity_version,
+                    identity_digest: &item.identity_digest,
+                    evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+                    limit: 10,
+                },
             )
         };
         let sightings = || {
             PolicyRepository::sightings_to_evaluate::<_, SightingTarget>(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                item.identity_version,
-                &item.identity_digest,
-                crate::policy::POLICY_EVALUATOR_VERSION,
-                10,
+                PendingEvaluationQuery {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    identity_version: item.identity_version,
+                    identity_digest: &item.identity_digest,
+                    evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+                    limit: 10,
+                },
             )
         };
         assert_eq!(
@@ -1674,16 +1833,18 @@ mod tests {
         let explanation = json!({"policy": "Shell"});
         PolicyRepository::store_group_evaluation(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            group,
-            version,
-            crate::policy::POLICY_EVALUATOR_VERSION,
-            "expected",
-            "inside_placement",
-            Some(revision),
-            &explanation,
+            GroupEvaluation {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                group_id: group,
+                policy_state_version: version,
+                evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+                verdict: "expected",
+                reason_code: "inside_placement",
+                winning_revision_id: Some(revision),
+                explanation: &explanation,
+            },
         )
         .await
         .unwrap();
@@ -1691,22 +1852,24 @@ mod tests {
             assert_eq!(s.item_id, item.id);
             PolicyRepository::store_sighting_evaluation(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                s.item_id,
-                s.cluster_id,
-                &s.namespace,
-                &s.workload_kind,
-                &s.workload_name,
-                &s.pod_uid,
-                &s.container_name,
-                version,
-                crate::policy::POLICY_EVALUATOR_VERSION,
-                "expected",
-                "inside_placement",
-                Some(revision),
-                &explanation,
+                SightingEvaluation {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    item_id: s.item_id,
+                    cluster_id: s.cluster_id,
+                    namespace: &s.namespace,
+                    workload_kind: &s.workload_kind,
+                    workload_name: &s.workload_name,
+                    pod_uid: &s.pod_uid,
+                    container_name: &s.container_name,
+                    policy_state_version: version,
+                    evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+                    verdict: "expected",
+                    reason_code: "inside_placement",
+                    winning_revision_id: Some(revision),
+                    explanation: &explanation,
+                },
             )
             .await
             .unwrap();

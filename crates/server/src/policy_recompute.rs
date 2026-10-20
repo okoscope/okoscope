@@ -1,4 +1,4 @@
-use crate::repository::policies::PolicyRepository;
+use crate::repository::policies::{PendingEvaluationQuery, PolicyRepository};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -80,13 +80,15 @@ pub async fn run_one_batch(
     };
     let groups: Vec<GroupRow> = PolicyRepository::groups_to_evaluate(
         &mut *tx,
-        scope.organization_id,
-        scope.project_id,
-        scope.application_id,
-        operation.identity_version,
-        &operation.identity_digest,
-        POLICY_EVALUATOR_VERSION,
-        batch_size,
+        PendingEvaluationQuery {
+            organization_id: scope.organization_id,
+            project_id: scope.project_id,
+            application_id: scope.application_id,
+            identity_version: operation.identity_version,
+            identity_digest: &operation.identity_digest,
+            evaluator_version: POLICY_EVALUATOR_VERSION,
+            limit: batch_size,
+        },
     )
     .await?;
     for row in &groups {
@@ -108,13 +110,15 @@ pub async fn run_one_batch(
     let sightings: Vec<SightingRow> = if remaining > 0 {
         PolicyRepository::sightings_to_evaluate(
             &mut *tx,
-            scope.organization_id,
-            scope.project_id,
-            scope.application_id,
-            operation.identity_version,
-            &operation.identity_digest,
-            POLICY_EVALUATOR_VERSION,
-            remaining,
+            PendingEvaluationQuery {
+                organization_id: scope.organization_id,
+                project_id: scope.project_id,
+                application_id: scope.application_id,
+                identity_version: operation.identity_version,
+                identity_digest: &operation.identity_digest,
+                evaluator_version: POLICY_EVALUATOR_VERSION,
+                limit: remaining,
+            },
         )
         .await?
     } else {

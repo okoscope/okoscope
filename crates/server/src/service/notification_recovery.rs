@@ -4,8 +4,12 @@
 //! request replays the recorded result, and with a different request it is a
 //! conflict. Project access is checked by the caller, [`super::notifications`].
 
-use crate::repository::notification_deliveries::NotificationDeliveryRepository;
-use crate::repository::notification_recovery::NotificationRecoveryRepository;
+use crate::repository::notification_deliveries::{
+    NotificationDeliveryRepository, RetryCandidateQuery,
+};
+use crate::repository::notification_recovery::{
+    NewRecoveryOperation, NotificationRecoveryRepository,
+};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -403,13 +407,15 @@ impl RecoveryService {
         }
         let mut candidates = NotificationDeliveryRepository::failed_for_retry(
             &mut *tx,
-            organization_id,
-            project_id,
-            filter.destination_id,
-            filter.failed_before,
-            filter.failed_after,
-            filter.error_class.as_deref(),
-            limit + 1,
+            RetryCandidateQuery {
+                organization_id,
+                project_id,
+                destination_id: filter.destination_id,
+                failed_before: filter.failed_before,
+                failed_after: filter.failed_after,
+                error_class: filter.error_class.as_deref(),
+                limit: limit + 1,
+            },
         )
         .await?;
         let saw_more = i64::try_from(candidates.len()).unwrap_or(i64::MAX) > limit;
@@ -668,23 +674,25 @@ async fn insert_operation<T: Serialize>(
 ) -> Result<(), RecoveryError> {
     NotificationRecoveryRepository::insert(
         &mut **tx,
-        input.id,
-        input.organization_id,
-        input.project_id,
-        input.command.as_str(),
-        input.target_delivery_id,
-        input.actor.id,
-        input.actor.request_id,
-        input.key_hash.as_slice(),
-        input.fingerprint.as_slice(),
-        input.safe_filters,
-        input.selected,
-        input.retried,
-        input.cancelled,
-        input.skipped,
-        input.remaining,
-        serde_json::to_value(input.result)?,
-        input.completed_at,
+        NewRecoveryOperation {
+            id: input.id,
+            organization_id: input.organization_id,
+            project_id: input.project_id,
+            command_type: input.command.as_str(),
+            target_delivery_id: input.target_delivery_id,
+            actor_id: input.actor.id,
+            request_id: input.actor.request_id,
+            idempotency_key_hash: input.key_hash.as_slice(),
+            request_fingerprint: input.fingerprint.as_slice(),
+            safe_filters: input.safe_filters,
+            selected_count: input.selected,
+            retried_count: input.retried,
+            cancelled_count: input.cancelled,
+            skipped_count: input.skipped,
+            remaining_count: input.remaining,
+            result: serde_json::to_value(input.result)?,
+            completed_at: input.completed_at,
+        },
     )
     .await?;
     Ok(())

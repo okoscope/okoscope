@@ -22,7 +22,10 @@ use uuid::Uuid;
 use crate::auth::IdentityPrincipal;
 use crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION;
 use crate::repository::ApplicationRepository;
-use crate::repository::inventory::{FacetColumn, InventoryFilter, InventoryRepository};
+use crate::repository::inventory::{
+    FacetColumn, FacetOptionsQuery, InventoryFilter, InventoryRepository, ItemPageQuery,
+    NewUserLabel, OccurrencePageQuery, ReleasePresencePageQuery, SightingPageQuery,
+};
 use crate::service::project_access::project_scope;
 
 /// Why an inventory use case failed.
@@ -817,19 +820,21 @@ async fn load_facet_options(
     let facet_search = load.facet_search.as_ref().map(|value| format!("%{value}%"));
     Ok(InventoryRepository::facet_options(
         pool,
-        column,
-        load.scope.filter(
-            load.organization_id,
-            load.project_id,
-            load.application_id,
-            search.as_deref(),
-        ),
-        load.kind.as_deref(),
-        facet_search.as_deref(),
-        load.cursor.as_ref().map(|value| value.item_count),
-        load.cursor.as_ref().map(|value| value.label.as_str()),
-        load.cursor.as_ref().map(|value| value.value.as_str()),
-        load.limit + 1,
+        FacetOptionsQuery {
+            column,
+            filter: load.scope.filter(
+                load.organization_id,
+                load.project_id,
+                load.application_id,
+                search.as_deref(),
+            ),
+            kind: load.kind.as_deref(),
+            facet_search: facet_search.as_deref(),
+            cursor_item_count: load.cursor.as_ref().map(|value| value.item_count),
+            cursor_label: load.cursor.as_ref().map(|value| value.label.as_str()),
+            cursor_value: load.cursor.as_ref().map(|value| value.value.as_str()),
+            fetch_limit: load.limit + 1,
+        },
     )
     .await?)
 }
@@ -903,13 +908,15 @@ impl InventoryService {
         let display_name = normalize_display_name(&input.display_name)?;
         let row = InventoryRepository::put_user_label::<_, UserLabel>(
             &self.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            item_id,
-            display_name,
-            principal.user_id,
-            input.expected_updated_at,
+            NewUserLabel {
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                item_id,
+                display_name,
+                user_id: principal.user_id,
+                expected_updated_at: input.expected_updated_at,
+            },
         )
         .await?;
         if let Some(row) = row {
@@ -1314,23 +1321,25 @@ impl InventoryService {
         let search = scope.search_pattern();
         let mut items: Vec<InventoryItem> = InventoryRepository::item_page(
             &self.pool,
-            scope.filter(
-                principal.organization_id,
-                project_id,
-                application_id,
-                search.as_deref(),
-            ),
-            query.kind.as_deref(),
-            identity.as_ref().map(|value| value.item_id),
-            identity
-                .as_ref()
-                .and_then(|value| hex::decode(&value.identity_digest).ok()),
-            query.verdict.as_deref(),
-            query.suppressed,
-            query.evaluation_pending,
-            cursor_time,
-            cursor_id,
-            limit + 1,
+            ItemPageQuery {
+                filter: scope.filter(
+                    principal.organization_id,
+                    project_id,
+                    application_id,
+                    search.as_deref(),
+                ),
+                kind: query.kind.as_deref(),
+                identity_item_id: identity.as_ref().map(|value| value.item_id),
+                identity_digest: identity
+                    .as_ref()
+                    .and_then(|value| hex::decode(&value.identity_digest).ok()),
+                verdict: query.verdict.as_deref(),
+                suppressed: query.suppressed,
+                evaluation_pending: query.evaluation_pending,
+                cursor_last_seen_at: cursor_time,
+                cursor_id,
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         for item in &mut items {
@@ -1430,13 +1439,15 @@ impl InventoryService {
             cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
         let mut items = InventoryRepository::release_presence_page::<_, ReleasePresence>(
             &self.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            item_id,
-            cursor_time,
-            cursor_id,
-            limit + 1,
+            ReleasePresencePageQuery {
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                item_id,
+                cursor_deployed_at: cursor_time,
+                cursor_release_id: cursor_id,
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
@@ -1473,19 +1484,21 @@ impl InventoryService {
             query.cursor.as_deref().map(decode_cursor).transpose()?;
         let mut items = InventoryRepository::sighting_page::<_, InventorySighting>(
             &self.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            item_id,
-            cursor.as_ref().map(|value| value.last_seen_at),
-            cursor.as_ref().map(|value| value.cluster_id),
-            cursor.as_ref().map(|value| value.namespace.as_str()),
-            cursor.as_ref().map(|value| value.workload_kind.as_str()),
-            cursor.as_ref().map(|value| value.workload_name.as_str()),
-            cursor.as_ref().map(|value| value.pod_uid.as_str()),
-            cursor.as_ref().map(|value| value.container_name.as_str()),
-            limit + 1,
-            crate::policy::POLICY_EVALUATOR_VERSION,
+            SightingPageQuery {
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                item_id,
+                cursor_last_seen_at: cursor.as_ref().map(|value| value.last_seen_at),
+                cursor_cluster_id: cursor.as_ref().map(|value| value.cluster_id),
+                cursor_namespace: cursor.as_ref().map(|value| value.namespace.as_str()),
+                cursor_workload_kind: cursor.as_ref().map(|value| value.workload_kind.as_str()),
+                cursor_workload_name: cursor.as_ref().map(|value| value.workload_name.as_str()),
+                cursor_pod_uid: cursor.as_ref().map(|value| value.pod_uid.as_str()),
+                cursor_container_name: cursor.as_ref().map(|value| value.container_name.as_str()),
+                fetch_limit: limit + 1,
+                evaluator_version: crate::policy::POLICY_EVALUATOR_VERSION,
+            },
         )
         .await?;
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
@@ -1593,14 +1606,16 @@ impl InventoryService {
             cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
         let mut items = InventoryRepository::occurrence_page::<_, InventoryOccurrence>(
             &self.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            item_id,
-            CURRENT_INVENTORY_IDENTITY_VERSION.get(),
-            cursor_time,
-            cursor_id,
-            limit + 1,
+            OccurrencePageQuery {
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                item_id,
+                identity_version: CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+                cursor_observed_at: cursor_time,
+                cursor_id,
+                fetch_limit: limit + 1,
+            },
         )
         .await?;
         let next_cursor = if items.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
