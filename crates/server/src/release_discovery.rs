@@ -384,8 +384,18 @@ mod tests {
         persist_readiness_snapshot(&pool, scope, application, &zero_snapshot)
             .await
             .unwrap();
-        let share: Option<f64> = sqlx::query_scalar("SELECT CASE WHEN workload_ready_pod_count>0 THEN ready_pod_count::double precision/workload_ready_pod_count::double precision END FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-b'")
-            .fetch_one(&pool).await.unwrap();
+        let share: Option<f64> = sqlx::query_scalar(
+            "SELECT CASE
+                 WHEN workload_ready_pod_count>0
+                     THEN ready_pod_count::double precision/workload_ready_pod_count::double precision
+             END
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-b'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(share, None);
         let revision_a = revision_digest(&release_a);
         persist_readiness_snapshot(
@@ -405,8 +415,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let state: String = sqlx::query_scalar("SELECT state FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-a'")
-            .fetch_one(&pool).await.unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT state
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(state, "active");
         persist_readiness_snapshot(
             &pool,
@@ -430,14 +447,28 @@ mod tests {
         persist_revision_evidence(&pool, scope, application, &returned_a)
             .await
             .unwrap();
-        let rows: Vec<(String, i64)> = sqlx::query_as("SELECT e.transition_kind,e.occurrence_number FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-a' ORDER BY e.occurrence_number")
-            .fetch_all(&pool).await.unwrap();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT e.transition_kind,e.occurrence_number
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-a'
+             ORDER BY e.occurrence_number",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             rows,
             vec![("unknown".into(), 1), ("rollback_candidate".into(), 2)]
         );
-        let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)")
-            .fetch_one(&pool).await.unwrap();
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(counts, (2, 2, 3));
     }
 
@@ -463,7 +494,9 @@ mod tests {
         first.unwrap();
         second.unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await
@@ -477,7 +510,8 @@ mod tests {
                 .is_err()
         );
         let counts: (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions)",
         )
         .fetch_one(&pool)
         .await
@@ -506,7 +540,9 @@ mod tests {
             .await
             .unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await
@@ -526,7 +562,9 @@ mod tests {
             .await
             .unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await

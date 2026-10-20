@@ -19,9 +19,13 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM user_email_actions WHERE (expires_at<now() OR consumed_at IS NOT NULL OR revoked_at IS NOT NULL) AND created_at<now()-interval '30 days'")
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM user_email_actions
+             WHERE (expires_at<now() OR consumed_at IS NOT NULL OR revoked_at IS NOT NULL)
+                 AND created_at<now()-interval '30 days'",
+        )
+        .execute(executor)
+        .await
     }
 
     /// Revokes the user's live actions of this purpose.
@@ -33,11 +37,18 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE user_email_actions SET revoked_at=now() WHERE user_id=$1 AND purpose=$2 AND consumed_at IS NULL AND revoked_at IS NULL")
-            .bind(user_id)
-            .bind(purpose)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE user_email_actions
+             SET revoked_at=now()
+             WHERE user_id=$1
+                 AND purpose=$2
+                 AND consumed_at IS NULL
+                 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(purpose)
+        .execute(executor)
+        .await
     }
 
     /// Stores a new action by the digest of its token.
@@ -52,14 +63,17 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at) VALUES($1,$2,$3,$4,$5)")
-            .bind(id)
-            .bind(user_id)
-            .bind(purpose)
-            .bind(token_digest)
-            .bind(expires_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at)
+             VALUES($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(purpose)
+        .bind(token_digest)
+        .bind(expires_at)
+        .execute(executor)
+        .await
     }
 
     /// Reports whether the user was sent an action of this purpose within the
@@ -73,12 +87,20 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM user_email_actions WHERE user_id=$1 AND purpose=$2 AND created_at>now()-make_interval(secs=>$3))")
-            .bind(user_id)
-            .bind(purpose)
-            .bind(cooldown_seconds)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM user_email_actions
+                 WHERE user_id=$1
+                     AND purpose=$2
+                     AND created_at>now()-make_interval(secs=>$3)
+             )",
+        )
+        .bind(user_id)
+        .bind(purpose)
+        .bind(cooldown_seconds)
+        .fetch_one(executor)
+        .await
     }
 
     /// Revokes the user's live email verification actions.
@@ -89,10 +111,17 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE user_email_actions SET revoked_at=now() WHERE user_id=$1 AND purpose='verify_email' AND consumed_at IS NULL AND revoked_at IS NULL")
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE user_email_actions
+             SET revoked_at=now()
+             WHERE user_id=$1
+                 AND purpose='verify_email'
+                 AND consumed_at IS NULL
+                 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 
     /// Consumes the live action of this purpose whose token hashes to
@@ -105,11 +134,25 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("UPDATE user_email_actions SET consumed_at=now() WHERE id=(SELECT id FROM user_email_actions WHERE token_digest=$1 AND purpose=$2 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at>now() FOR UPDATE) RETURNING user_id")
-            .bind(token_digest)
-            .bind(purpose)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "UPDATE user_email_actions
+             SET consumed_at=now()
+             WHERE id=(
+                 SELECT id
+                 FROM user_email_actions
+                 WHERE token_digest=$1
+                     AND purpose=$2
+                     AND consumed_at IS NULL
+                     AND revoked_at IS NULL
+                     AND expires_at>now()
+                 FOR UPDATE
+             )
+             RETURNING user_id",
+        )
+        .bind(token_digest)
+        .bind(purpose)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Revokes all of the user's live actions.
@@ -120,10 +163,16 @@ impl EmailActionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE user_email_actions SET revoked_at=coalesce(revoked_at,now()) WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL")
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE user_email_actions
+             SET revoked_at=coalesce(revoked_at,now())
+             WHERE user_id=$1
+                 AND consumed_at IS NULL
+                 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 }
 
@@ -153,7 +202,12 @@ mod tests {
 
     async fn live(pool: &PgPool, user_id: Uuid) -> Vec<String> {
         sqlx::query_scalar(
-            "SELECT purpose FROM user_email_actions WHERE user_id=$1 AND consumed_at IS NULL AND revoked_at IS NULL ORDER BY purpose",
+            "SELECT purpose
+             FROM user_email_actions
+             WHERE user_id=$1
+                 AND consumed_at IS NULL
+                 AND revoked_at IS NULL
+             ORDER BY purpose",
         )
         .bind(user_id)
         .fetch_all(pool)
@@ -190,7 +244,9 @@ mod tests {
 
         let expired = issue(&pool, owner, "reset_password", 2).await;
         sqlx::query(
-            "UPDATE user_email_actions SET created_at=now()-interval '2 hours',expires_at=now()-interval '1 hour' WHERE id=$1",
+            "UPDATE user_email_actions
+             SET created_at=now()-interval '2 hours',expires_at=now()-interval '1 hour'
+             WHERE id=$1",
         )
         .bind(expired)
         .execute(&pool)
@@ -224,11 +280,15 @@ mod tests {
         issue(&pool, owner, "reset_password", 2).await;
         issue(&pool, other, "verify_email", 3).await;
         assert!(cooling("verify_email").await);
-        sqlx::query("UPDATE user_email_actions SET created_at=now()-interval '2 minutes',expires_at=now()+interval '1 hour' WHERE user_id=$1")
-            .bind(owner)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE user_email_actions
+             SET created_at=now()-interval '2 minutes',expires_at=now()+interval '1 hour'
+             WHERE user_id=$1",
+        )
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert!(!cooling("verify_email").await, "outside the window");
 
         EmailActionRepository::revoke_pending(&pool, owner, "reset_password")

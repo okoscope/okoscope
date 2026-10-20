@@ -57,13 +57,19 @@ impl ProjectRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO projects (id, organization_id, slug, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(slug)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO projects (id, organization_id, slug, name)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (organization_id, slug)
+             DO UPDATE SET name = EXCLUDED.name
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(slug)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Locks the project row for update, without the organization lock
@@ -110,10 +116,16 @@ impl ProjectRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,organization_id,slug,name,created_at FROM projects WHERE organization_id=$1 ORDER BY created_at,id LIMIT 200")
-            .bind(organization_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,organization_id,slug,name,created_at
+             FROM projects
+             WHERE organization_id=$1
+             ORDER BY created_at,id
+             LIMIT 200",
+        )
+        .bind(organization_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// One project of the organization with the columns of
@@ -127,11 +139,16 @@ impl ProjectRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,organization_id,slug,name,created_at FROM projects WHERE id=$1 AND organization_id=$2")
-            .bind(project_id)
-            .bind(organization_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,organization_id,slug,name,created_at
+             FROM projects
+             WHERE id=$1
+                 AND organization_id=$2",
+        )
+        .bind(project_id)
+        .bind(organization_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Reports whether a project with this id exists in any organization.
@@ -175,12 +192,22 @@ impl ProjectRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::uuid IS NULL OR p.id>$2) ORDER BY p.id LIMIT $3", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, crate::repository::event_groups::aggregates::COUNT_ALL_FOR_PROJECT))
-            .bind(organization_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,
+                 {} runtime_group_count
+             FROM projects p
+             WHERE p.organization_id=$1
+                 AND ($2::uuid IS NULL OR p.id>$2)
+             ORDER BY p.id
+             LIMIT $3",
+            crate::repository::applications::aggregates::COUNT_FOR_PROJECT,
+            crate::repository::event_groups::aggregates::COUNT_ALL_FOR_PROJECT
+        ))
+        .bind(organization_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Reports whether the project exists within the organization.

@@ -44,6 +44,24 @@ pub enum FacetColumn {
     ContainerName,
 }
 
+impl FacetColumn {
+    /// The facet's value and label expressions over sightings `s`, and the
+    /// join the label needs.
+    fn expressions(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Cluster => (
+                "s.cluster_id::text",
+                "c.name",
+                "JOIN clusters c ON c.organization_id=s.organization_id AND c.id=s.cluster_id",
+            ),
+            Self::Namespace => ("s.namespace", "s.namespace", ""),
+            Self::WorkloadKind => ("s.workload_kind", "s.workload_kind", ""),
+            Self::WorkloadName => ("s.workload_name", "s.workload_name", ""),
+            Self::ContainerName => ("s.container_name", "s.container_name", ""),
+        }
+    }
+}
+
 /// Binds the filter's scope, from `release_id` to `search`, as the next ten
 /// parameters.
 fn bind_scope<'q, T>(
@@ -227,16 +245,35 @@ impl InventoryRepository {
             upper_bound,
             limit,
         } = input;
-        sqlx::query_as("SELECT e.id,e.event_id,e.organization_id,e.project_id,e.cluster_id,e.application_id,e.release_id,m.group_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=1 LEFT JOIN runtime_inventory_event_memberships im ON im.event_id=e.id AND im.identity_version=$4 WHERE e.organization_id=$1 AND e.project_id=$2 AND ($3::uuid IS NULL OR e.application_id=$3) AND im.event_id IS NULL AND ($5::uuid IS NULL OR e.id>$5) AND e.id<=$6 ORDER BY e.id LIMIT $7")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(identity_version)
-            .bind(cursor)
-            .bind(upper_bound)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.organization_id,e.project_id,e.cluster_id,
+                 e.application_id,e.release_id,m.group_id,e.observed_at,e.node_name,
+                 e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,
+                 e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,
+                 e.process_command,e.event_schema_version,e.payload
+             FROM runtime_events e
+             JOIN runtime_event_group_memberships m ON m.event_id=e.id
+                 AND m.fingerprint_version=1
+             LEFT JOIN runtime_inventory_event_memberships im ON im.event_id=e.id
+                 AND im.identity_version=$4
+             WHERE e.organization_id=$1
+                 AND e.project_id=$2
+                 AND ($3::uuid IS NULL OR e.application_id=$3)
+                 AND im.event_id IS NULL
+                 AND ($5::uuid IS NULL OR e.id>$5)
+                 AND e.id<=$6
+             ORDER BY e.id
+             LIMIT $7",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(identity_version)
+        .bind(cursor)
+        .bind(upper_bound)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Compares the application's grouped raw events with its inventory
@@ -256,13 +293,76 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT (SELECT count(*) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_event_count,(SELECT count(*) FROM runtime_inventory_event_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) membership_count,(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) item_occurrence_count,(SELECT min(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_first_seen_at,(SELECT min(first_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_first_seen_at,(SELECT max(e.observed_at) FROM runtime_events e JOIN runtime_event_group_memberships gm ON gm.event_id=e.id AND gm.fingerprint_version=1 WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3) source_last_seen_at,(SELECT max(last_seen_at) FROM runtime_inventory_items WHERE occurrence_count>0 AND organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=$4) projected_last_seen_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(identity_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "SELECT (
+                 SELECT count(*)
+                 FROM runtime_events e
+                 JOIN runtime_event_group_memberships gm ON gm.event_id=e.id
+                     AND gm.fingerprint_version=1
+                 WHERE e.organization_id=$1
+                     AND e.project_id=$2
+                     AND e.application_id=$3
+             ) source_event_count,
+                 (
+                     SELECT count(*)
+                     FROM runtime_inventory_event_memberships
+                     WHERE organization_id=$1
+                         AND project_id=$2
+                         AND application_id=$3
+                         AND identity_version=$4
+                 ) membership_count,
+                 (
+                     SELECT COALESCE(sum(occurrence_count),0)::bigint
+                     FROM runtime_inventory_items
+                     WHERE occurrence_count>0
+                         AND organization_id=$1
+                         AND project_id=$2
+                         AND application_id=$3
+                         AND identity_version=$4
+                 ) item_occurrence_count,
+                 (
+                     SELECT min(e.observed_at)
+                     FROM runtime_events e
+                     JOIN runtime_event_group_memberships gm ON gm.event_id=e.id
+                         AND gm.fingerprint_version=1
+                     WHERE e.organization_id=$1
+                         AND e.project_id=$2
+                         AND e.application_id=$3
+                 ) source_first_seen_at,
+                 (
+                     SELECT min(first_seen_at)
+                     FROM runtime_inventory_items
+                     WHERE occurrence_count>0
+                         AND organization_id=$1
+                         AND project_id=$2
+                         AND application_id=$3
+                         AND identity_version=$4
+                 ) projected_first_seen_at,
+                 (
+                     SELECT max(e.observed_at)
+                     FROM runtime_events e
+                     JOIN runtime_event_group_memberships gm ON gm.event_id=e.id
+                         AND gm.fingerprint_version=1
+                     WHERE e.organization_id=$1
+                         AND e.project_id=$2
+                         AND e.application_id=$3
+                 ) source_last_seen_at,
+                 (
+                     SELECT max(last_seen_at)
+                     FROM runtime_inventory_items
+                     WHERE occurrence_count>0
+                         AND organization_id=$1
+                         AND project_id=$2
+                         AND application_id=$3
+                         AND identity_version=$4
+                 ) projected_last_seen_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(identity_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// How many inventory items exist, and how many seconds ago the most
@@ -271,9 +371,13 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (i64, i64)>("SELECT count(*)::bigint,COALESCE(EXTRACT(EPOCH FROM (now()-max(updated_at)))::bigint,0) FROM runtime_inventory_items")
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT count(*)::bigint,
+                 COALESCE(EXTRACT(EPOCH FROM (now()-max(updated_at)))::bigint,0)
+             FROM runtime_inventory_items",
+        )
+        .fetch_one(executor)
+        .await
     }
 
     /// An item's identity version and digest.
@@ -287,13 +391,20 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (i16, Vec<u8>)>("SELECT identity_version,identity_digest FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (i16, Vec<u8>)>(
+            "SELECT identity_version,identity_digest
+             FROM runtime_inventory_items
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records a new inventory item for an identity, returning its id; `None`
@@ -316,18 +427,31 @@ impl InventoryRepository {
             semantic_summary,
             observed_at,
         } = input;
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1) ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO NOTHING RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(inventory_kind)
-            .bind(identity_version)
-            .bind(identity_digest)
-            .bind(semantic_summary)
-            .bind(observed_at)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO runtime_inventory_items(
+                 id,organization_id,project_id,application_id,inventory_kind,
+                 identity_version,identity_digest,semantic_summary,first_seen_at,
+                 last_seen_at,occurrence_count
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1)
+             ON CONFLICT (
+                 organization_id,project_id,application_id,inventory_kind,identity_version,
+                 identity_digest
+             )
+             DO NOTHING
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(inventory_kind)
+        .bind(identity_version)
+        .bind(identity_digest)
+        .bind(semantic_summary)
+        .bind(observed_at)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The id of the application's item with this identity.
@@ -343,15 +467,25 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND inventory_kind=$4 AND identity_version=$5 AND identity_digest=$6 FOR UPDATE")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(inventory_kind)
-            .bind(identity_version)
-            .bind(identity_digest)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM runtime_inventory_items
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND inventory_kind=$4
+                 AND identity_version=$5
+                 AND identity_digest=$6
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(inventory_kind)
+        .bind(identity_version)
+        .bind(identity_digest)
+        .fetch_one(executor)
+        .await
     }
 
     /// Makes an event an occurrence of an item under `identity_version`,
@@ -368,15 +502,23 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id,identity_version) DO NOTHING RETURNING event_id")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(event_id)
-            .bind(item_id)
-            .bind(identity_version)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO runtime_inventory_event_memberships(
+                 organization_id,project_id,application_id,event_id,item_id,identity_version
+             )
+             VALUES($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (event_id,identity_version)
+             DO NOTHING
+             RETURNING event_id",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(event_id)
+        .bind(item_id)
+        .bind(identity_version)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Counts an occurrence of an inbound endpoint item, widening its seen
@@ -391,13 +533,42 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,semantic_summary=jsonb_set(jsonb_set(semantic_summary,'{listener_observed}',to_jsonb(COALESCE((semantic_summary->>'listener_observed')::boolean,false) OR $3)),'{accept_observed}',to_jsonb(COALESCE((semantic_summary->>'accept_observed')::boolean,false) OR $4)),updated_at=now() WHERE id=$1")
-            .bind(item_id)
-            .bind(observed_at)
-            .bind(listener_observed)
-            .bind(accept_observed)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE runtime_inventory_items
+             SET first_seen_at=CASE
+                 WHEN occurrence_count=0 THEN $2
+                 ELSE LEAST(first_seen_at,$2)
+             END,
+                 last_seen_at=CASE
+                     WHEN occurrence_count=0 THEN $2
+                     ELSE GREATEST(last_seen_at,$2)
+                 END,
+                 occurrence_count=occurrence_count+1,
+                 semantic_summary=jsonb_set(
+                     jsonb_set(
+                         semantic_summary,'{listener_observed}',
+                         to_jsonb(
+                             COALESCE(
+                                 (semantic_summary->>'listener_observed')::boolean,false
+                             )
+                             OR $3
+                         )
+                     ),
+                     '{accept_observed}',
+                     to_jsonb(
+                         COALESCE((semantic_summary->>'accept_observed')::boolean,false)
+                         OR $4
+                     )
+                 ),
+                 updated_at=now()
+             WHERE id=$1",
+        )
+        .bind(item_id)
+        .bind(observed_at)
+        .bind(listener_observed)
+        .bind(accept_observed)
+        .execute(executor)
+        .await
     }
 
     /// Counts an occurrence of an item and widens its seen window.
@@ -409,11 +580,23 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_inventory_items SET first_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE LEAST(first_seen_at,$2) END,last_seen_at=CASE WHEN occurrence_count=0 THEN $2 ELSE GREATEST(last_seen_at,$2) END,occurrence_count=occurrence_count+1,updated_at=now() WHERE id=$1")
-            .bind(item_id)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE runtime_inventory_items
+             SET first_seen_at=CASE
+                 WHEN occurrence_count=0 THEN $2
+                 ELSE LEAST(first_seen_at,$2)
+             END,
+                 last_seen_at=CASE
+                     WHEN occurrence_count=0 THEN $2
+                     ELSE GREATEST(last_seen_at,$2)
+                 END,
+                 occurrence_count=occurrence_count+1,updated_at=now()
+             WHERE id=$1",
+        )
+        .bind(item_id)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// Links an item to a runtime group, once.
@@ -428,14 +611,21 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_group_links(organization_id,project_id,application_id,item_id,group_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT (item_id,group_id) DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(group_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_group_links(
+                 organization_id,project_id,application_id,item_id,group_id
+             )
+             VALUES($1,$2,$3,$4,$5)
+             ON CONFLICT (item_id,group_id)
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(group_id)
+        .execute(executor)
+        .await
     }
 
     /// Counts an occurrence of an item in a release.
@@ -451,15 +641,30 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_releases(organization_id,project_id,application_id,item_id,release_id,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,1,$6,$6) ON CONFLICT (item_id,release_id) DO UPDATE SET occurrence_count=runtime_inventory_releases.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(release_id)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_releases(
+                 organization_id,project_id,application_id,item_id,release_id,
+                 occurrence_count,first_seen_at,last_seen_at
+             )
+             VALUES($1,$2,$3,$4,$5,1,$6,$6)
+             ON CONFLICT (item_id,release_id)
+             DO UPDATE SET occurrence_count=runtime_inventory_releases.occurrence_count+1,
+                 first_seen_at=LEAST(
+                     runtime_inventory_releases.first_seen_at,EXCLUDED.first_seen_at
+                 ),
+                 last_seen_at=GREATEST(
+                     runtime_inventory_releases.last_seen_at,EXCLUDED.last_seen_at
+                 ),
+                 updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(release_id)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// Counts an occurrence of an item at one placement.
@@ -484,21 +689,40 @@ impl InventoryRepository {
             container_name,
             observed_at,
         } = input;
-        sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12,$12) ON CONFLICT (item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,container_name) DO UPDATE SET occurrence_count=runtime_inventory_sightings.occurrence_count+1,first_seen_at=LEAST(runtime_inventory_sightings.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_inventory_sightings.last_seen_at,EXCLUDED.last_seen_at),pod_name=EXCLUDED.pod_name,updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(cluster_id)
-            .bind(namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(pod_uid)
-            .bind(pod_name)
-            .bind(container_name)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_sightings(
+                 organization_id,project_id,application_id,item_id,cluster_id,namespace,
+                 workload_kind,workload_name,pod_uid,pod_name,container_name,
+                 occurrence_count,first_seen_at,last_seen_at
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1,$12,$12)
+             ON CONFLICT (
+                 item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,
+                 container_name
+             )
+             DO UPDATE SET occurrence_count=runtime_inventory_sightings.occurrence_count+1,
+                 first_seen_at=LEAST(
+                     runtime_inventory_sightings.first_seen_at,EXCLUDED.first_seen_at
+                 ),
+                 last_seen_at=GREATEST(
+                     runtime_inventory_sightings.last_seen_at,EXCLUDED.last_seen_at
+                 ),
+                 pod_name=EXCLUDED.pod_name,updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(cluster_id)
+        .bind(namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(pod_uid)
+        .bind(pod_name)
+        .bind(container_name)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// Links the inventory items an event belongs to under `identity_version`
@@ -515,16 +739,145 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_group_links (organization_id,project_id,application_id,item_id,group_id) SELECT $1,$2,$3,m.item_id,$4 FROM runtime_inventory_event_memberships m WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.event_id=$5 AND m.identity_version=$6 ON CONFLICT (item_id,group_id) DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(group_id)
-            .bind(event_id)
-            .bind(identity_version)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_group_links (
+                 organization_id,project_id,application_id,item_id,group_id
+             )
+             SELECT $1,$2,$3,m.item_id,$4
+             FROM runtime_inventory_event_memberships m
+             WHERE m.organization_id=$1
+                 AND m.project_id=$2
+                 AND m.application_id=$3
+                 AND m.event_id=$5
+                 AND m.identity_version=$6
+             ON CONFLICT (item_id,group_id)
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(group_id)
+        .bind(event_id)
+        .bind(identity_version)
+        .execute(executor)
+        .await
     }
+
+    /// The statement behind [`Self::kind_summary`].
+    const KIND_SUMMARY: &str = "SELECT CASE
+                                    WHEN i.inventory_kind IN (
+                                        'process_exit','container_termination','container_restart'
+                                    )
+                                        THEN 'lifecycle'
+                                    ELSE i.inventory_kind
+                                END kind,
+                                    count(*)::bigint item_count,
+                                    COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,
+                                    min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at,
+                                    COALESCE(
+                                        sum(i.occurrence_count) FILTER (
+                                            WHERE i.semantic_summary->>'event_kind'='process.start'
+                                        ),
+                                        0
+                                    )::bigint process_start_count,
+                                    COALESCE(
+                                        sum(i.occurrence_count) FILTER (WHERE i.inventory_kind='process'),0
+                                    )::bigint process_exec_count,
+                                    COALESCE(
+                                        sum(i.occurrence_count) FILTER (
+                                            WHERE i.semantic_summary->>'event_kind'='process.exit'
+                                        ),
+                                        0
+                                    )::bigint process_exit_count
+                                FROM runtime_inventory_items i
+                                WHERE i.occurrence_count>0
+                                    AND i.organization_id=$1
+                                    AND i.project_id=$2
+                                    AND i.application_id=$3
+                                    AND i.identity_version=$4
+                                    AND (
+                                        $5::uuid IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_releases r
+                                            WHERE r.item_id=i.id
+                                                AND r.release_id=$5
+                                        )
+                                    )
+                                    AND (
+                                        $6::uuid IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_sightings s
+                                            WHERE s.item_id=i.id
+                                                AND s.cluster_id=$6
+                                        )
+                                    )
+                                    AND (
+                                        $7::text IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_sightings s
+                                            WHERE s.item_id=i.id
+                                                AND s.namespace=$7
+                                        )
+                                    )
+                                    AND (
+                                        $8::text IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_sightings s
+                                            WHERE s.item_id=i.id
+                                                AND s.workload_kind=$8
+                                        )
+                                    )
+                                    AND (
+                                        $9::text IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_sightings s
+                                            WHERE s.item_id=i.id
+                                                AND s.workload_name=$9
+                                        )
+                                    )
+                                    AND (
+                                        $10::text IS NULL
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_inventory_sightings s
+                                            WHERE s.item_id=i.id
+                                                AND s.container_name=$10
+                                        )
+                                    )
+                                    AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11)
+                                    AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12)
+                                    AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13)
+                                    AND (
+                                        $14::text IS NULL
+                                        OR concat_ws(
+                                            ' ',i.semantic_summary->>'executable',
+                                            i.semantic_summary->>'process_command',
+                                            i.semantic_summary->>'destination_address',
+                                            i.semantic_summary->>'destination_port',
+                                            i.semantic_summary->>'local_address',
+                                            i.semantic_summary->>'local_port',i.semantic_summary->>'name',
+                                            i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',
+                                            i.semantic_summary->>'operation',i.semantic_summary->>'path',
+                                            i.semantic_summary->>'new_path'
+                                        ) ILIKE $14
+                                        OR EXISTS(
+                                            SELECT 1
+                                            FROM runtime_behavior_user_labels l
+                                            WHERE l.organization_id=i.organization_id
+                                                AND l.project_id=i.project_id
+                                                AND l.application_id=i.application_id
+                                                AND l.inventory_kind=i.inventory_kind
+                                                AND l.identity_version=i.identity_version
+                                                AND l.identity_digest=i.identity_digest
+                                                AND l.display_name ILIKE $14
+                                        )
+                                    )
+                                GROUP BY 1";
 
     /// Item and occurrence counts and the seen window per inventory kind under
     /// the filter, with the lifecycle kinds folded into `lifecycle`.
@@ -538,13 +891,122 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        let query = sqlx::query_as("SELECT CASE WHEN i.inventory_kind IN ('process_exit','container_termination','container_restart') THEN 'lifecycle' ELSE i.inventory_kind END kind,count(*)::bigint item_count,COALESCE(sum(i.occurrence_count),0)::bigint occurrence_count,min(i.first_seen_at) first_seen_at,max(i.last_seen_at) last_seen_at,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.start'),0)::bigint process_start_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.inventory_kind='process'),0)::bigint process_exec_count,COALESCE(sum(i.occurrence_count) FILTER (WHERE i.semantic_summary->>'event_kind'='process.exit'),0)::bigint process_exit_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$5)) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$6)) AND ($7::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$10)) AND ($11::timestamptz IS NULL OR i.last_seen_at >= $11) AND ($12::timestamptz IS NULL OR i.first_seen_at <= $12) AND ($13::text IS NULL OR i.semantic_summary->>'operation'=$13) AND ($14::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $14 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $14)) GROUP BY 1")
+        let query = sqlx::query_as(Self::KIND_SUMMARY)
             .bind(filter.organization_id)
             .bind(filter.project_id)
             .bind(filter.application_id)
             .bind(CURRENT_INVENTORY_IDENTITY_VERSION.get());
         bind_scope(query, filter).fetch_all(executor).await
     }
+
+    /// The statement behind [`Self::distribution`].
+    const DISTRIBUTION: &str = "WITH scoped AS MATERIALIZED (
+                                    SELECT i.id,i.identity_digest,i.semantic_summary,
+                                        CASE WHEN l.id IS NULL THEN NULL ELSE jsonb_build_object(
+                                            'display_name',l.display_name,'created_by_user_id',
+                                            l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,
+                                            'created_at',l.created_at,'updated_at',l.updated_at
+                                        ) END user_label,
+                                        i.occurrence_count
+                                    FROM runtime_inventory_items i
+                                    LEFT JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id
+                                        AND l.project_id=i.project_id
+                                        AND l.application_id=i.application_id
+                                        AND l.inventory_kind=i.inventory_kind
+                                        AND l.identity_version=i.identity_version
+                                        AND l.identity_digest=i.identity_digest
+                                    WHERE i.occurrence_count>0
+                                        AND i.organization_id=$1
+                                        AND i.project_id=$2
+                                        AND i.application_id=$3
+                                        AND i.identity_version=$4
+                                        AND i.inventory_kind=$5
+                                        AND (
+                                            $6::uuid IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_releases r
+                                                WHERE r.item_id=i.id
+                                                    AND r.release_id=$6
+                                            )
+                                        )
+                                        AND (
+                                            $7::uuid IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_sightings s
+                                                WHERE s.item_id=i.id
+                                                    AND s.cluster_id=$7
+                                            )
+                                        )
+                                        AND (
+                                            $8::text IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_sightings s
+                                                WHERE s.item_id=i.id
+                                                    AND s.namespace=$8
+                                            )
+                                        )
+                                        AND (
+                                            $9::text IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_sightings s
+                                                WHERE s.item_id=i.id
+                                                    AND s.workload_kind=$9
+                                            )
+                                        )
+                                        AND (
+                                            $10::text IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_sightings s
+                                                WHERE s.item_id=i.id
+                                                    AND s.workload_name=$10
+                                            )
+                                        )
+                                        AND (
+                                            $11::text IS NULL
+                                            OR EXISTS(
+                                                SELECT 1
+                                                FROM runtime_inventory_sightings s
+                                                WHERE s.item_id=i.id
+                                                    AND s.container_name=$11
+                                            )
+                                        )
+                                        AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12)
+                                        AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13)
+                                        AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14)
+                                        AND (
+                                            $15::text IS NULL
+                                            OR concat_ws(
+                                                ' ',i.semantic_summary->>'executable',
+                                                i.semantic_summary->>'process_command',
+                                                i.semantic_summary->>'destination_address',
+                                                i.semantic_summary->>'destination_port',
+                                                i.semantic_summary->>'local_address',
+                                                i.semantic_summary->>'local_port',i.semantic_summary->>'name',
+                                                i.semantic_summary->>'query_type',
+                                                i.semantic_summary->>'syscall',i.semantic_summary->>'operation',
+                                                i.semantic_summary->>'path',i.semantic_summary->>'new_path',
+                                                l.display_name
+                                            ) ILIKE $15
+                                        )
+                                ),
+                                    ranked AS (
+                                        SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,
+                                            count(*) OVER()::bigint total_item_count,
+                                            COALESCE(
+                                                sum(occurrence_count) OVER(),0
+                                            )::bigint total_occurrence_count
+                                        FROM scoped
+                                    )
+                                SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,
+                                    total_item_count,total_occurrence_count
+                                FROM ranked
+                                ORDER BY occurrence_count DESC,identity_digest ASC
+                                LIMIT $16";
 
     /// The items of one kind under the filter with the most occurrences, at
     /// most `limit`, with totals over the whole filtered set.
@@ -561,7 +1023,7 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
-        let query = sqlx::query_as("WITH scoped AS MATERIALIZED (SELECT i.id,i.identity_digest,i.semantic_summary,CASE WHEN l.id IS NULL THEN NULL ELSE jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) END user_label,i.occurrence_count FROM runtime_inventory_items i LEFT JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND i.inventory_kind=$5 AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$10)) AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$11)) AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path',l.display_name) ILIKE $15)), ranked AS (SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,count(*) OVER()::bigint total_item_count,COALESCE(sum(occurrence_count) OVER(),0)::bigint total_occurrence_count FROM scoped) SELECT id,identity_digest,semantic_summary,user_label,occurrence_count,total_item_count,total_occurrence_count FROM ranked ORDER BY occurrence_count DESC,identity_digest ASC LIMIT $16")
+        let query = sqlx::query_as(Self::DISTRIBUTION)
             .bind(filter.organization_id)
             .bind(filter.project_id)
             .bind(filter.application_id)
@@ -596,19 +1058,72 @@ impl InventoryRepository {
             cursor_value,
             fetch_limit,
         } = input;
-        let (value_sql, label_sql, cluster_join) = match column {
-            FacetColumn::Cluster => (
-                "s.cluster_id::text",
-                "c.name",
-                "JOIN clusters c ON c.organization_id=s.organization_id AND c.id=s.cluster_id",
-            ),
-            FacetColumn::Namespace => ("s.namespace", "s.namespace", ""),
-            FacetColumn::WorkloadKind => ("s.workload_kind", "s.workload_kind", ""),
-            FacetColumn::WorkloadName => ("s.workload_name", "s.workload_name", ""),
-            FacetColumn::ContainerName => ("s.container_name", "s.container_name", ""),
-        };
+        let (value_sql, label_sql, cluster_join) = column.expressions();
         let sql = format!(
-            "SELECT {value_sql} value,{label_sql} label,count(DISTINCT i.id)::bigint item_count,COALESCE(sum(s.occurrence_count),0)::bigint occurrence_count FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id {cluster_join} WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::text IS NULL OR i.inventory_kind=$5) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR s.cluster_id=$7) AND ($8::text IS NULL OR s.namespace=$8) AND ($9::text IS NULL OR s.workload_kind=$9) AND ($10::text IS NULL OR s.workload_name=$10) AND ($11::text IS NULL OR s.container_name=$11) AND ($12::timestamptz IS NULL OR s.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR s.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $15 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $15)) AND ($16::text IS NULL OR concat_ws(' ',{label_sql},{value_sql}) ILIKE $16) GROUP BY {value_sql},{label_sql} HAVING ($17::bigint IS NULL OR count(DISTINCT i.id)<$17 OR (count(DISTINCT i.id)=$17 AND ({label_sql}>$18 OR ({label_sql}=$18 AND {value_sql}>$19)))) ORDER BY item_count DESC,label ASC,value ASC LIMIT $20"
+            "SELECT {value_sql} value,{label_sql} label,
+                 count(DISTINCT i.id)::bigint item_count,
+                 COALESCE(sum(s.occurrence_count),0)::bigint occurrence_count
+             FROM runtime_inventory_sightings s
+             JOIN runtime_inventory_items i ON i.id=s.item_id {cluster_join}
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+                 AND i.identity_version=$4
+                 AND ($5::text IS NULL OR i.inventory_kind=$5)
+                 AND (
+                     $6::uuid IS NULL
+                     OR EXISTS(
+                         SELECT 1
+                         FROM runtime_inventory_releases r
+                         WHERE r.item_id=i.id
+                             AND r.release_id=$6
+                     )
+                 )
+                 AND ($7::uuid IS NULL OR s.cluster_id=$7)
+                 AND ($8::text IS NULL OR s.namespace=$8)
+                 AND ($9::text IS NULL OR s.workload_kind=$9)
+                 AND ($10::text IS NULL OR s.workload_name=$10)
+                 AND ($11::text IS NULL OR s.container_name=$11)
+                 AND ($12::timestamptz IS NULL OR s.last_seen_at >= $12)
+                 AND ($13::timestamptz IS NULL OR s.first_seen_at <= $13)
+                 AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14)
+                 AND (
+                     $15::text IS NULL
+                     OR concat_ws(
+                         ' ',i.semantic_summary->>'executable',
+                         i.semantic_summary->>'process_command',
+                         i.semantic_summary->>'destination_address',
+                         i.semantic_summary->>'destination_port',
+                         i.semantic_summary->>'local_address',
+                         i.semantic_summary->>'local_port',i.semantic_summary->>'name',
+                         i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',
+                         i.semantic_summary->>'operation',i.semantic_summary->>'path',
+                         i.semantic_summary->>'new_path'
+                     ) ILIKE $15
+                     OR EXISTS(
+                         SELECT 1
+                         FROM runtime_behavior_user_labels l
+                         WHERE l.organization_id=i.organization_id
+                             AND l.project_id=i.project_id
+                             AND l.application_id=i.application_id
+                             AND l.inventory_kind=i.inventory_kind
+                             AND l.identity_version=i.identity_version
+                             AND l.identity_digest=i.identity_digest
+                             AND l.display_name ILIKE $15
+                     )
+                 )
+                 AND ($16::text IS NULL OR concat_ws(' ',{label_sql},{value_sql}) ILIKE $16)
+             GROUP BY {value_sql},{label_sql}
+             HAVING (
+                 $17::bigint IS NULL
+                 OR count(DISTINCT i.id)<$17
+                 OR (
+                     count(DISTINCT i.id)=$17
+                     AND ({label_sql}>$18 OR ({label_sql}=$18 AND {value_sql}>$19))
+                 )
+             )
+             ORDER BY item_count DESC,label ASC,value ASC
+             LIMIT $20"
         );
         let query = sqlx::query_as(&sql)
             .bind(filter.organization_id)
@@ -625,6 +1140,226 @@ impl InventoryRepository {
             .fetch_all(executor)
             .await
     }
+
+    /// The statement behind [`Self::item_page`].
+    const ITEM_PAGE: &str =
+        "SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,
+             i.semantic_summary,
+             (
+                 SELECT jsonb_build_object(
+                     'display_name',l.display_name,'created_by_user_id',
+                     l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,
+                     'created_at',l.created_at,'updated_at',l.updated_at
+                 )
+                 FROM runtime_behavior_user_labels l
+                 WHERE l.organization_id=i.organization_id
+                     AND l.project_id=i.project_id
+                     AND l.application_id=i.application_id
+                     AND l.inventory_kind=i.inventory_kind
+                     AND l.identity_version=i.identity_version
+                     AND l.identity_digest=i.identity_digest
+             ) user_label,
+             i.first_seen_at,i.last_seen_at,i.occurrence_count,
+             (
+                 SELECT count(*)
+                 FROM runtime_inventory_releases r
+                 WHERE r.item_id=i.id
+             ) release_count,
+             (
+                 SELECT count(DISTINCT s.cluster_id)
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) cluster_count,
+             (
+                 SELECT count(DISTINCT (s.cluster_id,s.namespace))
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) namespace_count,
+             (
+                 SELECT count(
+                     DISTINCT (
+                         s.cluster_id,s.namespace,s.workload_kind,s.workload_name
+                     )
+                 )
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) workload_count,
+             (
+                 SELECT count(DISTINCT (s.cluster_id,s.pod_uid))
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) pod_count,
+             (
+                 SELECT count(DISTINCT s.container_name)
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) container_count,
+             (
+                 SELECT count(*)
+                 FROM runtime_inventory_group_links gl
+                 WHERE gl.item_id=i.id
+             ) group_count
+         FROM runtime_inventory_items i
+         WHERE i.occurrence_count>0
+             AND i.organization_id=$1
+             AND i.project_id=$2
+             AND i.application_id=$3
+             AND i.identity_version=$4
+             AND ($5::text IS NULL OR i.inventory_kind=$5)
+             AND (
+                 $6::uuid IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_releases r
+                     WHERE r.item_id=i.id
+                         AND r.release_id=$6
+                 )
+             )
+             AND (
+                 $7::uuid IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                         AND s.cluster_id=$7
+                 )
+             )
+             AND (
+                 $8::text IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                         AND s.namespace=$8
+                 )
+             )
+             AND (
+                 $9::text IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                         AND s.workload_kind=$9
+                 )
+             )
+             AND (
+                 $10::text IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                         AND s.workload_name=$10
+                 )
+             )
+             AND (
+                 $11::text IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                         AND s.container_name=$11
+                 )
+             )
+             AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12)
+             AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13)
+             AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14)
+             AND (
+                 $15::text IS NULL
+                 OR concat_ws(
+                     ' ',i.semantic_summary->>'executable',
+                     i.semantic_summary->>'process_command',
+                     i.semantic_summary->>'destination_address',
+                     i.semantic_summary->>'destination_port',
+                     i.semantic_summary->>'local_address',
+                     i.semantic_summary->>'local_port',i.semantic_summary->>'name',
+                     i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',
+                     i.semantic_summary->>'operation',i.semantic_summary->>'path',
+                     i.semantic_summary->>'new_path'
+                 ) ILIKE $15
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_behavior_user_labels l
+                     WHERE l.organization_id=i.organization_id
+                         AND l.project_id=i.project_id
+                         AND l.application_id=i.application_id
+                         AND l.inventory_kind=i.inventory_kind
+                         AND l.identity_version=i.identity_version
+                         AND l.identity_digest=i.identity_digest
+                         AND l.display_name ILIKE $15
+                 )
+             )
+             AND ($16::uuid IS NULL OR (i.id=$16 AND i.identity_digest=$17))
+             AND (
+                 $18::text IS NULL
+                 OR EXISTS(
+                     SELECT 1
+                     FROM runtime_sighting_policy_evaluations e
+                     JOIN runtime_policy_states ps ON ps.organization_id=e.organization_id
+                         AND ps.project_id=e.project_id
+                         AND ps.application_id=e.application_id
+                     WHERE e.item_id=i.id
+                         AND e.policy_state_version=ps.state_version
+                         AND e.evaluator_version=$21
+                         AND e.verdict=$18
+                 )
+             )
+             AND (
+                 $19::bool IS NULL
+                 OR $19=EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     JOIN runtime_policy_suppressions z ON z.organization_id=s.organization_id
+                         AND z.project_id=s.project_id
+                         AND z.application_id=s.application_id
+                         AND z.identity_version=i.identity_version
+                         AND z.identity_digest=i.identity_digest
+                         AND z.cancelled_at IS NULL
+                         AND z.expires_at>now()
+                         AND (
+                             cardinality(z.cluster_ids)=0
+                             OR s.cluster_id=ANY(z.cluster_ids)
+                         )
+                         AND (
+                             cardinality(z.namespaces)=0
+                             OR s.namespace=ANY(z.namespaces)
+                         )
+                         AND (
+                             cardinality(z.workload_kinds)=0
+                             OR s.workload_kind=ANY(z.workload_kinds)
+                         )
+                         AND (
+                             cardinality(z.workload_names)=0
+                             OR s.workload_name=ANY(z.workload_names)
+                         )
+                     WHERE s.item_id=i.id
+                 )
+             )
+             AND (
+                 $20::bool IS NULL
+                 OR $20=EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_sightings s
+                     LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id
+                         AND e.cluster_id=s.cluster_id
+                         AND e.namespace=s.namespace
+                         AND e.workload_kind=s.workload_kind
+                         AND e.workload_name=s.workload_name
+                         AND e.pod_uid=s.pod_uid
+                         AND e.container_name=s.container_name
+                     LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id
+                         AND ps.project_id=s.project_id
+                         AND ps.application_id=s.application_id
+                     WHERE s.item_id=i.id
+                         AND (
+                             e.item_id IS NULL
+                             OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                             OR e.evaluator_version<>$21
+                         )
+                 )
+             )
+             AND ($22::timestamptz IS NULL OR (i.last_seen_at,i.id)<($22,$23))
+         ORDER BY i.last_seen_at DESC,i.id DESC
+         LIMIT $24";
 
     /// A page of the items under the filter, most recently seen first, after
     /// the cursor when one is given. `identity` narrows to one item with
@@ -656,7 +1391,7 @@ impl InventoryRepository {
             cursor_id,
             fetch_limit,
         } = input;
-        let query = sqlx::query_as("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.occurrence_count>0 AND i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=$4 AND ($5::text IS NULL OR i.inventory_kind=$5) AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$6)) AND ($7::uuid IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.cluster_id=$7)) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace=$8)) AND ($9::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_kind=$9)) AND ($10::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.workload_name=$10)) AND ($11::text IS NULL OR EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.container_name=$11)) AND ($12::timestamptz IS NULL OR i.last_seen_at >= $12) AND ($13::timestamptz IS NULL OR i.first_seen_at <= $13) AND ($14::text IS NULL OR i.semantic_summary->>'operation'=$14) AND ($15::text IS NULL OR concat_ws(' ',i.semantic_summary->>'executable',i.semantic_summary->>'process_command',i.semantic_summary->>'destination_address',i.semantic_summary->>'destination_port',i.semantic_summary->>'local_address',i.semantic_summary->>'local_port',i.semantic_summary->>'name',i.semantic_summary->>'query_type',i.semantic_summary->>'syscall',i.semantic_summary->>'operation',i.semantic_summary->>'path',i.semantic_summary->>'new_path') ILIKE $15 OR EXISTS(SELECT 1 FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND l.display_name ILIKE $15)) AND ($16::uuid IS NULL OR (i.id=$16 AND i.identity_digest=$17)) AND ($18::text IS NULL OR EXISTS(SELECT 1 FROM runtime_sighting_policy_evaluations e JOIN runtime_policy_states ps ON ps.organization_id=e.organization_id AND ps.project_id=e.project_id AND ps.application_id=e.application_id WHERE e.item_id=i.id AND e.policy_state_version=ps.state_version AND e.evaluator_version=$21 AND e.verdict=$18)) AND ($19::bool IS NULL OR $19=EXISTS(SELECT 1 FROM runtime_inventory_sightings s JOIN runtime_policy_suppressions z ON z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) WHERE s.item_id=i.id)) AND ($20::bool IS NULL OR $20=EXISTS(SELECT 1 FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.item_id=i.id AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$21))) AND ($22::timestamptz IS NULL OR (i.last_seen_at,i.id)<($22,$23)) ORDER BY i.last_seen_at DESC,i.id DESC LIMIT $24")
+        let query = sqlx::query_as(Self::ITEM_PAGE)
             .bind(filter.organization_id)
             .bind(filter.project_id)
             .bind(filter.application_id)
@@ -701,16 +1436,43 @@ impl InventoryRepository {
             user_id,
             expected_updated_at,
         } = input;
-        sqlx::query_as("INSERT INTO runtime_behavior_user_labels(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,display_name,created_by_user_id,updated_by_user_id) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.identity_digest,$5,$6,$6 FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 ON CONFLICT (organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest) DO UPDATE SET display_name=EXCLUDED.display_name,updated_by_user_id=EXCLUDED.updated_by_user_id,updated_at=CASE WHEN runtime_behavior_user_labels.display_name=EXCLUDED.display_name THEN runtime_behavior_user_labels.updated_at ELSE now() END WHERE $7::timestamptz IS NULL OR runtime_behavior_user_labels.updated_at=$7 RETURNING display_name,created_by_user_id,updated_by_user_id,created_at,updated_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(display_name)
-            .bind(user_id)
-            .bind(expected_updated_at)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "INSERT INTO runtime_behavior_user_labels(
+                 id,organization_id,project_id,application_id,inventory_kind,
+                 identity_version,identity_digest,display_name,created_by_user_id,
+                 updated_by_user_id
+             )
+             SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,
+                 i.inventory_kind,i.identity_version,i.identity_digest,$5,$6,$6
+             FROM runtime_inventory_items i
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+                 AND i.id=$4
+             ON CONFLICT (
+                 organization_id,project_id,application_id,inventory_kind,identity_version,
+                 identity_digest
+             )
+             DO UPDATE SET display_name=EXCLUDED.display_name,
+                 updated_by_user_id=EXCLUDED.updated_by_user_id,
+                 updated_at=CASE
+                     WHEN runtime_behavior_user_labels.display_name=EXCLUDED.display_name
+                         THEN runtime_behavior_user_labels.updated_at
+                     ELSE now()
+                 END
+             WHERE $7::timestamptz IS NULL OR runtime_behavior_user_labels.updated_at=$7
+             RETURNING display_name,created_by_user_id,updated_by_user_id,created_at,
+                 updated_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(display_name)
+        .bind(user_id)
+        .bind(expected_updated_at)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Deletes the label of an inventory item's identity; with
@@ -726,14 +1488,27 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM runtime_behavior_user_labels l USING runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest AND ($5::timestamptz IS NULL OR l.updated_at=$5)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(expected_updated_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM runtime_behavior_user_labels l USING runtime_inventory_items i
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+                 AND i.id=$4
+                 AND l.organization_id=i.organization_id
+                 AND l.project_id=i.project_id
+                 AND l.application_id=i.application_id
+                 AND l.inventory_kind=i.inventory_kind
+                 AND l.identity_version=i.identity_version
+                 AND l.identity_digest=i.identity_digest
+                 AND ($5::timestamptz IS NULL OR l.updated_at=$5)",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(expected_updated_at)
+        .execute(executor)
+        .await
     }
 
     /// Reports whether the identity of an inventory item has a label.
@@ -741,10 +1516,22 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_behavior_user_labels l JOIN runtime_inventory_items i ON i.organization_id=l.organization_id AND i.project_id=l.project_id AND i.application_id=l.application_id AND i.inventory_kind=l.inventory_kind AND i.identity_version=l.identity_version AND i.identity_digest=l.identity_digest WHERE i.id=$1)")
-            .bind(item_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM runtime_behavior_user_labels l
+                 JOIN runtime_inventory_items i ON i.organization_id=l.organization_id
+                     AND i.project_id=l.project_id
+                     AND i.application_id=l.application_id
+                     AND i.inventory_kind=l.inventory_kind
+                     AND i.identity_version=l.identity_version
+                     AND i.identity_digest=l.identity_digest
+                 WHERE i.id=$1
+             )",
+        )
+        .bind(item_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Reports whether the application has this inventory item under the
@@ -760,14 +1547,24 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 AND identity_version=$5)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(identity_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_items
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+                     AND id=$4
+                     AND identity_version=$5
+             )",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(identity_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// Resolves an item id used as a list cursor into its
@@ -783,14 +1580,22 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT last_seen_at,id FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 AND identity_version=$5")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(identity_version)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT last_seen_at,id
+             FROM runtime_inventory_items
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+                 AND identity_version=$5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(identity_version)
+        .fetch_optional(executor)
+        .await
     }
 
     /// One inventory item of the application with the columns of
@@ -807,14 +1612,77 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.semantic_summary,(SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) FROM runtime_behavior_user_labels l WHERE l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest) user_label,i.first_seen_at,i.last_seen_at,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_releases r WHERE r.item_id=i.id) release_count,(SELECT count(DISTINCT s.cluster_id) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) cluster_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) namespace_count,(SELECT count(DISTINCT (s.cluster_id,s.namespace,s.workload_kind,s.workload_name)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) workload_count,(SELECT count(DISTINCT (s.cluster_id,s.pod_uid)) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) pod_count,(SELECT count(DISTINCT s.container_name) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) container_count,(SELECT count(*) FROM runtime_inventory_group_links gl WHERE gl.item_id=i.id) group_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.id=$4 AND i.identity_version=$5")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(identity_version)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT i.id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,
+                 i.semantic_summary,
+                 (
+                     SELECT jsonb_build_object(
+                         'display_name',l.display_name,'created_by_user_id',
+                         l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,
+                         'created_at',l.created_at,'updated_at',l.updated_at
+                     )
+                     FROM runtime_behavior_user_labels l
+                     WHERE l.organization_id=i.organization_id
+                         AND l.project_id=i.project_id
+                         AND l.application_id=i.application_id
+                         AND l.inventory_kind=i.inventory_kind
+                         AND l.identity_version=i.identity_version
+                         AND l.identity_digest=i.identity_digest
+                 ) user_label,
+                 i.first_seen_at,i.last_seen_at,i.occurrence_count,
+                 (
+                     SELECT count(*)
+                     FROM runtime_inventory_releases r
+                     WHERE r.item_id=i.id
+                 ) release_count,
+                 (
+                     SELECT count(DISTINCT s.cluster_id)
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                 ) cluster_count,
+                 (
+                     SELECT count(DISTINCT (s.cluster_id,s.namespace))
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                 ) namespace_count,
+                 (
+                     SELECT count(
+                         DISTINCT (
+                             s.cluster_id,s.namespace,s.workload_kind,s.workload_name
+                         )
+                     )
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                 ) workload_count,
+                 (
+                     SELECT count(DISTINCT (s.cluster_id,s.pod_uid))
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                 ) pod_count,
+                 (
+                     SELECT count(DISTINCT s.container_name)
+                     FROM runtime_inventory_sightings s
+                     WHERE s.item_id=i.id
+                 ) container_count,
+                 (
+                     SELECT count(*)
+                     FROM runtime_inventory_group_links gl
+                     WHERE gl.item_id=i.id
+                 ) group_count
+             FROM runtime_inventory_items i
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+                 AND i.id=$4
+                 AND i.identity_version=$5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(identity_version)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Summarises the policy evaluations of an item's sightings: how many
@@ -831,14 +1699,65 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('placement_count',count(*),'evaluation_pending',count(*) FILTER (WHERE e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$5),'verdicts',jsonb_build_object('expected',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='expected'),'requires_review',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='requires_review'),'policy_conflict',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='policy_conflict'),'unclassified',count(*) FILTER (WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$5 AND e.verdict='unclassified'))) FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(evaluator_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_build_object(
+                 'placement_count',count(*),'evaluation_pending',
+                 count(*) FILTER (
+                     WHERE e.item_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$5
+                 ),
+                 'verdicts',
+                 jsonb_build_object(
+                     'expected',
+                     count(*) FILTER (
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=$5
+                         AND e.verdict='expected'
+                     ),
+                     'requires_review',
+                     count(*) FILTER (
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=$5
+                         AND e.verdict='requires_review'
+                     ),
+                     'policy_conflict',
+                     count(*) FILTER (
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=$5
+                         AND e.verdict='policy_conflict'
+                     ),
+                     'unclassified',
+                     count(*) FILTER (
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=$5
+                         AND e.verdict='unclassified'
+                     )
+                 )
+             )
+             FROM runtime_inventory_sightings s
+             LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id
+                 AND e.cluster_id=s.cluster_id
+                 AND e.namespace=s.namespace
+                 AND e.workload_kind=s.workload_kind
+                 AND e.workload_name=s.workload_name
+                 AND e.pod_uid=s.pod_uid
+                 AND e.container_name=s.container_name
+             LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id
+                 AND ps.project_id=s.project_id
+                 AND ps.application_id=s.application_id
+             WHERE s.organization_id=$1
+                 AND s.project_id=$2
+                 AND s.application_id=$3
+                 AND s.item_id=$4",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(evaluator_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// A page of the application's releases, newest deployment first, after
@@ -866,17 +1785,161 @@ impl InventoryRepository {
             cursor_release_id,
             fetch_limit,
         } = input;
-        sqlx::query_as("SELECT r.id release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,r.version,r.deployed_at,CASE WHEN ir.release_id IS NOT NULL AND ir.occurrence_count>0 THEN 'observed' WHEN EXISTS(SELECT 1 FROM projects p WHERE p.id=r.project_id AND r.deployed_at<p.runtime_closed_before) THEN 'unknown' WHEN EXISTS(SELECT 1 FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) THEN 'not_observed' ELSE 'unknown' END presence,ir.occurrence_count,ir.first_seen_at,ir.last_seen_at,(SELECT count(*) FROM runtime_events e WHERE e.organization_id=r.organization_id AND e.project_id=r.project_id AND e.application_id=r.application_id AND e.release_id=r.id) release_evidence_count FROM releases r JOIN applications a ON a.id=r.application_id LEFT JOIN runtime_inventory_releases ir ON ir.release_id=r.id AND ir.item_id=$4 WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($5::timestamptz IS NULL OR (r.deployed_at,r.id)<($5,$6)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $7")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(cursor_deployed_at)
-            .bind(cursor_release_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT r.id release_id,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) release_display_name,
+                 r.version,r.deployed_at,
+                 CASE
+                     WHEN ir.release_id IS NOT NULL AND ir.occurrence_count>0 THEN 'observed'
+                     WHEN EXISTS(
+                         SELECT 1
+                         FROM projects p
+                         WHERE p.id=r.project_id
+                             AND r.deployed_at<p.runtime_closed_before
+                     )
+                         THEN 'unknown'
+                     WHEN EXISTS(
+                         SELECT 1
+                         FROM runtime_events e
+                         WHERE e.organization_id=r.organization_id
+                             AND e.project_id=r.project_id
+                             AND e.application_id=r.application_id
+                             AND e.release_id=r.id
+                     )
+                         THEN 'not_observed'
+                     ELSE 'unknown'
+                 END presence,
+                 ir.occurrence_count,ir.first_seen_at,ir.last_seen_at,
+                 (
+                     SELECT count(*)
+                     FROM runtime_events e
+                     WHERE e.organization_id=r.organization_id
+                         AND e.project_id=r.project_id
+                         AND e.application_id=r.application_id
+                         AND e.release_id=r.id
+                 ) release_evidence_count
+             FROM releases r
+             JOIN applications a ON a.id=r.application_id
+             LEFT JOIN runtime_inventory_releases ir ON ir.release_id=r.id
+                 AND ir.item_id=$4
+             WHERE r.organization_id=$1
+                 AND r.project_id=$2
+                 AND r.application_id=$3
+                 AND ($5::timestamptz IS NULL OR (r.deployed_at,r.id)<($5,$6))
+             ORDER BY r.deployed_at DESC,r.id DESC
+             LIMIT $7",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(cursor_deployed_at)
+        .bind(cursor_release_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
+
+    /// The statement behind [`Self::sighting_page`].
+    const SIGHTING_PAGE: &str =
+        "SELECT s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,
+             s.pod_name,s.container_name,s.occurrence_count,s.first_seen_at,
+             s.last_seen_at,
+             jsonb_build_object(
+                 'state',CASE WHEN e.item_id IS NULL
+                 OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                 OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE 'current' END,
+                     'verdict',CASE WHEN e.item_id IS NULL
+                 OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                 OR e.evaluator_version<>$13 THEN NULL ELSE e.verdict END,'reason_code',
+                     CASE WHEN e.item_id IS NULL
+                 OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                 OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE e.reason_code END,
+                     'winning_revision_id',
+                     CASE
+                         WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                             AND e.evaluator_version=$13
+                             THEN e.winning_revision_id
+                     END,
+                     'explanation',
+                     CASE
+                         WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                             AND e.evaluator_version=$13
+                             THEN e.explanation
+                         ELSE '{}'::jsonb
+                     END,
+                     'evaluated_at',
+                     CASE
+                         WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                             AND e.evaluator_version=$13
+                             THEN e.evaluated_at
+                     END
+             ) policy_evaluation,
+             x.summary active_suppression,
+             (
+                 x.summary IS NULL
+                 AND (
+                     e.item_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$13
+                     OR e.verdict<>'expected'
+                 )
+             ) actionable
+         FROM runtime_inventory_sightings s
+         LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id
+             AND e.cluster_id=s.cluster_id
+             AND e.namespace=s.namespace
+             AND e.workload_kind=s.workload_kind
+             AND e.workload_name=s.workload_name
+             AND e.pod_uid=s.pod_uid
+             AND e.container_name=s.container_name
+         LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id
+             AND ps.project_id=s.project_id
+             AND ps.application_id=s.application_id
+         LEFT JOIN runtime_inventory_items i ON i.id=s.item_id
+         LEFT JOIN LATERAL (
+             SELECT jsonb_build_object(
+                 'id',z.id,'reason',z.reason,'expires_at',z.expires_at,'created_at',
+                 z.created_at
+             ) summary
+             FROM runtime_policy_suppressions z
+             WHERE z.organization_id=s.organization_id
+                 AND z.project_id=s.project_id
+                 AND z.application_id=s.application_id
+                 AND z.identity_version=i.identity_version
+                 AND z.identity_digest=i.identity_digest
+                 AND z.cancelled_at IS NULL
+                 AND z.expires_at>now()
+                 AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids))
+                 AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces))
+                 AND (
+                     cardinality(z.workload_kinds)=0
+                     OR s.workload_kind=ANY(z.workload_kinds)
+                 )
+                 AND (
+                     cardinality(z.workload_names)=0
+                     OR s.workload_name=ANY(z.workload_names)
+                 )
+             ORDER BY z.expires_at,z.id
+             LIMIT 1
+         ) x ON true
+         WHERE s.organization_id=$1
+             AND s.project_id=$2
+             AND s.application_id=$3
+             AND s.item_id=$4
+             AND (
+                 $5::timestamptz IS NULL
+                 OR (
+                     s.last_seen_at,s.cluster_id,s.namespace,s.workload_kind,
+                     s.workload_name,s.pod_uid,s.container_name
+                 )<($5,$6,$7,$8,$9,$10,$11)
+             )
+         ORDER BY s.last_seen_at DESC,s.cluster_id DESC,s.namespace DESC,
+             s.workload_kind DESC,s.workload_name DESC,s.pod_uid DESC,
+             s.container_name DESC
+         LIMIT $12";
 
     /// A page of an item's sightings, most recent first, after the cursor
     /// when one is given, each with its policy evaluation and the active
@@ -908,7 +1971,7 @@ impl InventoryRepository {
             fetch_limit,
             evaluator_version,
         } = input;
-        sqlx::query_as("SELECT s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.pod_name,s.container_name,s.occurrence_count,s.first_seen_at,s.last_seen_at,jsonb_build_object('state',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE 'current' END,'verdict',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN NULL ELSE e.verdict END,'reason_code',CASE WHEN e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 THEN 'evaluation_pending' ELSE e.reason_code END,'winning_revision_id',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.winning_revision_id END,'explanation',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.explanation ELSE '{}'::jsonb END,'evaluated_at',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$13 THEN e.evaluated_at END) policy_evaluation,x.summary active_suppression,(x.summary IS NULL AND (e.item_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$13 OR e.verdict<>'expected')) actionable FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations e ON e.item_id=s.item_id AND e.cluster_id=s.cluster_id AND e.namespace=s.namespace AND e.workload_kind=s.workload_kind AND e.workload_name=s.workload_name AND e.pod_uid=s.pod_uid AND e.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id LEFT JOIN runtime_inventory_items i ON i.id=s.item_id LEFT JOIN LATERAL (SELECT jsonb_build_object('id',z.id,'reason',z.reason,'expires_at',z.expires_at,'created_at',z.created_at) summary FROM runtime_policy_suppressions z WHERE z.organization_id=s.organization_id AND z.project_id=s.project_id AND z.application_id=s.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR s.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR s.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR s.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR s.workload_name=ANY(z.workload_names)) ORDER BY z.expires_at,z.id LIMIT 1) x ON true WHERE s.organization_id=$1 AND s.project_id=$2 AND s.application_id=$3 AND s.item_id=$4 AND ($5::timestamptz IS NULL OR (s.last_seen_at,s.cluster_id,s.namespace,s.workload_kind,s.workload_name,s.pod_uid,s.container_name)<($5,$6,$7,$8,$9,$10,$11)) ORDER BY s.last_seen_at DESC,s.cluster_id DESC,s.namespace DESC,s.workload_kind DESC,s.workload_name DESC,s.pod_uid DESC,s.container_name DESC LIMIT $12")
+        sqlx::query_as(Self::SIGHTING_PAGE)
             .bind(organization_id)
             .bind(project_id)
             .bind(application_id)
@@ -945,15 +2008,51 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT g.id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name,g.event_kind,COALESCE((SELECT jsonb_agg(jsonb_build_object('display_name',ul.display_name,'created_by_user_id',ul.created_by_user_id,'updated_by_user_id',ul.updated_by_user_id,'created_at',ul.created_at,'updated_at',ul.updated_at) ORDER BY ul.display_name,ul.id) FROM runtime_inventory_group_links x JOIN runtime_inventory_items xi ON xi.id=x.item_id JOIN runtime_behavior_user_labels ul ON ul.organization_id=xi.organization_id AND ul.project_id=xi.project_id AND ul.application_id=xi.application_id AND ul.inventory_kind=xi.inventory_kind AND ul.identity_version=xi.identity_version AND ul.identity_digest=xi.identity_digest WHERE x.group_id=g.id),'[]'::jsonb) user_labels,g.status,g.first_seen_at,g.last_seen_at,g.occurrence_count FROM runtime_inventory_group_links l JOIN runtime_event_groups g ON g.id=l.group_id WHERE l.organization_id=$1 AND l.project_id=$2 AND l.application_id=$3 AND l.item_id=$4 AND ($5::uuid IS NULL OR g.id<$5) ORDER BY g.id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT g.id,g.cluster_id,g.namespace,g.workload_kind,g.workload_name,
+                 g.event_kind,
+                 COALESCE(
+                     (
+                         SELECT jsonb_agg(
+                             jsonb_build_object(
+                                 'display_name',ul.display_name,'created_by_user_id',
+                                 ul.created_by_user_id,'updated_by_user_id',
+                                 ul.updated_by_user_id,'created_at',ul.created_at,
+                                 'updated_at',ul.updated_at
+                             ) ORDER BY ul.display_name,
+                             ul.id
+                         )
+                         FROM runtime_inventory_group_links x
+                         JOIN runtime_inventory_items xi ON xi.id=x.item_id
+                         JOIN runtime_behavior_user_labels ul ON ul.organization_id=xi.organization_id
+                             AND ul.project_id=xi.project_id
+                             AND ul.application_id=xi.application_id
+                             AND ul.inventory_kind=xi.inventory_kind
+                             AND ul.identity_version=xi.identity_version
+                             AND ul.identity_digest=xi.identity_digest
+                         WHERE x.group_id=g.id
+                     ),
+                     '[]'::jsonb
+                 ) user_labels,
+                 g.status,g.first_seen_at,g.last_seen_at,g.occurrence_count
+             FROM runtime_inventory_group_links l
+             JOIN runtime_event_groups g ON g.id=l.group_id
+             WHERE l.organization_id=$1
+                 AND l.project_id=$2
+                 AND l.application_id=$3
+                 AND l.item_id=$4
+                 AND ($5::uuid IS NULL OR g.id<$5)
+             ORDER BY g.id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Resolves an event id used as an occurrence cursor into its
@@ -970,14 +2069,23 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT e.observed_at,e.id FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.item_id=$4 AND e.id=$5")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(event_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT e.observed_at,e.id
+             FROM runtime_inventory_event_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.organization_id=$1
+                 AND m.project_id=$2
+                 AND m.application_id=$3
+                 AND m.item_id=$4
+                 AND e.id=$5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(event_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of an item's occurrences, newest first, after the cursor when
@@ -1004,17 +2112,39 @@ impl InventoryRepository {
             cursor_id,
             fetch_limit,
         } = input;
-        sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.cluster_id,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_name,e.process_command,e.event_kind,e.payload,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE m.organization_id=$1 AND m.project_id=$2 AND m.application_id=$3 AND m.item_id=$4 AND m.identity_version=$5 AND ($6::timestamptz IS NULL OR (e.observed_at,e.id)<($6,$7)) ORDER BY e.observed_at DESC,e.id DESC LIMIT $8")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(identity_version)
-            .bind(cursor_observed_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.observed_at,e.cluster_id,e.node_name,e.namespace,
+                 e.pod_uid,e.pod_name,e.container_name,e.process_command,e.event_kind,
+                 e.payload,e.release_id,r.version release_version,
+                 CASE
+                     WHEN r.id IS NULL THEN 'Unattributed'
+                     ELSE release_display_name(
+                         a.name,r.source,r.version,r.identity_digest,r.identity_components
+                     )
+                 END release_display_name
+             FROM runtime_inventory_event_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             LEFT JOIN releases r ON r.id=e.release_id
+             LEFT JOIN applications a ON a.id=r.application_id
+             WHERE m.organization_id=$1
+                 AND m.project_id=$2
+                 AND m.application_id=$3
+                 AND m.item_id=$4
+                 AND m.identity_version=$5
+                 AND ($6::timestamptz IS NULL OR (e.observed_at,e.id)<($6,$7))
+             ORDER BY e.observed_at DESC,e.id DESC
+             LIMIT $8",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(identity_version)
+        .bind(cursor_observed_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One inventory item of the application with its identity.
@@ -1032,13 +2162,20 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,inventory_kind,identity_version,identity_digest,semantic_summary FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,inventory_kind,identity_version,identity_digest,semantic_summary
+             FROM runtime_inventory_items
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The inventory identity behind a runtime group of the application,
@@ -1059,13 +2196,31 @@ impl InventoryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT i.id item_id,i.inventory_kind,i.identity_version,i.identity_digest,i.semantic_summary,g.cluster_id,g.namespace,g.workload_kind,g.workload_name FROM runtime_event_groups g JOIN runtime_inventory_group_links l ON l.organization_id=g.organization_id AND l.project_id=g.project_id AND l.application_id=g.application_id AND l.group_id=g.id JOIN runtime_inventory_items i ON i.organization_id=l.organization_id AND i.project_id=l.project_id AND i.application_id=l.application_id AND i.id=l.item_id WHERE g.organization_id=$1 AND g.project_id=$2 AND g.application_id=$3 AND g.id=$4 ORDER BY i.id LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(group_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT i.id item_id,i.inventory_kind,i.identity_version,i.identity_digest,
+                 i.semantic_summary,g.cluster_id,g.namespace,g.workload_kind,g.workload_name
+             FROM runtime_event_groups g
+             JOIN runtime_inventory_group_links l ON l.organization_id=g.organization_id
+                 AND l.project_id=g.project_id
+                 AND l.application_id=g.application_id
+                 AND l.group_id=g.id
+             JOIN runtime_inventory_items i ON i.organization_id=l.organization_id
+                 AND i.project_id=l.project_id
+                 AND i.application_id=l.application_id
+                 AND i.id=l.item_id
+             WHERE g.organization_id=$1
+                 AND g.project_id=$2
+                 AND g.application_id=$3
+                 AND g.id=$4
+             ORDER BY i.id
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(group_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Reports whether an inventory item of the application is linked to the
@@ -1081,14 +2236,24 @@ impl InventoryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_inventory_group_links WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND item_id=$4 AND group_id=$5)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(item_id)
-            .bind(group_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_group_links
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+                     AND item_id=$4
+                     AND group_id=$5
+             )",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(item_id)
+        .bind(group_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// How many runtime groups an inventory item is linked to.
@@ -1229,7 +2394,10 @@ mod tests {
         .await;
         let item = |executable: &'static str| async move {
             sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM runtime_inventory_items WHERE application_id=$1 AND semantic_summary->>'executable'=$2",
+                "SELECT id
+                 FROM runtime_inventory_items
+                 WHERE application_id=$1
+                     AND semantic_summary->>'executable'=$2",
             )
             .bind(own.application_id)
             .bind(executable)

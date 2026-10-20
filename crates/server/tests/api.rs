@@ -87,9 +87,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(ids.organization_id)
-        .bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -103,17 +111,30 @@ async fn list_and_detail_are_authenticated_paginated_and_tenant_safe(pool: sqlx:
     let second = bootstrap(&pool, &second_config).await.unwrap();
     second_config.api_credential = owner_session(&pool, &second).await;
     let release_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases (id,organization_id,project_id,application_id,version,deployed_at) VALUES ($1,$2,$3,$4,'v1',now())")
-        .bind(release_id)
-        .bind(first.organization_id)
-        .bind(first.project_id)
-        .bind(first.application_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO releases (
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES ($1,$2,$3,$4,'v1',now())",
+    )
+    .bind(release_id)
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(first.application_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(first.organization_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut first_event = event(first.project_id, first.application_id);
     first_event.attribution.release = Some("v1".into());
     first_event.payload = EventPayload::NetworkConnect(
@@ -203,11 +224,15 @@ async fn list_and_detail_are_authenticated_paginated_and_tenant_safe(pool: sqlx:
         detail_body["representative_event"]["payload"]["data"]["outcome"],
         "succeeded"
     );
-    sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='no_destinations' WHERE aggregate_id=$1")
-        .bind(group_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE outbox_messages
+         SET materialized_at=now(),processed_at=now(),completion_reason='no_destinations'
+         WHERE aggregate_id=$1",
+    )
+    .bind(group_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let no_destination = app
         .clone()
         .oneshot(
@@ -495,9 +520,16 @@ async fn accepted_connection_summary_is_safe_and_occurrences_are_bounded(pool: s
     let ids = bootstrap(&pool, &cfg).await.unwrap();
     let session = owner_session(&pool, &ids).await;
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,

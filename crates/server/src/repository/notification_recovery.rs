@@ -44,12 +44,18 @@ impl NotificationRecoveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT created_at,id FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(operation_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT created_at,id
+             FROM notification_recovery_operations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(operation_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of the project's recovery operations, newest first, after the
@@ -70,15 +76,26 @@ impl NotificationRecoveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,created_at,completed_at FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND ($3::text IS NULL OR command_type=$3) AND ($4::timestamptz IS NULL OR (created_at,id)<($4,$5)) ORDER BY created_at DESC,id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(command_type)
-            .bind(cursor_created_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,
+                 request_id,outcome,selected_count,retried_count,cancelled_count,
+                 skipped_count,remaining_count,created_at,completed_at
+             FROM notification_recovery_operations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND ($3::text IS NULL OR command_type=$3)
+                 AND ($4::timestamptz IS NULL OR (created_at,id)<($4,$5))
+             ORDER BY created_at DESC,id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(command_type)
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One recovery operation of the project with the columns of
@@ -93,12 +110,20 @@ impl NotificationRecoveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,created_at,completed_at FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(operation_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,project_id,command_type,target_delivery_id,actor_kind,actor_id,
+                 request_id,outcome,selected_count,retried_count,cancelled_count,
+                 skipped_count,remaining_count,created_at,completed_at
+             FROM notification_recovery_operations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(operation_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The deliveries an operation touched.
@@ -115,12 +140,20 @@ impl NotificationRecoveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT delivery_id,recovery_generation,action,created_at FROM notification_recovery_operation_deliveries WHERE organization_id=$1 AND project_id=$2 AND operation_id=$3 ORDER BY created_at,delivery_id LIMIT 200")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(operation_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT delivery_id,recovery_generation,action,created_at
+             FROM notification_recovery_operation_deliveries
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND operation_id=$3
+             ORDER BY created_at,delivery_id
+             LIMIT 200",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(operation_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// Locks the operation recorded under an idempotency key hash.
@@ -136,12 +169,19 @@ impl NotificationRecoveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT request_fingerprint,result FROM notification_recovery_operations WHERE organization_id=$1 AND project_id=$2 AND idempotency_key_hash=$3 FOR UPDATE")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(idempotency_key_hash)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT request_fingerprint,result
+             FROM notification_recovery_operations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND idempotency_key_hash=$3
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(idempotency_key_hash)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a completed recovery operation under its idempotency key.
@@ -171,26 +211,37 @@ impl NotificationRecoveryRepository {
             result,
             completed_at,
         } = input;
-        sqlx::query("INSERT INTO notification_recovery_operations (id,organization_id,project_id,command_type,target_delivery_id,actor_kind,actor_id,request_id,idempotency_key_hash,request_fingerprint,safe_filters,outcome,selected_count,retried_count,cancelled_count,skipped_count,remaining_count,result,completed_at) VALUES ($1,$2,$3,$4,$5,'user',$6,$7,$8,$9,$10,'completed',$11,$12,$13,$14,$15,$16,$17)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(command_type)
-            .bind(target_delivery_id)
-            .bind(actor_id)
-            .bind(request_id)
-            .bind(idempotency_key_hash)
-            .bind(request_fingerprint)
-            .bind(safe_filters)
-            .bind(selected_count)
-            .bind(retried_count)
-            .bind(cancelled_count)
-            .bind(skipped_count)
-            .bind(remaining_count)
-            .bind(result)
-            .bind(completed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO notification_recovery_operations (
+                 id,organization_id,project_id,command_type,target_delivery_id,actor_kind,
+                 actor_id,request_id,idempotency_key_hash,request_fingerprint,safe_filters,
+                 outcome,selected_count,retried_count,cancelled_count,skipped_count,
+                 remaining_count,result,completed_at
+             )
+             VALUES (
+                 $1,$2,$3,$4,$5,'user',$6,$7,$8,$9,$10,'completed',$11,$12,$13,$14,$15,$16,
+                 $17
+             )",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(command_type)
+        .bind(target_delivery_id)
+        .bind(actor_id)
+        .bind(request_id)
+        .bind(idempotency_key_hash)
+        .bind(request_fingerprint)
+        .bind(safe_filters)
+        .bind(selected_count)
+        .bind(retried_count)
+        .bind(cancelled_count)
+        .bind(skipped_count)
+        .bind(remaining_count)
+        .bind(result)
+        .bind(completed_at)
+        .execute(executor)
+        .await
     }
 
     /// Records what an operation did to one delivery.
@@ -206,15 +257,21 @@ impl NotificationRecoveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO notification_recovery_operation_deliveries (operation_id,organization_id,project_id,delivery_id,recovery_generation,action) VALUES ($1,$2,$3,$4,$5,$6)")
-            .bind(operation_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .bind(recovery_generation)
-            .bind(action)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO notification_recovery_operation_deliveries (
+                 operation_id,organization_id,project_id,delivery_id,recovery_generation,
+                 action
+             )
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(operation_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .bind(recovery_generation)
+        .bind(action)
+        .execute(executor)
+        .await
     }
 }
 
@@ -324,11 +381,15 @@ mod tests {
         .unwrap();
 
         let retry = record(&pool, &own, "retry", Some(delivery), 1).await;
-        sqlx::query("UPDATE notification_recovery_operations SET created_at=now()-interval '1 minute' WHERE id=$1")
-            .bind(retry)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE notification_recovery_operations
+             SET created_at=now()-interval '1 minute'
+             WHERE id=$1",
+        )
+        .bind(retry)
+        .execute(&pool)
+        .await
+        .unwrap();
         let bulk = record(&pool, &own, "bulk_retry", None, 2).await;
 
         let existing: Existing = NotificationRecoveryRepository::by_idempotency_key_for_update(

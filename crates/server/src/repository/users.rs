@@ -51,9 +51,39 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("WITH candidates AS (SELECT u.id user_id,m.organization_id FROM users u JOIN organization_memberships m ON m.user_id=u.id AND m.role='owner' WHERE u.email_verified_at IS NULL AND u.created_at<now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id=u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships other WHERE other.organization_id=m.organization_id AND other.user_id<>u.id) AND NOT EXISTS(SELECT 1 FROM organization_memberships external WHERE external.user_id=u.id AND external.organization_id<>m.organization_id) LIMIT 100), deleted_organizations AS (DELETE FROM organizations o USING candidates c WHERE o.id=c.organization_id RETURNING c.user_id) DELETE FROM users u USING deleted_organizations d WHERE u.id=d.user_id")
-            .execute(executor)
-            .await
+        sqlx::query(
+            "WITH candidates AS (
+                 SELECT u.id user_id,m.organization_id
+                 FROM users u
+                 JOIN organization_memberships m ON m.user_id=u.id
+                     AND m.role='owner'
+                 WHERE u.email_verified_at IS NULL
+                     AND u.created_at<now()-interval '7 days'
+                     AND NOT EXISTS(SELECT 1 FROM user_sessions s WHERE s.user_id=u.id)
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM organization_memberships other
+                         WHERE other.organization_id=m.organization_id
+                             AND other.user_id<>u.id
+                     )
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM organization_memberships external
+                         WHERE external.user_id=u.id
+                             AND external.organization_id<>m.organization_id
+                     )
+                 LIMIT 100
+             ),
+                 deleted_organizations AS (
+                     DELETE FROM organizations o USING candidates c
+                     WHERE o.id=c.organization_id
+                     RETURNING c.user_id
+                 )
+             DELETE FROM users u USING deleted_organizations d
+             WHERE u.id=d.user_id",
+        )
+        .execute(executor)
+        .await
     }
 
     /// Takes the transaction-scoped advisory lock that serialises first-run
@@ -92,10 +122,16 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO platform_role_assignments(user_id,role,revoked_at) VALUES($1,'super_admin',NULL) ON CONFLICT(user_id) DO UPDATE SET role='super_admin',revoked_at=NULL,granted_at=now(),granted_by_user_id=NULL")
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO platform_role_assignments(user_id,role,revoked_at)
+             VALUES($1,'super_admin',NULL)
+             ON CONFLICT(user_id)
+             DO UPDATE SET role='super_admin',revoked_at=NULL,granted_at=now(),
+                 granted_by_user_id=NULL",
+        )
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 
     /// The sign-in projection of the user with this email, whether or not
@@ -114,10 +150,34 @@ impl UserRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND (SELECT count(*) FROM organization_memberships mx JOIN organizations ox ON ox.id=mx.organization_id WHERE mx.user_id=u.id AND ox.status='active')=1 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.email=$1 LIMIT 1")
-            .bind(email)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,
+                 o.slug organization_slug,o.name organization_name,m.role,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=u.id
+                         AND p.role='super_admin'
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 u.disabled_at,u.email_verified_at,u.preferred_locale
+             FROM users u
+             LEFT JOIN organization_memberships m ON m.user_id=u.id
+                 AND (
+                     SELECT count(*)
+                     FROM organization_memberships mx
+                     JOIN organizations ox ON ox.id=mx.organization_id
+                     WHERE mx.user_id=u.id
+                         AND ox.status='active'
+                 )=1
+             LEFT JOIN organizations o ON o.id=m.organization_id
+                 AND o.status='active'
+             WHERE u.email=$1
+             LIMIT 1",
+        )
+        .bind(email)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The sign-in projection of [`Self::sign_in_by_email`] for a user by id,
@@ -132,11 +192,28 @@ impl UserRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,o.slug organization_slug,o.name organization_name,m.role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,u.disabled_at,u.email_verified_at,u.preferred_locale FROM users u LEFT JOIN organization_memberships m ON m.user_id=u.id AND m.organization_id=$2 LEFT JOIN organizations o ON o.id=m.organization_id AND o.status='active' WHERE u.id=$1")
-            .bind(user_id)
-            .bind(organization_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id user_id,u.email,u.password_hash,u.display_name,m.organization_id,
+                 o.slug organization_slug,o.name organization_name,m.role,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=u.id
+                         AND p.role='super_admin'
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 u.disabled_at,u.email_verified_at,u.preferred_locale
+             FROM users u
+             LEFT JOIN organization_memberships m ON m.user_id=u.id
+                 AND m.organization_id=$2
+             LEFT JOIN organizations o ON o.id=m.organization_id
+                 AND o.status='active'
+             WHERE u.id=$1",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Locks the user's row for the rest of the transaction.
@@ -161,10 +238,14 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE users SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now() WHERE id=$1")
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE users
+             SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now()
+             WHERE id=$1",
+        )
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 
     /// Replaces the user's password hash.
@@ -209,12 +290,16 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE users SET preferred_locale=$2,display_name=coalesce($3,display_name),updated_at=now() WHERE id=$1")
-            .bind(user_id)
-            .bind(preferred_locale)
-            .bind(display_name)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE users
+             SET preferred_locale=$2,display_name=coalesce($3,display_name),updated_at=now()
+             WHERE id=$1",
+        )
+        .bind(user_id)
+        .bind(preferred_locale)
+        .bind(display_name)
+        .execute(executor)
+        .await
     }
 
     /// The user's password hash.
@@ -242,11 +327,26 @@ impl UserRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,(u.email_verified_at IS NOT NULL) email_verified,(u.disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=u.id AND p.revoked_at IS NULL) is_super_admin,u.created_at FROM users u WHERE ($1::uuid IS NULL OR u.id>$1) ORDER BY u.id LIMIT $2")
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,
+                 (u.email_verified_at IS NOT NULL) email_verified,
+                 (u.disabled_at IS NULL) enabled,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=u.id
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 u.created_at
+             FROM users u
+             WHERE ($1::uuid IS NULL OR u.id>$1)
+             ORDER BY u.id
+             LIMIT $2",
+        )
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Disables the user, keeping an earlier disable time, or enables them,
@@ -261,11 +361,25 @@ impl UserRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE users SET disabled_at=CASE WHEN $2 THEN coalesce(disabled_at,now()) ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING id,email,display_name,(email_verified_at IS NOT NULL) email_verified,(disabled_at IS NULL) enabled,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=users.id AND p.revoked_at IS NULL) is_super_admin,created_at")
-            .bind(user_id)
-            .bind(disabled)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE users
+             SET disabled_at=CASE WHEN $2 THEN coalesce(disabled_at,now()) ELSE NULL END,
+                 updated_at=now()
+             WHERE id=$1
+             RETURNING id,email,display_name,(email_verified_at IS NOT NULL) email_verified,
+                 (disabled_at IS NULL) enabled,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=users.id
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 created_at",
+        )
+        .bind(user_id)
+        .bind(disabled)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Reports whether the user is enabled and verified, as a super admin
@@ -277,10 +391,18 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND disabled_at IS NULL AND email_verified_at IS NOT NULL)")
-            .bind(user_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM users
+                 WHERE id=$1
+                     AND disabled_at IS NULL
+                     AND email_verified_at IS NOT NULL
+             )",
+        )
+        .bind(user_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Grants the super admin role, reinstating a revoked assignment.
@@ -292,11 +414,16 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO platform_role_assignments(user_id,role,granted_by_user_id) VALUES($1,'super_admin',$2) ON CONFLICT(user_id) DO UPDATE SET revoked_at=NULL,granted_at=now(),granted_by_user_id=$2")
-            .bind(user_id)
-            .bind(granted_by_user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO platform_role_assignments(user_id,role,granted_by_user_id)
+             VALUES($1,'super_admin',$2)
+             ON CONFLICT(user_id)
+             DO UPDATE SET revoked_at=NULL,granted_at=now(),granted_by_user_id=$2",
+        )
+        .bind(user_id)
+        .bind(granted_by_user_id)
+        .execute(executor)
+        .await
     }
 
     /// Revokes an active super admin role. A check constraint rejects
@@ -308,10 +435,15 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE platform_role_assignments SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL")
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE platform_role_assignments
+             SET revoked_at=now()
+             WHERE user_id=$1
+                 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 
     /// Locks an active user and returns their email and when it was verified.
@@ -322,10 +454,16 @@ impl UserRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>("SELECT email,email_verified_at FROM users WHERE id=$1 AND disabled_at IS NULL FOR UPDATE")
-            .bind(user_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (String, Option<DateTime<Utc>>)>(
+            "SELECT email,email_verified_at
+             FROM users
+             WHERE id=$1
+                 AND disabled_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Returns the id of the account that may sign in with this address, or
@@ -561,7 +699,8 @@ mod tests {
 
     async fn grant_super_admin(pool: &PgPool, id: Uuid) {
         sqlx::query(
-            "INSERT INTO platform_role_assignments(user_id,role,revoked_at) VALUES($1,'super_admin',NULL)",
+            "INSERT INTO platform_role_assignments(user_id,role,revoked_at)
+             VALUES($1,'super_admin',NULL)",
         )
         .bind(id)
         .execute(pool)
@@ -630,7 +769,9 @@ mod tests {
 
         let rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>, String, String)> =
             sqlx::query_as(
-                "SELECT id,email_verified_at,preferred_locale,display_name FROM users ORDER BY email",
+                "SELECT id,email_verified_at,preferred_locale,display_name
+                 FROM users
+                 ORDER BY email",
             )
             .fetch_all(&pool)
             .await
@@ -746,7 +887,8 @@ mod tests {
             (member, "member"),
         ] {
             sqlx::query(
-                "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
+                "INSERT INTO organization_memberships(organization_id,user_id,role)
+                 VALUES($1,$2,$3)",
             )
             .bind(organization)
             .bind(user)

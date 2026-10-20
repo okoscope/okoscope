@@ -60,7 +60,8 @@ pub async fn tenant(pool: &PgPool, name: &str) -> Tenant {
     .unwrap();
     let agent_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-a','test')",
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-a','test')",
     )
     .bind(agent_id)
     .bind(ids.organization_id)
@@ -159,7 +160,11 @@ pub async fn ingest(pool: &PgPool, tenant: &Tenant, events: &[RuntimeEvent]) {
 /// The ids of the tenant application's runtime groups, oldest first.
 pub async fn group_ids(pool: &PgPool, tenant: &Tenant) -> Vec<Uuid> {
     sqlx::query_scalar(
-        "SELECT id FROM runtime_event_groups WHERE organization_id=$1 AND application_id=$2 ORDER BY first_seen_at,id",
+        "SELECT id
+         FROM runtime_event_groups
+         WHERE organization_id=$1
+             AND application_id=$2
+         ORDER BY first_seen_at,id",
     )
     .bind(tenant.organization_id)
     .bind(tenant.application_id)
@@ -217,7 +222,11 @@ pub async fn observe_revision(
     .await
     .unwrap();
     sqlx::query_scalar(
-        "SELECT id FROM releases WHERE organization_id=$1 AND application_id=$2 AND identity_digest=$3",
+        "SELECT id
+         FROM releases
+         WHERE organization_id=$1
+             AND application_id=$2
+             AND identity_digest=$3",
     )
     .bind(tenant.organization_id)
     .bind(tenant.application_id)
@@ -236,7 +245,10 @@ pub async fn manual_release(
 ) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,$5,$6)",
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6)",
     )
     .bind(id)
     .bind(tenant.organization_id)
@@ -371,7 +383,11 @@ pub async fn destination(pool: &PgPool, tenant: &Tenant, name: &str) -> Uuid {
 /// The tenant's first-seen outbox messages with their groups, oldest first.
 pub async fn first_seen_messages(pool: &PgPool, tenant: &Tenant) -> Vec<(Uuid, Uuid)> {
     sqlx::query_as(
-        "SELECT id,aggregate_id FROM outbox_messages WHERE project_id=$1 AND topic='runtime_group.first_seen' ORDER BY created_at,id",
+        "SELECT id,aggregate_id
+         FROM outbox_messages
+         WHERE project_id=$1
+             AND topic='runtime_group.first_seen'
+         ORDER BY created_at,id",
     )
     .bind(tenant.project_id)
     .fetch_all(pool)

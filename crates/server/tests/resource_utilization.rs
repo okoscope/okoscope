@@ -42,8 +42,16 @@ async fn thread_activity_api_is_scoped_paginated_reconciled_and_strict(pool: sql
     let foreign = bootstrap(&pool, &config()).await.unwrap();
     let token = owner_session(&pool, &ids).await;
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'thread-api-node','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'thread-api-node','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let epoch = Uuid::new_v4();
     let base = Utc::now()
         .with_second(0)
@@ -52,13 +60,36 @@ async fn thread_activity_api_is_scoped_paginated_reconciled_and_strict(pool: sql
         .unwrap()
         - Duration::minutes(3);
     for offset in 0..3_i64 {
-        sqlx::query("INSERT INTO thread_activity_windows(id,organization_id,project_id,application_id,cluster_id,agent_id,observed_at,process_cgroup_id,process_pid,process_tgid,process_command,process_generation,observation_epoch,start_observed,window_started_at,window_ended_at,created_count,exited_count,active_at_start,active_at_end,peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps) VALUES($1,$2,$3,$4,$5,$6,$7,7,10,10,'app',1,$8,true,$9,$10,2,1,$11,$12,$13,'observed',true,0,$14,'[]'::jsonb)")
-            .bind(Uuid::new_v4()).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
-            .bind(ids.cluster_id).bind(agent_id).bind(base + Duration::minutes(offset + 1)).bind(epoch)
-            .bind(base + Duration::minutes(offset)).bind(base + Duration::minutes(offset + 1))
-            .bind(offset + 1).bind(offset + 2).bind(offset + 3)
-            .bind(serde_json::json!([{"name":"worker","created":2,"exited":1,"active":offset + 2}]))
-            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO thread_activity_windows(
+                 id,organization_id,project_id,application_id,cluster_id,agent_id,
+                 observed_at,process_cgroup_id,process_pid,process_tgid,process_command,
+                 process_generation,observation_epoch,start_observed,window_started_at,
+                 window_ended_at,created_count,exited_count,active_at_start,active_at_end,
+                 peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps
+             )
+             VALUES(
+                 $1,$2,$3,$4,$5,$6,$7,7,10,10,'app',1,$8,true,$9,$10,2,1,$11,$12,$13,
+                 'observed',true,0,$14,'[]'::jsonb
+             )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(ids.organization_id)
+        .bind(ids.project_id)
+        .bind(ids.application_id)
+        .bind(ids.cluster_id)
+        .bind(agent_id)
+        .bind(base + Duration::minutes(offset + 1))
+        .bind(epoch)
+        .bind(base + Duration::minutes(offset))
+        .bind(base + Duration::minutes(offset + 1))
+        .bind(offset + 1)
+        .bind(offset + 2)
+        .bind(offset + 3)
+        .bind(serde_json::json!([{"name":"worker","created":2,"exited":1,"active":offset + 2}]))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     let app = thread_activity_api::router(pool.clone());
     let from = base.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -204,14 +235,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(ids.organization_id)
-        .bind(token.digest().as_slice())
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -235,13 +269,16 @@ fn history_request(
 async fn ingestion_is_idempotent_and_cleanup_retries_transactionally(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config()).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-a','test')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-a','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let scope = SessionScope {
         organization_id: ids.organization_id,
         cluster_id: ids.cluster_id,
@@ -280,30 +317,48 @@ async fn ingestion_is_idempotent_and_cleanup_retries_transactionally(pool: sqlx:
         .execute(&mut *plan_tx)
         .await
         .unwrap();
-    let plan = sqlx::query("EXPLAIN SELECT bucket_start,value_sum FROM resource_rollup_points WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND metric=$4 AND step_seconds=$5 AND bucket_start >= $6 AND bucket_start < $7 ORDER BY bucket_start LIMIT 45360")
-        .bind(ids.organization_id)
-        .bind(ids.project_id)
-        .bind(ids.application_id)
-        .bind("cpu_usage_cores")
-        .bind(60_i32)
-        .bind(value.interval_start)
-        .bind(value.interval_end)
-        .fetch_all(&mut *plan_tx)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.get::<String, _>(0))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let plan = sqlx::query(
+        "EXPLAIN
+         SELECT bucket_start,value_sum
+         FROM resource_rollup_points
+         WHERE organization_id=$1
+             AND project_id=$2
+             AND application_id=$3
+             AND metric=$4
+             AND step_seconds=$5
+             AND bucket_start >= $6
+             AND bucket_start < $7
+         ORDER BY bucket_start
+         LIMIT 45360",
+    )
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind("cpu_usage_cores")
+    .bind(60_i32)
+    .bind(value.interval_start)
+    .bind(value.interval_end)
+    .fetch_all(&mut *plan_tx)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| row.get::<String, _>(0))
+    .collect::<Vec<_>>()
+    .join("\n");
     assert!(plan.contains("Index Scan"), "{plan}");
     assert!(!plan.contains("Seq Scan"), "{plan}");
     plan_tx.rollback().await.unwrap();
 
-    sqlx::query("UPDATE resource_contributions SET interval_start=interval_start-interval '30 days',interval_end=interval_end-interval '30 days' WHERE project_id=$1")
-        .bind(ids.project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE resource_contributions
+         SET interval_start=interval_start-interval '30 days',
+             interval_end=interval_end-interval '30 days'
+         WHERE project_id=$1",
+    )
+    .bind(ids.project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::raw_sql("CREATE FUNCTION fail_resource_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected resource cleanup failure'; END $$; CREATE TRIGGER fail_resource_cleanup BEFORE DELETE ON resource_contributions FOR EACH ROW EXECUTE FUNCTION fail_resource_cleanup();")
         .execute(&pool)
         .await

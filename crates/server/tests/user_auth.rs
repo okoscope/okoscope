@@ -204,10 +204,26 @@ async fn registration_login_me_logout_and_revocation(pool: sqlx::PgPool) {
     assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
 
     let replacement = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'replacement@example.com',$2,now())")
-        .bind(replacement).bind("x".repeat(32)).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) SELECT organization_id,$1,'owner' FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='owner@example.com'")
-        .bind(replacement).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at)
+         VALUES($1,'replacement@example.com',$2,now())",
+    )
+    .bind(replacement)
+    .bind("x".repeat(32))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role)
+         SELECT organization_id,$1,'owner'
+         FROM organization_memberships m
+         JOIN users u ON u.id=m.user_id
+         WHERE u.email='owner@example.com'",
+    )
+    .bind(replacement)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE users SET disabled_at=now() WHERE email='owner@example.com'")
         .execute(&pool)
         .await
@@ -246,8 +262,16 @@ async fn verification_reset_password_change_and_locale_are_authoritative(pool: s
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at) VALUES($1,$2,'verify_email',$3,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(verify_digest).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at)
+         VALUES($1,$2,'verify_email',$3,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(verify_digest)
+    .execute(&pool)
+    .await
+    .unwrap();
     let confirm = app
         .clone()
         .oneshot(
@@ -351,8 +375,16 @@ async fn verification_reset_password_change_and_locale_are_authoritative(pool: s
         .unwrap();
     assert_eq!(generic.status(), StatusCode::ACCEPTED);
     let (reset_token, reset_digest) = action_token("reset_password", 2);
-    sqlx::query("INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at) VALUES($1,$2,'reset_password',$3,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(reset_digest).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_email_actions(id,user_id,purpose,token_digest,expires_at)
+         VALUES($1,$2,'reset_password',$3,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(reset_digest)
+    .execute(&pool)
+    .await
+    .unwrap();
     let reset = app.clone().oneshot(Request::builder().method("POST").uri("/api/v1/auth/password-resets")
         .header(header::CONTENT_TYPE, "application/json").body(Body::from(format!(r#"{{"token":"{reset_token}","new_password":"reset correct horse battery staple"}}"#))).unwrap()).await.unwrap();
     assert_eq!(reset.status(), StatusCode::NO_CONTENT);
@@ -426,9 +458,15 @@ async fn login_failure_is_uniform_and_registration_is_atomic(pool: sqlx::PgPool)
 async fn zero_and_multiple_organization_login_requires_explicit_selection(pool: sqlx::PgPool) {
     let app = app(pool.clone());
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,'multi@example.com',$2,now(),'Multi User')")
-        .bind(user_id).bind(hash_password("correct horse battery staple").unwrap())
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,'multi@example.com',$2,now(),'Multi User')",
+    )
+    .bind(user_id)
+    .bind(hash_password("correct horse battery staple").unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
     let zero = login(&app, "multi@example.com").await;
     assert_eq!(zero.status(), StatusCode::OK);
     let zero_body = json(zero).await;
@@ -436,10 +474,25 @@ async fn zero_and_multiple_organization_login_requires_explicit_selection(pool: 
     assert_eq!(zero_body["requires_organization_selection"], false);
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations(id,slug,name) VALUES($1,'multi-one','One'),($2,'multi-two','Two')")
-        .bind(first).bind(second).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$3,'member'),($2,$3,'member')")
-        .bind(first).bind(second).bind(user_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO organizations(id,slug,name)
+         VALUES($1,'multi-one','One'),($2,'multi-two','Two')",
+    )
+    .bind(first)
+    .bind(second)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_memberships(organization_id,user_id,role)
+         VALUES($1,$3,'member'),($2,$3,'member')",
+    )
+    .bind(first)
+    .bind(second)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let multiple = login(&app, "multi@example.com").await;
     let cookie = multiple.headers()[header::SET_COOKIE]
         .to_str()
@@ -527,9 +580,17 @@ async fn fixture_session(
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(organization_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 

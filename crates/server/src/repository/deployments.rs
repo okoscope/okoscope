@@ -93,25 +93,40 @@ impl DeploymentRepository {
             pod_template_hash,
             observed_at,
         } = input;
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO kubernetes_workload_revisions(id,organization_id,project_id,application_id,cluster_id,release_id,identity_version,identity_digest,namespace,workload_uid,workload_kind,workload_name,replica_set_uid,replica_set_name,pod_template_hash,first_observed_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16) ON CONFLICT(application_id,cluster_id,workload_uid,replica_set_uid) DO UPDATE SET last_observed_at=GREATEST(kubernetes_workload_revisions.last_observed_at,EXCLUDED.last_observed_at) WHERE kubernetes_workload_revisions.release_id=EXCLUDED.release_id AND kubernetes_workload_revisions.identity_digest=EXCLUDED.identity_digest RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(release_id)
-            .bind(identity_version)
-            .bind(identity_digest)
-            .bind(namespace)
-            .bind(workload_uid)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(replica_set_uid)
-            .bind(replica_set_name)
-            .bind(pod_template_hash)
-            .bind(observed_at)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO kubernetes_workload_revisions(
+                 id,organization_id,project_id,application_id,cluster_id,release_id,
+                 identity_version,identity_digest,namespace,workload_uid,workload_kind,
+                 workload_name,replica_set_uid,replica_set_name,pod_template_hash,
+                 first_observed_at,last_observed_at
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+             ON CONFLICT(application_id,cluster_id,workload_uid,replica_set_uid)
+             DO UPDATE SET last_observed_at=GREATEST(
+                 kubernetes_workload_revisions.last_observed_at,EXCLUDED.last_observed_at
+             )
+             WHERE kubernetes_workload_revisions.release_id=EXCLUDED.release_id
+                 AND kubernetes_workload_revisions.identity_digest=EXCLUDED.identity_digest
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(release_id)
+        .bind(identity_version)
+        .bind(identity_digest)
+        .bind(namespace)
+        .bind(workload_uid)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(replica_set_uid)
+        .bind(replica_set_name)
+        .bind(pod_template_hash)
+        .bind(observed_at)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Takes the transaction-scoped advisory lock for one workload revision,
@@ -168,11 +183,16 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE deployment_episodes SET last_observed_at=GREATEST(last_observed_at,$2),state='active',first_ready_at=COALESCE(first_ready_at,$2) WHERE id=$1")
-            .bind(episode_id)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE deployment_episodes
+             SET last_observed_at=GREATEST(last_observed_at,$2),state='active',
+                 first_ready_at=COALESCE(first_ready_at,$2)
+             WHERE id=$1",
+        )
+        .bind(episode_id)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// The application's active episodes in the cluster with their release,
@@ -186,12 +206,20 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id,release_id FROM deployment_episodes WHERE organization_id=$1 AND application_id=$2 AND cluster_id=$3 AND state='active' ORDER BY last_observed_at DESC,id DESC")
-            .bind(organization_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT id,release_id
+             FROM deployment_episodes
+             WHERE organization_id=$1
+                 AND application_id=$2
+                 AND cluster_id=$3
+                 AND state='active'
+             ORDER BY last_observed_at DESC,id DESC",
+        )
+        .bind(organization_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// Opens an active, ready episode of a revision.
@@ -214,19 +242,26 @@ impl DeploymentRepository {
             transition_kind,
             observed_at,
         } = input;
-        sqlx::query("INSERT INTO deployment_episodes(id,organization_id,project_id,application_id,cluster_id,release_id,revision_id,occurrence_number,state,transition_kind,first_observed_at,first_ready_at,last_observed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$10,$10)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(release_id)
-            .bind(revision_id)
-            .bind(occurrence_number)
-            .bind(transition_kind)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO deployment_episodes(
+                 id,organization_id,project_id,application_id,cluster_id,release_id,
+                 revision_id,occurrence_number,state,transition_kind,first_observed_at,
+                 first_ready_at,last_observed_at
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$10,$10)",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(release_id)
+        .bind(revision_id)
+        .bind(occurrence_number)
+        .bind(transition_kind)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// Records that an episode began while another was active.
@@ -242,15 +277,23 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO deployment_episode_predecessors(organization_id,project_id,application_id,episode_id,predecessor_episode_id,observed_at,concurrent) VALUES($1,$2,$3,$4,$5,$6,true) ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(episode_id)
-            .bind(predecessor_episode_id)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO deployment_episode_predecessors(
+                 organization_id,project_id,application_id,episode_id,predecessor_episode_id,
+                 observed_at,concurrent
+             )
+             VALUES($1,$2,$3,$4,$5,$6,true)
+             ON CONFLICT
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(episode_id)
+        .bind(predecessor_episode_id)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// The application's revision in the cluster with this identity digest.
@@ -265,14 +308,22 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM kubernetes_workload_revisions WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND cluster_id=$4 AND identity_digest=$5")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(identity_digest)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM kubernetes_workload_revisions
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND cluster_id=$4
+                 AND identity_digest=$5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(identity_digest)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a readiness snapshot of a revision, once per snapshot id.
@@ -297,21 +348,30 @@ impl DeploymentRepository {
             ready_pod_count,
             workload_ready_pod_count,
         } = input;
-        sqlx::query("INSERT INTO kubernetes_revision_snapshots(organization_id,project_id,application_id,cluster_id,revision_id,snapshot_id,observed_at,initialized,continuous,pod_count,ready_pod_count,workload_ready_pod_count) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(revision_id)
-            .bind(snapshot_id)
-            .bind(observed_at)
-            .bind(initialized)
-            .bind(continuous)
-            .bind(pod_count)
-            .bind(ready_pod_count)
-            .bind(workload_ready_pod_count)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO kubernetes_revision_snapshots(
+                 organization_id,project_id,application_id,cluster_id,revision_id,
+                 snapshot_id,observed_at,initialized,continuous,pod_count,ready_pod_count,
+                 workload_ready_pod_count
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             ON CONFLICT
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(revision_id)
+        .bind(snapshot_id)
+        .bind(observed_at)
+        .bind(initialized)
+        .bind(continuous)
+        .bind(pod_count)
+        .bind(ready_pod_count)
+        .bind(workload_ready_pod_count)
+        .execute(executor)
+        .await
     }
 
     /// Ends the revision's open episode when it has had no pods for
@@ -326,13 +386,20 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE deployment_episodes SET pod_count=0,ready_pod_count=0,workload_ready_pod_count=$2,snapshot_observed_at=$3,state='inactive',ended_at=$3 WHERE revision_id=$1 AND state<>'inactive' AND $3>=last_observed_at+($4::double precision*interval '1 second')")
-            .bind(revision_id)
-            .bind(workload_ready_pod_count)
-            .bind(observed_at)
-            .bind(stabilization_seconds)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE deployment_episodes
+             SET pod_count=0,ready_pod_count=0,workload_ready_pod_count=$2,
+                 snapshot_observed_at=$3,state='inactive',ended_at=$3
+             WHERE revision_id=$1
+                 AND state<>'inactive'
+                 AND $3>=last_observed_at+($4::double precision*interval '1 second')",
+        )
+        .bind(revision_id)
+        .bind(workload_ready_pod_count)
+        .bind(observed_at)
+        .bind(stabilization_seconds)
+        .execute(executor)
+        .await
     }
 
     /// Records the pod counts of the revision's open episode.
@@ -347,14 +414,20 @@ impl DeploymentRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE deployment_episodes SET pod_count=$2,ready_pod_count=$3,workload_ready_pod_count=$4,snapshot_observed_at=$5,last_observed_at=GREATEST(last_observed_at,$5) WHERE revision_id=$1 AND state<>'inactive'")
-            .bind(revision_id)
-            .bind(pod_count)
-            .bind(ready_pod_count)
-            .bind(workload_ready_pod_count)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE deployment_episodes
+             SET pod_count=$2,ready_pod_count=$3,workload_ready_pod_count=$4,
+                 snapshot_observed_at=$5,last_observed_at=GREATEST(last_observed_at,$5)
+             WHERE revision_id=$1
+                 AND state<>'inactive'",
+        )
+        .bind(revision_id)
+        .bind(pod_count)
+        .bind(ready_pod_count)
+        .bind(workload_ready_pod_count)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 }
 
@@ -602,7 +675,10 @@ mod tests {
         .await
         .unwrap();
         let concurrent: bool = sqlx::query_scalar(
-            "SELECT concurrent FROM deployment_episode_predecessors WHERE episode_id=$1 AND predecessor_episode_id=$2",
+            "SELECT concurrent
+             FROM deployment_episode_predecessors
+             WHERE episode_id=$1
+                 AND predecessor_episode_id=$2",
         )
         .bind(second)
         .bind(first)

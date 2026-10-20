@@ -57,12 +57,32 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
     let ids = bootstrap(&pool, &config()).await.unwrap();
     let baseline_id = Uuid::new_v4();
     let target_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'benchmark-baseline',now()-interval '1 hour'),($5,$2,$3,$4,'benchmark-target',now())")
-        .bind(baseline_id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(target_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,'benchmark-baseline',now()-interval '1 hour'),
+             ($5,$2,$3,$4,'benchmark-target',now())",
+    )
+    .bind(baseline_id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(target_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','benchmark')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'benchmark-node','benchmark')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let events: Vec<_> = (0..EVENT_COUNT)
         .map(|index| RuntimeEvent {
             id: Uuid::new_v4(),
@@ -130,10 +150,26 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
 
     let list_started = Instant::now();
     let listed: Vec<(Uuid, i64, i64)> = sqlx::query_as(
-        "SELECT i.id,i.occurrence_count,(SELECT count(*) FROM runtime_inventory_sightings s WHERE s.item_id=i.id) sighting_count FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 ORDER BY i.last_seen_at DESC,i.id DESC LIMIT 200",
+        "SELECT i.id,i.occurrence_count,
+             (
+                 SELECT count(*)
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+             ) sighting_count
+         FROM runtime_inventory_items i
+         WHERE i.organization_id=$1
+             AND i.project_id=$2
+             AND i.application_id=$3
+             AND i.identity_version=2
+         ORDER BY i.last_seen_at DESC,i.id DESC
+         LIMIT 200",
     )
-    .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
-    .fetch_all(&pool).await.unwrap();
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     let list_duration = list_started.elapsed();
     assert_eq!(listed.len(), ITEM_COUNT.min(200));
     assert!(list_duration <= MAX_LIST_QUERY_DURATION);
@@ -255,12 +291,49 @@ async fn inventory_projection_and_read_queries_meet_documented_acceptance_limits
     diff_samples.sort_unstable();
     let mut plans = Vec::new();
     for kind in ["process", "destination", "domain", "syscall"] {
-        let plan: Vec<String> = sqlx::query_scalar("EXPLAIN SELECT identity_digest,occurrence_count FROM runtime_inventory_items WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND identity_version=2 AND inventory_kind=$4 ORDER BY occurrence_count DESC,identity_digest ASC LIMIT 10")
-            .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(kind).fetch_all(&pool).await.unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN
+             SELECT identity_digest,occurrence_count
+             FROM runtime_inventory_items
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND identity_version=2
+                 AND inventory_kind=$4
+             ORDER BY occurrence_count DESC,identity_digest ASC
+             LIMIT 10",
+        )
+        .bind(ids.organization_id)
+        .bind(ids.project_id)
+        .bind(ids.application_id)
+        .bind(kind)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         plans.push((kind, plan));
     }
-    let diff_plan: Vec<String> = sqlx::query_scalar("EXPLAIN WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1),t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2) SELECT COALESCE(t.group_id,b.group_id) FROM b FULL OUTER JOIN t ON t.group_id=b.group_id ORDER BY ABS(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)) DESC LIMIT 10")
-        .bind(baseline_id).bind(target_id).fetch_all(&pool).await.unwrap();
+    let diff_plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN WITH b AS (
+             SELECT group_id,occurrence_count
+             FROM runtime_event_group_releases
+             WHERE release_id=$1
+         ),
+             t AS (
+                 SELECT group_id,occurrence_count
+                 FROM runtime_event_group_releases
+                 WHERE release_id=$2
+             )
+         SELECT COALESCE(t.group_id,b.group_id)
+         FROM b FULL OUTER
+         JOIN t ON t.group_id=b.group_id
+         ORDER BY ABS(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)) DESC
+         LIMIT 10",
+    )
+    .bind(baseline_id)
+    .bind(target_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     let hardening_plans = hardening_plans(&pool, &ids, baseline_id).await;
 
     eprintln!(
@@ -287,9 +360,35 @@ async fn hardening_plans(
     ids: &server::bootstrap::BootstrapIds,
     release_id: Uuid,
 ) -> Vec<(String, Vec<String>)> {
-    let summary: Vec<String> = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS) SELECT i.inventory_kind,count(*) FROM runtime_inventory_items i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) AND EXISTS(SELECT 1 FROM runtime_inventory_sightings s WHERE s.item_id=i.id AND s.namespace='production') GROUP BY i.inventory_kind")
-        .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(release_id)
-        .fetch_all(pool).await.unwrap();
+    let summary: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, BUFFERS)
+         SELECT i.inventory_kind,count(*)
+         FROM runtime_inventory_items i
+         WHERE i.organization_id=$1
+             AND i.project_id=$2
+             AND i.application_id=$3
+             AND i.identity_version=2
+             AND EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_releases r
+                 WHERE r.item_id=i.id
+                     AND r.release_id=$4
+             )
+             AND EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_sightings s
+                 WHERE s.item_id=i.id
+                     AND s.namespace='production'
+             )
+         GROUP BY i.inventory_kind",
+    )
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(release_id)
+    .fetch_all(pool)
+    .await
+    .unwrap();
     let mut plans = vec![("summary".to_owned(), summary)];
     for (name, expression) in [
         ("cluster", "s.cluster_id::text"),
@@ -299,7 +398,23 @@ async fn hardening_plans(
         ("container_name", "s.container_name"),
     ] {
         let sql = format!(
-            "EXPLAIN (ANALYZE, BUFFERS) SELECT {expression},count(DISTINCT i.id),sum(s.occurrence_count) FROM runtime_inventory_sightings s JOIN runtime_inventory_items i ON i.id=s.item_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND EXISTS(SELECT 1 FROM runtime_inventory_releases r WHERE r.item_id=i.id AND r.release_id=$4) GROUP BY {expression} ORDER BY count(DISTINCT i.id) DESC,{expression} ASC LIMIT 201"
+            "EXPLAIN (ANALYZE, BUFFERS)
+             SELECT {expression},count(DISTINCT i.id),sum(s.occurrence_count)
+             FROM runtime_inventory_sightings s
+             JOIN runtime_inventory_items i ON i.id=s.item_id
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+                 AND i.identity_version=2
+                 AND EXISTS(
+                     SELECT 1
+                     FROM runtime_inventory_releases r
+                     WHERE r.item_id=i.id
+                         AND r.release_id=$4
+                 )
+             GROUP BY {expression}
+             ORDER BY count(DISTINCT i.id) DESC,{expression} ASC
+             LIMIT 201"
         );
         let plan = sqlx::query_scalar(&sql)
             .bind(ids.organization_id)
@@ -321,9 +436,16 @@ async fn inbound_remote_cardinality_does_not_expand_inventory_identity(pool: sql
     const ENDPOINT_COUNT: usize = 100;
     let ids = bootstrap(&pool, &config()).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','benchmark')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'benchmark-node','benchmark')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let events: Vec<_> = (0..ACCEPT_COUNT)
         .map(|index| RuntimeEvent {
             id: Uuid::new_v4(),
@@ -381,7 +503,17 @@ async fn inbound_remote_cardinality_does_not_expand_inventory_identity(pool: sql
     assert_eq!(usize::try_from(accepted).unwrap(), ACCEPT_COUNT);
     assert!(started.elapsed() <= MAX_PROJECTION_DURATION);
     let counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_inventory_items WHERE inventory_kind='inbound_endpoint'),(SELECT count(*) FROM runtime_event_groups WHERE event_kind='network.accept'),(SELECT count(*) FROM runtime_events WHERE event_kind='network.accept')",
+        "SELECT (
+             SELECT count(*)
+             FROM runtime_inventory_items
+             WHERE inventory_kind='inbound_endpoint'
+         ),
+             (
+                 SELECT count(*)
+                 FROM runtime_event_groups
+                 WHERE event_kind='network.accept'
+             ),
+             (SELECT count(*) FROM runtime_events WHERE event_kind='network.accept')",
     )
     .fetch_one(&pool)
     .await
@@ -402,13 +534,16 @@ async fn concurrent_dns_group_queries_meet_aggregate_latency_limit(pool: sqlx::P
     const DNS_EVENT_COUNT: usize = 2_000;
     let ids = bootstrap(&pool, &config()).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','benchmark')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'benchmark-node','benchmark')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let names = [
         "api.internal",
         "api.internal.production.svc.cluster.local",
@@ -517,9 +652,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(ids.organization_id).bind(token.digest().as_slice())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 

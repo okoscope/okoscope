@@ -17,7 +17,124 @@ use uuid::Uuid;
 /// the transition predecessor when one was recorded, otherwise the previous
 /// deployment. Binds `$1` to the organization and `$2` to the project ids,
 /// and ends with the per-application aggregate `agg`.
-const CHANGED_CTE: &str = "WITH ranked AS (SELECT r.*,row_number() OVER(PARTITION BY application_id ORDER BY deployed_at DESC,id DESC) rn FROM releases r WHERE organization_id=$1 AND project_id=ANY($2)), pairs AS (SELECT t.organization_id,t.project_id,t.application_id,t.id target_id,t.version target_version,t.deployed_at target_deployed_at,b.id baseline_id,b.version baseline_version,b.deployed_at baseline_deployed_at FROM ranked t JOIN LATERAL (((SELECT r.*,0 priority FROM deployment_episodes te JOIN deployment_episode_predecessors x ON x.episode_id=te.id JOIN deployment_episodes pe ON pe.id=x.predecessor_episode_id JOIN releases r ON r.id=pe.release_id WHERE te.organization_id=t.organization_id AND te.application_id=t.application_id AND te.release_id=t.id ORDER BY te.first_observed_at DESC,te.id DESC,x.observed_at DESC,pe.id DESC LIMIT 1) UNION ALL (SELECT r.*,1 priority FROM releases r WHERE r.organization_id=t.organization_id AND r.application_id=t.application_id AND (r.deployed_at,r.id)<(t.deployed_at,t.id) ORDER BY r.deployed_at DESC,r.id DESC LIMIT 1)) ORDER BY priority LIMIT 1) b ON true WHERE t.rn=1), diff AS (SELECT p.*,ids.group_id,CASE WHEN b.group_id IS NULL AND EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.baseline_id AND r.deployed_at<pr.runtime_history_expired_before) THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.target_id AND r.deployed_at<pr.runtime_history_expired_before) OR NOT (EXISTS(SELECT 1 FROM runtime_event_group_releases gr WHERE gr.release_id=p.target_id AND gr.occurrence_count>0) OR EXISTS(SELECT 1 FROM runtime_events ev WHERE ev.release_id=p.target_id))) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,coalesce(t.occurrence_count,0) tc,coalesce(b.occurrence_count,0) bc FROM pairs p JOIN LATERAL (SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.target_id AND occurrence_count>0 UNION SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.baseline_id AND occurrence_count>0) ids ON true LEFT JOIN runtime_event_group_releases t ON t.release_id=p.target_id AND t.group_id=ids.group_id LEFT JOIN runtime_event_group_releases b ON b.release_id=p.baseline_id AND b.group_id=ids.group_id), agg AS (SELECT project_id,application_id,target_id,target_version,target_deployed_at,baseline_id,baseline_version,baseline_deployed_at,count(*) FILTER(WHERE classification='new')::bigint new_count,count(*) FILTER(WHERE classification='disappeared')::bigint disappeared_count,count(*) FILTER(WHERE classification='unchanged')::bigint unchanged_count,count(*)::bigint total_item_count,coalesce(sum(abs(tc-bc)),0)::bigint absolute_occurrence_delta_sum,coalesce(max(abs(tc-bc)),0)::bigint max_absolute_occurrence_delta FROM diff WHERE classification<>'unknown' GROUP BY project_id,application_id,target_id,target_version,target_deployed_at,baseline_id,baseline_version,baseline_deployed_at)";
+const CHANGED_CTE: &str = "WITH ranked AS (
+                               SELECT r.*,
+                                   row_number() OVER(
+                                       PARTITION BY application_id ORDER BY deployed_at DESC,id DESC
+                                   ) rn
+                               FROM releases r
+                               WHERE organization_id=$1
+                                   AND project_id=ANY($2)
+                           ),
+                               pairs AS (
+                                   SELECT t.organization_id,t.project_id,t.application_id,t.id target_id,
+                                       t.version target_version,t.deployed_at target_deployed_at,
+                                       b.id baseline_id,b.version baseline_version,
+                                       b.deployed_at baseline_deployed_at
+                                   FROM ranked t
+                                   JOIN LATERAL (
+                                       (
+                                           (
+                                               SELECT r.*,0 priority
+                                               FROM deployment_episodes te
+                                               JOIN deployment_episode_predecessors x ON x.episode_id=te.id
+                                               JOIN deployment_episodes pe ON pe.id=x.predecessor_episode_id
+                                               JOIN releases r ON r.id=pe.release_id
+                                               WHERE te.organization_id=t.organization_id
+                                                   AND te.application_id=t.application_id
+                                                   AND te.release_id=t.id
+                                               ORDER BY te.first_observed_at DESC,te.id DESC,
+                                                   x.observed_at DESC,pe.id DESC
+                                               LIMIT 1
+                                           ) UNION ALL (
+                                               SELECT r.*,1 priority
+                                               FROM releases r
+                                               WHERE r.organization_id=t.organization_id
+                                                   AND r.application_id=t.application_id
+                                                   AND (r.deployed_at,r.id)<(t.deployed_at,t.id)
+                                               ORDER BY r.deployed_at DESC,r.id DESC
+                                               LIMIT 1
+                                           )
+                                       ) ORDER BY priority LIMIT 1
+                                   ) b ON true
+                                   WHERE t.rn=1
+                               ),
+                               diff AS (
+                                   SELECT p.*,ids.group_id,
+                                       CASE
+                                           WHEN b.group_id IS NULL
+                                               AND EXISTS(
+                                                   SELECT 1
+                                                   FROM releases r
+                                                   JOIN projects pr ON pr.id=r.project_id
+                                                   WHERE r.id=p.baseline_id
+                                                       AND r.deployed_at<pr.runtime_history_expired_before
+                                               )
+                                               THEN 'unknown'
+                                           WHEN b.group_id IS NULL THEN 'new'
+                                           WHEN t.group_id IS NULL
+                                               AND (
+                                                   EXISTS(
+                                                       SELECT 1
+                                                       FROM releases r
+                                                       JOIN projects pr ON pr.id=r.project_id
+                                                       WHERE r.id=p.target_id
+                                                           AND r.deployed_at<pr.runtime_history_expired_before
+                                                   )
+                                                   OR NOT (
+                                                       EXISTS(
+                                                           SELECT 1
+                                                           FROM runtime_event_group_releases gr
+                                                           WHERE gr.release_id=p.target_id
+                                                               AND gr.occurrence_count>0
+                                                       )
+                                                       OR EXISTS(
+                                                           SELECT 1
+                                                           FROM runtime_events ev
+                                                           WHERE ev.release_id=p.target_id
+                                                       )
+                                                   )
+                                               )
+                                               THEN 'unknown'
+                                           WHEN t.group_id IS NULL THEN 'disappeared'
+                                           ELSE 'unchanged'
+                                       END classification,
+                                       coalesce(t.occurrence_count,0) tc,coalesce(b.occurrence_count,0) bc
+                                   FROM pairs p
+                                   JOIN LATERAL (
+                                       SELECT group_id
+                                       FROM runtime_event_group_releases
+                                       WHERE release_id=p.target_id
+                                           AND occurrence_count>0
+                                       UNION SELECT group_id
+                                       FROM runtime_event_group_releases
+                                       WHERE release_id=p.baseline_id
+                                           AND occurrence_count>0
+                                   ) ids ON true
+                                   LEFT JOIN runtime_event_group_releases t ON t.release_id=p.target_id
+                                       AND t.group_id=ids.group_id
+                                   LEFT JOIN runtime_event_group_releases b ON b.release_id=p.baseline_id
+                                       AND b.group_id=ids.group_id
+                               ),
+                               agg AS (
+                                   SELECT project_id,application_id,target_id,target_version,
+                                       target_deployed_at,baseline_id,baseline_version,
+                                       baseline_deployed_at,
+                                       count(*) FILTER(WHERE classification='new')::bigint new_count,
+                                       count(*) FILTER(
+                                           WHERE classification='disappeared'
+                                       )::bigint disappeared_count,
+                                       count(*) FILTER(
+                                           WHERE classification='unchanged'
+                                       )::bigint unchanged_count,
+                                       count(*)::bigint total_item_count,
+                                       coalesce(sum(abs(tc-bc)),0)::bigint absolute_occurrence_delta_sum,
+                                       coalesce(max(abs(tc-bc)),0)::bigint max_absolute_occurrence_delta
+                                   FROM diff
+                                   WHERE classification<>'unknown'
+                                   GROUP BY project_id,application_id,target_id,target_version,
+                                       target_deployed_at,baseline_id,baseline_version,baseline_deployed_at
+                               )";
 
 /// Input to [`AttentionRepository::discoveries`].
 #[derive(Debug)]
@@ -55,7 +172,31 @@ impl AttentionRepository {
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
         let sql = format!(
-            "{CHANGED_CTE} SELECT a.project_id,p.name project_name,p.slug project_slug,a.application_id,app.name application_name,app.slug application_slug,a.target_id,a.target_version,release_display_name(app.name,rt.source,rt.version,rt.identity_digest,rt.identity_components) target_display_name,a.target_deployed_at,a.baseline_id,a.baseline_version,release_display_name(app.name,rb.source,rb.version,rb.identity_digest,rb.identity_components) baseline_display_name,a.baseline_deployed_at,a.new_count,a.disappeared_count,a.unchanged_count,a.total_item_count,a.absolute_occurrence_delta_sum,a.max_absolute_occurrence_delta FROM agg a JOIN projects p ON p.organization_id=$1 AND p.id=a.project_id JOIN applications app ON app.organization_id=$1 AND app.id=a.application_id JOIN releases rt ON rt.id=a.target_id JOIN releases rb ON rb.id=a.baseline_id WHERE a.new_count+a.disappeared_count>0 ORDER BY a.new_count+a.disappeared_count DESC,a.target_deployed_at DESC,a.application_id LIMIT $3"
+            "{CHANGED_CTE}
+             SELECT a.project_id,p.name project_name,p.slug project_slug,a.application_id,
+                 app.name application_name,app.slug application_slug,a.target_id,
+                 a.target_version,
+                 release_display_name(
+                     app.name,rt.source,rt.version,rt.identity_digest,rt.identity_components
+                 ) target_display_name,
+                 a.target_deployed_at,a.baseline_id,a.baseline_version,
+                 release_display_name(
+                     app.name,rb.source,rb.version,rb.identity_digest,rb.identity_components
+                 ) baseline_display_name,
+                 a.baseline_deployed_at,a.new_count,a.disappeared_count,a.unchanged_count,
+                 a.total_item_count,a.absolute_occurrence_delta_sum,
+                 a.max_absolute_occurrence_delta
+             FROM agg a
+             JOIN projects p ON p.organization_id=$1
+                 AND p.id=a.project_id
+             JOIN applications app ON app.organization_id=$1
+                 AND app.id=a.application_id
+             JOIN releases rt ON rt.id=a.target_id
+             JOIN releases rb ON rb.id=a.baseline_id
+             WHERE a.new_count+a.disappeared_count>0
+             ORDER BY a.new_count+a.disappeared_count DESC,a.target_deployed_at DESC,
+                 a.application_id
+             LIMIT $3"
         );
         sqlx::query_as(&sql)
             .bind(organization_id)
@@ -79,7 +220,28 @@ impl AttentionRepository {
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
         let sql = format!(
-            "{CHANGED_CTE} SELECT a.project_id,p.name project_name,p.slug project_slug,a.application_id,app.name application_name,app.slug application_slug,a.target_id,a.target_version,release_display_name(app.name,rt.source,rt.version,rt.identity_digest,rt.identity_components) target_display_name,a.target_deployed_at,a.baseline_id,a.baseline_version,release_display_name(app.name,rb.source,rb.version,rb.identity_digest,rb.identity_components) baseline_display_name,a.baseline_deployed_at,a.new_count,a.disappeared_count,a.unchanged_count,a.total_item_count,a.absolute_occurrence_delta_sum,a.max_absolute_occurrence_delta FROM agg a JOIN projects p ON p.organization_id=$1 AND p.id=a.project_id JOIN applications app ON app.organization_id=$1 AND app.id=a.application_id JOIN releases rt ON rt.id=a.target_id JOIN releases rb ON rb.id=a.baseline_id WHERE a.application_id=$3"
+            "{CHANGED_CTE}
+             SELECT a.project_id,p.name project_name,p.slug project_slug,a.application_id,
+                 app.name application_name,app.slug application_slug,a.target_id,
+                 a.target_version,
+                 release_display_name(
+                     app.name,rt.source,rt.version,rt.identity_digest,rt.identity_components
+                 ) target_display_name,
+                 a.target_deployed_at,a.baseline_id,a.baseline_version,
+                 release_display_name(
+                     app.name,rb.source,rb.version,rb.identity_digest,rb.identity_components
+                 ) baseline_display_name,
+                 a.baseline_deployed_at,a.new_count,a.disappeared_count,a.unchanged_count,
+                 a.total_item_count,a.absolute_occurrence_delta_sum,
+                 a.max_absolute_occurrence_delta
+             FROM agg a
+             JOIN projects p ON p.organization_id=$1
+                 AND p.id=a.project_id
+             JOIN applications app ON app.organization_id=$1
+                 AND app.id=a.application_id
+             JOIN releases rt ON rt.id=a.target_id
+             JOIN releases rb ON rb.id=a.baseline_id
+             WHERE a.application_id=$3"
         );
         sqlx::query_as(&sql)
             .bind(organization_id)
@@ -88,6 +250,107 @@ impl AttentionRepository {
             .fetch_optional(executor)
             .await
     }
+
+    /// The statement behind [`Self::organization_totals`], which follows
+    /// [`CHANGED_CTE`].
+    #[rustfmt::skip]
+    const ORGANIZATION_TOTALS: &str =
+        "SELECT (
+             SELECT count(*)
+             FROM runtime_event_groups
+             WHERE occurrence_count>0
+                 AND organization_id=$1
+                 AND project_id=ANY($2)
+                 AND first_seen_at BETWEEN $3 AND $4
+         )::bigint new_discoveries,
+             (
+                 SELECT count(*)
+                 FROM runtime_event_groups
+                 WHERE occurrence_count>0
+                     AND organization_id=$1
+                     AND project_id=ANY($2)
+                     AND status='open'
+             )::bigint open_discoveries,
+             (
+                 SELECT count(*)
+                 FROM runtime_event_groups
+                 WHERE occurrence_count>0
+                     AND organization_id=$1
+                     AND project_id=ANY($2)
+                     AND status='acknowledged'
+             )::bigint acknowledged_discoveries,
+             (
+                 SELECT count(*)
+                 FROM agg
+                 WHERE new_count+disappeared_count>0
+             )::bigint changed_applications,
+             0::bigint projects_with_notification_problems,
+             (
+                 SELECT count(*)
+                 FROM notification_deliveries
+                 WHERE organization_id=$1
+                     AND project_id=ANY($2)
+                     AND status='failed'
+                     AND terminal_at BETWEEN $3 AND $4
+             )::bigint failed_notification_deliveries,
+             (
+                 SELECT count(*)
+                 FROM release_resource_findings
+                 WHERE organization_id=$1
+                     AND project_id=ANY($2)
+                     AND closed_at IS NULL
+             )::bigint resource_regressions,
+             (
+                 SELECT jsonb_build_object(
+                     'factual_total',count(*),'actionable_total',
+                     count(*) FILTER(
+                         WHERE (
+                             e.group_id IS NULL
+                             OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                             OR e.evaluator_version<>1
+                             OR e.verdict<>'expected'
+                         )
+                     ),
+                     'evaluation_pending',
+                     count(*) FILTER(
+                         WHERE e.group_id IS NULL
+                         OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                         OR e.evaluator_version<>1
+                     ),
+                     'expected',
+                     count(*) FILTER(
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=1
+                         AND e.verdict='expected'
+                     ),
+                     'requires_review',
+                     count(*) FILTER(
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=1
+                         AND e.verdict='requires_review'
+                     ),
+                     'policy_conflict',
+                     count(*) FILTER(
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=1
+                         AND e.verdict='policy_conflict'
+                     ),
+                     'unclassified',
+                     count(*) FILTER(
+                         WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=1
+                         AND e.verdict='unclassified'
+                     )
+                 )
+                 FROM runtime_event_groups g
+                 LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id
+                 LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id
+                     AND ps.project_id=g.project_id
+                     AND ps.application_id=g.application_id
+                 WHERE g.occurrence_count>0
+                     AND g.organization_id=$1
+                     AND g.project_id=ANY($2)
+             ) policy";
 
     /// Organization-wide attention totals over the projects: groups first
     /// seen in `[from, to]`, open and acknowledged groups, changed
@@ -110,7 +373,7 @@ impl AttentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("{CHANGED_CTE} SELECT (SELECT count(*) FROM runtime_event_groups WHERE occurrence_count>0 AND organization_id=$1 AND project_id=ANY($2) AND first_seen_at BETWEEN $3 AND $4)::bigint new_discoveries,(SELECT count(*) FROM runtime_event_groups WHERE occurrence_count>0 AND organization_id=$1 AND project_id=ANY($2) AND status='open')::bigint open_discoveries,(SELECT count(*) FROM runtime_event_groups WHERE occurrence_count>0 AND organization_id=$1 AND project_id=ANY($2) AND status='acknowledged')::bigint acknowledged_discoveries,(SELECT count(*) FROM agg WHERE new_count+disappeared_count>0)::bigint changed_applications,0::bigint projects_with_notification_problems,(SELECT count(*) FROM notification_deliveries WHERE organization_id=$1 AND project_id=ANY($2) AND status='failed' AND terminal_at BETWEEN $3 AND $4)::bigint failed_notification_deliveries,(SELECT count(*) FROM release_resource_findings WHERE organization_id=$1 AND project_id=ANY($2) AND closed_at IS NULL)::bigint resource_regressions,(SELECT jsonb_build_object('factual_total',count(*),'actionable_total',count(*) FILTER(WHERE (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>1 OR e.verdict<>'expected')),'evaluation_pending',count(*) FILTER(WHERE e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>1),'expected',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=1 AND e.verdict='expected'),'requires_review',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=1 AND e.verdict='requires_review'),'policy_conflict',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=1 AND e.verdict='policy_conflict'),'unclassified',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=1 AND e.verdict='unclassified')) FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2)) policy"))
+        sqlx::query_as(&format!("{CHANGED_CTE} {}", Self::ORGANIZATION_TOTALS))
             .bind(organization_id)
             .bind(project_ids)
             .bind(from)
@@ -138,14 +401,32 @@ impl AttentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT f.id,f.project_id,p.name project_name,p.slug project_slug,f.application_id,a.name application_name,a.slug application_slug,f.target_release_id,f.priority,f.reason_code,f.facts,f.opened_at FROM release_resource_findings f JOIN projects p ON p.organization_id=f.organization_id AND p.id=f.project_id JOIN applications a ON a.organization_id=f.organization_id AND a.project_id=f.project_id AND a.id=f.application_id WHERE f.organization_id=$1 AND f.project_id=ANY($2) AND ($3::uuid IS NULL OR f.application_id=$3) AND f.closed_at IS NULL AND f.opened_at >= $4 ORDER BY CASE f.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,f.opened_at DESC,f.id LIMIT $5")
-            .bind(organization_id)
-            .bind(project_ids)
-            .bind(application_id)
-            .bind(from)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT f.id,f.project_id,p.name project_name,p.slug project_slug,
+                 f.application_id,a.name application_name,a.slug application_slug,
+                 f.target_release_id,f.priority,f.reason_code,f.facts,f.opened_at
+             FROM release_resource_findings f
+             JOIN projects p ON p.organization_id=f.organization_id
+                 AND p.id=f.project_id
+             JOIN applications a ON a.organization_id=f.organization_id
+                 AND a.project_id=f.project_id
+                 AND a.id=f.application_id
+             WHERE f.organization_id=$1
+                 AND f.project_id=ANY($2)
+                 AND ($3::uuid IS NULL OR f.application_id=$3)
+                 AND f.closed_at IS NULL
+                 AND f.opened_at >= $4
+             ORDER BY CASE f.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
+                 f.opened_at DESC,f.id
+             LIMIT $5",
+        )
+        .bind(organization_id)
+        .bind(project_ids)
+        .bind(application_id)
+        .bind(from)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// For each `(application, target, baseline)` release pair, up to
@@ -167,14 +448,210 @@ impl AttentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH pairs AS (SELECT * FROM unnest($1::uuid[],$2::uuid[],$3::uuid[]) AS p(application_id,target_id,baseline_id)), changes AS (SELECT p.application_id,ids.group_id,CASE WHEN b.group_id IS NULL AND EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.baseline_id AND r.deployed_at<pr.runtime_history_expired_before) THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (EXISTS(SELECT 1 FROM releases r JOIN projects pr ON pr.id=r.project_id WHERE r.id=p.target_id AND r.deployed_at<pr.runtime_history_expired_before) OR NOT (EXISTS(SELECT 1 FROM runtime_event_group_releases gr WHERE gr.release_id=p.target_id AND gr.occurrence_count>0) OR EXISTS(SELECT 1 FROM runtime_events ev WHERE ev.release_id=p.target_id))) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,coalesce(b.occurrence_count,0)::bigint baseline_occurrence_count,coalesce(t.occurrence_count,0)::bigint target_occurrence_count,(coalesce(t.occurrence_count,0)-coalesce(b.occurrence_count,0))::bigint occurrence_delta,greatest(coalesce(t.last_seen_at,'epoch'),coalesce(b.last_seen_at,'epoch')) relevant_at FROM pairs p JOIN LATERAL (SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.target_id AND occurrence_count>0 UNION SELECT group_id FROM runtime_event_group_releases WHERE release_id=p.baseline_id AND occurrence_count>0) ids ON true LEFT JOIN runtime_event_group_releases t ON t.release_id=p.target_id AND t.group_id=ids.group_id LEFT JOIN runtime_event_group_releases b ON b.release_id=p.baseline_id AND b.group_id=ids.group_id), ranked AS (SELECT *,row_number() OVER(PARTITION BY application_id ORDER BY abs(occurrence_delta) DESC,relevant_at DESC,group_id) rn FROM changes WHERE classification<>'unknown') SELECT application_id,group_id,classification,baseline_occurrence_count,target_occurrence_count,occurrence_delta FROM ranked WHERE rn<=$4 ORDER BY application_id,rn")
-            .bind(application_ids)
-            .bind(target_ids)
-            .bind(baseline_ids)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH pairs AS (
+                 SELECT *
+                 FROM unnest(
+                     $1::uuid[],$2::uuid[],$3::uuid[]
+                 ) AS p(application_id,target_id,baseline_id)
+             ),
+                 changes AS (
+                     SELECT p.application_id,ids.group_id,
+                         CASE
+                             WHEN b.group_id IS NULL
+                                 AND EXISTS(
+                                     SELECT 1
+                                     FROM releases r
+                                     JOIN projects pr ON pr.id=r.project_id
+                                     WHERE r.id=p.baseline_id
+                                         AND r.deployed_at<pr.runtime_history_expired_before
+                                 )
+                                 THEN 'unknown'
+                             WHEN b.group_id IS NULL THEN 'new'
+                             WHEN t.group_id IS NULL
+                                 AND (
+                                     EXISTS(
+                                         SELECT 1
+                                         FROM releases r
+                                         JOIN projects pr ON pr.id=r.project_id
+                                         WHERE r.id=p.target_id
+                                             AND r.deployed_at<pr.runtime_history_expired_before
+                                     )
+                                     OR NOT (
+                                         EXISTS(
+                                             SELECT 1
+                                             FROM runtime_event_group_releases gr
+                                             WHERE gr.release_id=p.target_id
+                                                 AND gr.occurrence_count>0
+                                         )
+                                         OR EXISTS(
+                                             SELECT 1
+                                             FROM runtime_events ev
+                                             WHERE ev.release_id=p.target_id
+                                         )
+                                     )
+                                 )
+                                 THEN 'unknown'
+                             WHEN t.group_id IS NULL THEN 'disappeared'
+                             ELSE 'unchanged'
+                         END classification,
+                         coalesce(b.occurrence_count,0)::bigint baseline_occurrence_count,
+                         coalesce(t.occurrence_count,0)::bigint target_occurrence_count,
+                         (
+                             coalesce(t.occurrence_count,0)-coalesce(b.occurrence_count,0)
+                         )::bigint occurrence_delta,
+                         greatest(
+                             coalesce(t.last_seen_at,'epoch'),
+                             coalesce(b.last_seen_at,'epoch')
+                         ) relevant_at
+                     FROM pairs p
+                     JOIN LATERAL (
+                         SELECT group_id
+                         FROM runtime_event_group_releases
+                         WHERE release_id=p.target_id
+                             AND occurrence_count>0
+                         UNION SELECT group_id
+                         FROM runtime_event_group_releases
+                         WHERE release_id=p.baseline_id
+                             AND occurrence_count>0
+                     ) ids ON true
+                     LEFT JOIN runtime_event_group_releases t ON t.release_id=p.target_id
+                         AND t.group_id=ids.group_id
+                     LEFT JOIN runtime_event_group_releases b ON b.release_id=p.baseline_id
+                         AND b.group_id=ids.group_id
+                 ),
+                 ranked AS (
+                     SELECT *,
+                         row_number() OVER(
+                             PARTITION BY application_id ORDER BY abs(occurrence_delta) DESC,
+                             relevant_at DESC,group_id
+                         ) rn
+                     FROM changes
+                     WHERE classification<>'unknown'
+                 )
+             SELECT application_id,group_id,classification,baseline_occurrence_count,
+                 target_occurrence_count,occurrence_delta
+             FROM ranked
+             WHERE rn<=$4
+             ORDER BY application_id,rn",
+        )
+        .bind(application_ids)
+        .bind(target_ids)
+        .bind(baseline_ids)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
+
+    /// The statement behind [`Self::discoveries`].
+    const DISCOVERIES: &str =
+        "SELECT g.id group_id,g.project_id,p.name project_name,p.slug project_slug,
+             g.application_id,a.name application_name,a.slug application_slug,
+             g.first_seen_at,g.last_seen_at,g.occurrence_count,g.event_kind,
+             g.semantic_summary,
+             COALESCE(
+                 (
+                     SELECT jsonb_agg(
+                         label ORDER BY label->>'display_name',label->>'updated_at'
+                     )
+                     FROM (
+                         SELECT jsonb_build_object(
+                             'display_name',l.display_name,'created_by_user_id',
+                             l.created_by_user_id,'updated_by_user_id',
+                             l.updated_by_user_id,'created_at',l.created_at,'updated_at',
+                             l.updated_at
+                         ) label
+                         FROM runtime_inventory_group_links gl
+                         JOIN runtime_inventory_items i ON i.id=gl.item_id
+                         JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id
+                             AND l.project_id=i.project_id
+                             AND l.application_id=i.application_id
+                             AND l.inventory_kind=i.inventory_kind
+                             AND l.identity_version=i.identity_version
+                             AND l.identity_digest=i.identity_digest
+                         WHERE gl.group_id=g.id
+                         ORDER BY l.display_name,l.id
+                         LIMIT 20
+                     ) labels
+                 ),
+                 '[]'::jsonb
+             ) user_labels,
+             g.namespace,g.workload_kind,g.workload_name,
+             (g.first_seen_at BETWEEN $4 AND $5) is_new,
+             CASE
+                 WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$7
+                     THEN NULL
+                 ELSE e.verdict
+             END policy_verdict,
+             CASE
+                 WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$7
+                     THEN 'evaluation_pending'
+                 ELSE 'current'
+             END policy_evaluation_state
+         FROM runtime_event_groups g
+         JOIN projects p ON p.organization_id=g.organization_id
+             AND p.id=g.project_id
+         JOIN applications a ON a.organization_id=g.organization_id
+             AND a.project_id=g.project_id
+             AND a.id=g.application_id
+         LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id
+         LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id
+             AND ps.project_id=g.project_id
+             AND ps.application_id=g.application_id
+         WHERE g.occurrence_count>0
+             AND g.organization_id=$1
+             AND g.project_id=ANY($2)
+             AND ($3::uuid IS NULL OR g.application_id=$3)
+             AND g.status='open'
+             AND (
+                 e.group_id IS NULL
+                 OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                 OR e.evaluator_version<>$7
+                 OR e.verdict<>'expected'
+             )
+             AND NOT EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_group_links gl
+                 JOIN runtime_inventory_items i ON i.id=gl.item_id
+                 JOIN runtime_policy_suppressions s ON s.organization_id=i.organization_id
+                     AND s.project_id=i.project_id
+                     AND s.application_id=i.application_id
+                     AND s.identity_version=i.identity_version
+                     AND s.identity_digest=i.identity_digest
+                 WHERE gl.group_id=g.id
+                     AND s.cancelled_at IS NULL
+                     AND s.expires_at>$5
+                     AND (
+                         cardinality(s.cluster_ids)=0
+                         OR g.cluster_id=ANY(s.cluster_ids)
+                     )
+                     AND (cardinality(s.namespaces)=0 OR g.namespace=ANY(s.namespaces))
+                     AND (
+                         cardinality(s.workload_kinds)=0
+                         OR g.workload_kind=ANY(s.workload_kinds)
+                     )
+                     AND (
+                         cardinality(s.workload_names)=0
+                         OR g.workload_name=ANY(s.workload_names)
+                     )
+             )
+         ORDER BY CASE
+             WHEN e.verdict='policy_conflict' THEN 0
+             WHEN g.event_kind='container.restart_loop' THEN 1
+             WHEN g.first_seen_at BETWEEN $4 AND $5 THEN 2
+             ELSE 3
+         END,
+             g.occurrence_count DESC,
+             CASE
+                 WHEN g.first_seen_at BETWEEN $4 AND $5 THEN g.first_seen_at
+                 ELSE g.last_seen_at
+             END DESC,
+             g.id
+         LIMIT $6";
 
     /// Open runtime groups in the projects, optionally one application, that
     /// still need a reaction: not expected under current policy and not
@@ -202,7 +679,7 @@ impl AttentionRepository {
             limit,
             evaluator_version,
         } = input;
-        sqlx::query_as("SELECT g.id group_id,g.project_id,p.name project_name,p.slug project_slug,g.application_id,a.name application_name,a.slug application_slug,g.first_seen_at,g.last_seen_at,g.occurrence_count,g.event_kind,g.semantic_summary,COALESCE((SELECT jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at') FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.group_id=g.id ORDER BY l.display_name,l.id LIMIT 20) labels),'[]'::jsonb) user_labels,g.namespace,g.workload_kind,g.workload_name,(g.first_seen_at BETWEEN $4 AND $5) is_new,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN NULL ELSE e.verdict END policy_verdict,CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 THEN 'evaluation_pending' ELSE 'current' END policy_evaluation_state FROM runtime_event_groups g JOIN projects p ON p.organization_id=g.organization_id AND p.id=g.project_id JOIN applications a ON a.organization_id=g.organization_id AND a.project_id=g.project_id AND a.id=g.application_id LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2) AND ($3::uuid IS NULL OR g.application_id=$3) AND g.status='open' AND (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$7 OR e.verdict<>'expected') AND NOT EXISTS(SELECT 1 FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions s ON s.organization_id=i.organization_id AND s.project_id=i.project_id AND s.application_id=i.application_id AND s.identity_version=i.identity_version AND s.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND s.cancelled_at IS NULL AND s.expires_at>$5 AND (cardinality(s.cluster_ids)=0 OR g.cluster_id=ANY(s.cluster_ids)) AND (cardinality(s.namespaces)=0 OR g.namespace=ANY(s.namespaces)) AND (cardinality(s.workload_kinds)=0 OR g.workload_kind=ANY(s.workload_kinds)) AND (cardinality(s.workload_names)=0 OR g.workload_name=ANY(s.workload_names))) ORDER BY CASE WHEN e.verdict='policy_conflict' THEN 0 WHEN g.event_kind='container.restart_loop' THEN 1 WHEN g.first_seen_at BETWEEN $4 AND $5 THEN 2 ELSE 3 END,g.occurrence_count DESC,CASE WHEN g.first_seen_at BETWEEN $4 AND $5 THEN g.first_seen_at ELSE g.last_seen_at END DESC,g.id LIMIT $6")
+        sqlx::query_as(Self::DISCOVERIES)
             .bind(organization_id)
             .bind(project_ids)
             .bind(application_id)
@@ -235,14 +712,86 @@ impl AttentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH snapshots AS (SELECT p.id project_id,p.name project_name,p.slug project_slug,(SELECT count(*) FROM webhook_destinations w WHERE w.organization_id=p.organization_id AND w.project_id=p.id AND w.enabled) enabled_destination_count,count(d.id) FILTER(WHERE d.status='pending')::bigint pending_count,count(d.id) FILTER(WHERE d.status='pending' AND d.available_at<=$3)::bigint due_count,count(d.id) FILTER(WHERE d.status='pending' AND d.attempt_count>0)::bigint retrying_count,count(d.id) FILTER(WHERE d.status='in_flight')::bigint in_flight_count,count(d.id) FILTER(WHERE d.status='in_flight' AND d.lease_expires_at<=$3)::bigint expired_lease_count,count(d.id) FILTER(WHERE d.status='failed')::bigint failed_count,CASE WHEN count(d.id) FILTER(WHERE d.status='pending' AND d.available_at<=$3)=0 THEN NULL ELSE greatest(extract(epoch from ($3-min(d.available_at) FILTER(WHERE d.status='pending' AND d.available_at<=$3)))::bigint,0) END oldest_due_age_seconds FROM projects p LEFT JOIN notification_deliveries d ON d.organization_id=p.organization_id AND d.project_id=p.id WHERE p.organization_id=$1 AND p.id=ANY($2) GROUP BY p.id,p.name,p.slug,p.organization_id), problems AS (SELECT *,count(*) OVER()::bigint total_problem_count FROM snapshots WHERE ($4 AND enabled_destination_count=0) OR failed_count>0 OR expired_lease_count>0 OR retrying_count>0 OR due_count>0 OR pending_count>0) SELECT * FROM problems ORDER BY CASE WHEN failed_count>0 OR expired_lease_count>0 OR ($4 AND enabled_destination_count=0) THEN 0 ELSE 1 END,greatest(failed_count,due_count,retrying_count,expired_lease_count) DESC,project_id LIMIT $5")
-            .bind(organization_id)
-            .bind(project_ids)
-            .bind(now)
-            .bind(delivery_enabled)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH snapshots AS (
+                 SELECT p.id project_id,p.name project_name,p.slug project_slug,
+                     (
+                         SELECT count(*)
+                         FROM webhook_destinations w
+                         WHERE w.organization_id=p.organization_id
+                             AND w.project_id=p.id
+                             AND w.enabled
+                     ) enabled_destination_count,
+                     count(d.id) FILTER(WHERE d.status='pending')::bigint pending_count,
+                     count(d.id) FILTER(
+                         WHERE d.status='pending'
+                         AND d.available_at<=$3
+                     )::bigint due_count,
+                     count(d.id) FILTER(
+                         WHERE d.status='pending'
+                         AND d.attempt_count>0
+                     )::bigint retrying_count,
+                     count(d.id) FILTER(WHERE d.status='in_flight')::bigint in_flight_count,
+                     count(d.id) FILTER(
+                         WHERE d.status='in_flight'
+                         AND d.lease_expires_at<=$3
+                     )::bigint expired_lease_count,
+                     count(d.id) FILTER(WHERE d.status='failed')::bigint failed_count,
+                     CASE
+                         WHEN count(d.id) FILTER(
+                             WHERE d.status='pending'
+                             AND d.available_at<=$3
+                         )=0
+                             THEN NULL
+                         ELSE greatest(
+                             extract(
+                                 epoch from (
+                                     $3-min(d.available_at) FILTER(
+                                         WHERE d.status='pending'
+                                         AND d.available_at<=$3
+                                     )
+                                 )
+                             )::bigint,
+                             0
+                         )
+                     END oldest_due_age_seconds
+                 FROM projects p
+                 LEFT JOIN notification_deliveries d ON d.organization_id=p.organization_id
+                     AND d.project_id=p.id
+                 WHERE p.organization_id=$1
+                     AND p.id=ANY($2)
+                 GROUP BY p.id,p.name,p.slug,p.organization_id
+             ),
+                 problems AS (
+                     SELECT *,count(*) OVER()::bigint total_problem_count
+                     FROM snapshots
+                     WHERE ($4 AND enabled_destination_count=0)
+                         OR failed_count>0
+                         OR expired_lease_count>0
+                         OR retrying_count>0
+                         OR due_count>0
+                         OR pending_count>0
+                 )
+             SELECT *
+             FROM problems
+             ORDER BY CASE
+                 WHEN failed_count>0
+                     OR expired_lease_count>0
+                     OR ($4 AND enabled_destination_count=0)
+                     THEN 0
+                 ELSE 1
+             END,
+                 greatest(failed_count,due_count,retrying_count,expired_lease_count) DESC,
+                 project_id
+             LIMIT $5",
+        )
+        .bind(organization_id)
+        .bind(project_ids)
+        .bind(now)
+        .bind(delivery_enabled)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Applications in the projects with open groups first seen in
@@ -263,14 +812,32 @@ impl AttentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT g.project_id,p.name project_name,p.slug project_slug,g.application_id,a.name application_name,a.slug application_slug,count(*)::bigint discovery_count FROM runtime_event_groups g JOIN projects p ON p.organization_id=g.organization_id AND p.id=g.project_id JOIN applications a ON a.organization_id=g.organization_id AND a.project_id=g.project_id AND a.id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.project_id=ANY($2) AND g.status='open' AND g.first_seen_at BETWEEN $3 AND $4 GROUP BY g.project_id,p.name,p.slug,g.application_id,a.name,a.slug ORDER BY count(*) DESC,g.application_id LIMIT $5")
-            .bind(organization_id)
-            .bind(project_ids)
-            .bind(from)
-            .bind(to)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT g.project_id,p.name project_name,p.slug project_slug,g.application_id,
+                 a.name application_name,a.slug application_slug,
+                 count(*)::bigint discovery_count
+             FROM runtime_event_groups g
+             JOIN projects p ON p.organization_id=g.organization_id
+                 AND p.id=g.project_id
+             JOIN applications a ON a.organization_id=g.organization_id
+                 AND a.project_id=g.project_id
+                 AND a.id=g.application_id
+             WHERE g.occurrence_count>0
+                 AND g.organization_id=$1
+                 AND g.project_id=ANY($2)
+                 AND g.status='open'
+                 AND g.first_seen_at BETWEEN $3 AND $4
+             GROUP BY g.project_id,p.name,p.slug,g.application_id,a.name,a.slug
+             ORDER BY count(*) DESC,g.application_id
+             LIMIT $5",
+        )
+        .bind(organization_id)
+        .bind(project_ids)
+        .bind(from)
+        .bind(to)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// The project's id, name and slug and the application's name and slug.
@@ -283,12 +850,20 @@ impl AttentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Uuid, String, String, String, String)>("SELECT p.id,p.name,p.slug,a.name,a.slug FROM projects p JOIN applications a ON a.organization_id=p.organization_id AND a.project_id=p.id WHERE p.organization_id=$1 AND p.id=$2 AND a.id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (Uuid, String, String, String, String)>(
+            "SELECT p.id,p.name,p.slug,a.name,a.slug
+             FROM projects p
+             JOIN applications a ON a.organization_id=p.organization_id
+                 AND a.project_id=p.id
+             WHERE p.organization_id=$1
+                 AND p.id=$2
+                 AND a.id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The application's groups first seen in `[from, to]`, open, and
@@ -303,13 +878,21 @@ impl AttentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (i64, i64, i64)>("SELECT count(*) FILTER(WHERE first_seen_at BETWEEN $3 AND $4)::bigint,count(*) FILTER(WHERE status='open')::bigint,count(*) FILTER(WHERE status='acknowledged')::bigint FROM runtime_event_groups WHERE occurrence_count>0 AND organization_id=$1 AND application_id=$2")
-            .bind(organization_id)
-            .bind(application_id)
-            .bind(from)
-            .bind(to)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT count(*) FILTER(WHERE first_seen_at BETWEEN $3 AND $4)::bigint,
+                 count(*) FILTER(WHERE status='open')::bigint,
+                 count(*) FILTER(WHERE status='acknowledged')::bigint
+             FROM runtime_event_groups
+             WHERE occurrence_count>0
+                 AND organization_id=$1
+                 AND application_id=$2",
+        )
+        .bind(organization_id)
+        .bind(application_id)
+        .bind(from)
+        .bind(to)
+        .fetch_one(executor)
+        .await
     }
 
     /// Counts of the application's groups by current policy state: in all,
@@ -323,12 +906,60 @@ impl AttentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Value>("SELECT jsonb_build_object('factual_total',count(*),'actionable_total',count(*) FILTER(WHERE e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 OR e.verdict<>'expected'),'evaluation_pending',count(*) FILTER(WHERE e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3),'expected',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 AND e.verdict='expected'),'requires_review',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 AND e.verdict='requires_review'),'policy_conflict',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 AND e.verdict='policy_conflict'),'unclassified',count(*) FILTER(WHERE e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 AND e.verdict='unclassified')) FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id WHERE g.occurrence_count>0 AND g.organization_id=$1 AND g.application_id=$2")
-            .bind(organization_id)
-            .bind(application_id)
-            .bind(evaluator_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_build_object(
+                 'factual_total',count(*),'actionable_total',
+                 count(*) FILTER(
+                     WHERE e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3
+                     OR e.verdict<>'expected'
+                 ),
+                 'evaluation_pending',
+                 count(*) FILTER(
+                     WHERE e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3
+                 ),
+                 'expected',
+                 count(*) FILTER(
+                     WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                     AND e.evaluator_version=$3
+                     AND e.verdict='expected'
+                 ),
+                 'requires_review',
+                 count(*) FILTER(
+                     WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                     AND e.evaluator_version=$3
+                     AND e.verdict='requires_review'
+                 ),
+                 'policy_conflict',
+                 count(*) FILTER(
+                     WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                     AND e.evaluator_version=$3
+                     AND e.verdict='policy_conflict'
+                 ),
+                 'unclassified',
+                 count(*) FILTER(
+                     WHERE e.policy_state_version=COALESCE(ps.state_version,0)
+                     AND e.evaluator_version=$3
+                     AND e.verdict='unclassified'
+                 )
+             )
+             FROM runtime_event_groups g
+             LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id
+             LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id
+                 AND ps.project_id=g.project_id
+                 AND ps.application_id=g.application_id
+             WHERE g.occurrence_count>0
+                 AND g.organization_id=$1
+                 AND g.application_id=$2",
+        )
+        .bind(organization_id)
+        .bind(application_id)
+        .bind(evaluator_version)
+        .fetch_one(executor)
+        .await
     }
 }
 

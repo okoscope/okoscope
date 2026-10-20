@@ -72,7 +72,11 @@ async fn credential_lifecycle_is_secret_safe_and_revocable(pool: sqlx::PgPool) {
             .contains(&first_token)
     );
     let stored_plaintext: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM application_ingestion_credentials WHERE encode(credential_hash,'escape')=$1)",
+        "SELECT EXISTS(
+             SELECT 1
+             FROM application_ingestion_credentials
+             WHERE encode(credential_hash,'escape')=$1
+         )",
     )
     .bind(&first_token)
     .fetch_one(&pool)

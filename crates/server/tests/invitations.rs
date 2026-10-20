@@ -51,10 +51,17 @@ async fn fixture_user(
     role: &str,
 ) -> (Uuid, String) {
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,$2,$3,now(),$4)")
-        .bind(user_id).bind(email)
-        .bind(hash_password("correct horse battery staple").unwrap())
-        .bind(email.split('@').next().unwrap()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,$2,$3,now(),$4)",
+    )
+    .bind(user_id)
+    .bind(email)
+    .bind(hash_password("correct horse battery staple").unwrap())
+    .bind(email.split('@').next().unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
     if let Some(organization_id) = organization_id {
         sqlx::query(
             "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
@@ -67,9 +74,17 @@ async fn fixture_user(
         .unwrap();
     }
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(organization_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     (user_id, token.expose().to_owned())
 }
 
@@ -148,8 +163,13 @@ async fn organization_invitation_inspection_and_new_user_acceptance_are_atomic(p
         "{}",
         json(created).await
     );
-    let state: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM invitations),(SELECT count(*) FROM transactional_mail_outbox)")
-        .fetch_one(&pool).await.unwrap();
+    let state: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM invitations),
+             (SELECT count(*) FROM transactional_mail_outbox)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(state, (1, 1));
     let sender = Arc::new(CapturingSender::default());
     let token = invitation_token(pool.clone(), &config, sender, 0).await;
@@ -190,8 +210,27 @@ async fn organization_invitation_inspection_and_new_user_acceptance_are_atomic(p
         accepted.headers().get(header::CACHE_CONTROL).unwrap(),
         "no-store"
     );
-    let granted: (bool, bool, i64) = sqlx::query_as("SELECT u.email_verified_at IS NOT NULL,EXISTS(SELECT 1 FROM organization_memberships m WHERE m.user_id=u.id AND m.organization_id=$1 AND m.role='member'),(SELECT count(*) FROM access_audit_records WHERE action='invitation.accepted') FROM users u WHERE u.email='new@example.com'")
-        .bind(organization_id).fetch_one(&pool).await.unwrap();
+    let granted: (bool, bool, i64) = sqlx::query_as(
+        "SELECT u.email_verified_at IS NOT NULL,
+             EXISTS(
+                 SELECT 1
+                 FROM organization_memberships m
+                 WHERE m.user_id=u.id
+                     AND m.organization_id=$1
+                     AND m.role='member'
+             ),
+             (
+                 SELECT count(*)
+                 FROM access_audit_records
+                 WHERE action='invitation.accepted'
+             )
+         FROM users u
+         WHERE u.email='new@example.com'",
+    )
+    .bind(organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(granted, (true, true, 1));
     let replay = app.oneshot(
         Request::builder().method("POST").uri("/api/v1/invitations/acceptances/new-user")
@@ -219,8 +258,16 @@ async fn project_invitation_grants_only_base_organization_and_target_project(poo
     .await;
     let project_id = Uuid::new_v4();
     let other_project_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$3,'target','Target'),($2,$3,'other','Other')")
-        .bind(project_id).bind(other_project_id).bind(organization_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO projects(id,organization_id,slug,name)
+         VALUES($1,$3,'target','Target'),($2,$3,'other','Other')",
+    )
+    .bind(project_id)
+    .bind(other_project_id)
+    .bind(organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let config = config();
     let app = app(pool.clone(), &config);
     let created = app
@@ -252,8 +299,37 @@ async fn project_invitation_grants_only_base_organization_and_target_project(poo
         "{}",
         json(accepted).await
     );
-    let grants: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='project-member@example.com' AND m.organization_id=$1 AND m.role='member'),(SELECT count(*) FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='project-member@example.com' AND m.project_id=$2 AND m.role='member'),(SELECT count(*) FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='project-member@example.com' AND m.project_id=$3)")
-        .bind(organization_id).bind(project_id).bind(other_project_id).fetch_one(&pool).await.unwrap();
+    let grants: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (
+             SELECT count(*)
+             FROM organization_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE u.email='project-member@example.com'
+                 AND m.organization_id=$1
+                 AND m.role='member'
+         ),
+             (
+                 SELECT count(*)
+                 FROM project_memberships m
+                 JOIN users u ON u.id=m.user_id
+                 WHERE u.email='project-member@example.com'
+                     AND m.project_id=$2
+                     AND m.role='member'
+             ),
+             (
+                 SELECT count(*)
+                 FROM project_memberships m
+                 JOIN users u ON u.id=m.user_id
+                 WHERE u.email='project-member@example.com'
+                     AND m.project_id=$3
+             )",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(other_project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(grants, (1, 1, 0));
 }
 
@@ -369,7 +445,12 @@ async fn existing_user_requires_matching_verified_identity_and_replay_is_idempot
     let mismatch = accept_existing(&app, &other_token, &token).await;
     assert_eq!(mismatch.status(), StatusCode::CONFLICT);
     let unchanged: bool = sqlx::query_scalar(
-        "SELECT NOT EXISTS(SELECT 1 FROM organization_memberships WHERE organization_id=$1 AND user_id=$2)",
+        "SELECT NOT EXISTS(
+             SELECT 1
+             FROM organization_memberships
+             WHERE organization_id=$1
+                 AND user_id=$2
+         )",
     )
     .bind(organization_id)
     .bind(recipient_id)
@@ -441,18 +522,44 @@ async fn unusable_tokens_are_non_enumerating_and_disabled_mail_is_atomic(pool: s
         .await
         .unwrap();
     assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM invitations),(SELECT count(*) FROM transactional_mail_outbox)")
-        .fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM invitations),
+             (SELECT count(*) FROM transactional_mail_outbox)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (0, 0));
     let config = config();
     let live_app = app(pool.clone(), &config);
     let (expired_token, digest) = canonical_token(31);
     let invitation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO invitations(id,organization_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,'expired@example.com','member',$3,'en',$4,now()+interval '1 day',now()+interval '366 days')")
-        .bind(invitation_id).bind(organization_id).bind(owner_id).bind(digest)
-        .execute(&pool).await.unwrap();
-    sqlx::query("UPDATE invitations SET created_at=now()-interval '2 days',expires_at=now()-interval '1 day' WHERE id=$1")
-        .bind(invitation_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO invitations(
+             id,organization_id,recipient_email,role,inviter_user_id,locale,token_digest,
+             expires_at,retain_until
+         )
+         VALUES(
+             $1,$2,'expired@example.com','member',$3,'en',$4,now()+interval '1 day',
+             now()+interval '366 days'
+         )",
+    )
+    .bind(invitation_id)
+    .bind(organization_id)
+    .bind(owner_id)
+    .bind(digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE invitations
+         SET created_at=now()-interval '2 days',expires_at=now()-interval '1 day'
+         WHERE id=$1",
+    )
+    .bind(invitation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (unknown_token, _) = canonical_token(32);
     for token in ["malformed".to_owned(), unknown_token, expired_token] {
         let response = live_app
@@ -522,8 +629,20 @@ async fn concurrent_acceptance_consumes_once_without_duplicate_membership(pool: 
     let mut statuses = [first.unwrap().status(), second.unwrap().status()];
     statuses.sort();
     assert_eq!(statuses, [StatusCode::CREATED, StatusCode::GONE]);
-    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM users WHERE email='race@example.com'),(SELECT count(*) FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE u.email='race@example.com' AND m.organization_id=$1)")
-        .bind(organization_id).fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM users WHERE email='race@example.com'),
+             (
+                 SELECT count(*)
+                 FROM organization_memberships m
+                 JOIN users u ON u.id=m.user_id
+                 WHERE u.email='race@example.com'
+                     AND m.organization_id=$1
+             )",
+    )
+    .bind(organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (1, 1));
 }
 
@@ -578,7 +697,22 @@ async fn first_owner_acceptance_activates_pending_organization(pool: sqlx::PgPoo
         "{}",
         json(accepted).await
     );
-    let state: (String, i64) = sqlx::query_as("SELECT status,(SELECT count(*) FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.role='owner' AND u.email='first-owner@example.com') FROM organizations WHERE id=$1")
-        .bind(organization_id).fetch_one(&pool).await.unwrap();
+    let state: (String, i64) = sqlx::query_as(
+        "SELECT status,
+             (
+                 SELECT count(*)
+                 FROM organization_memberships m
+                 JOIN users u ON u.id=m.user_id
+                 WHERE m.organization_id=$1
+                     AND m.role='owner'
+                     AND u.email='first-owner@example.com'
+             )
+         FROM organizations
+         WHERE id=$1",
+    )
+    .bind(organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(state, ("active".into(), 1));
 }

@@ -10,9 +10,71 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
-const PROJECT_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND enabled=true) enabled_destination_count, count(*) FILTER (WHERE status='pending') pending_count, count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count, count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count, count(*) FILTER (WHERE status='in_flight') in_flight_count, count(*) FILTER (WHERE status='in_flight' AND lease_expires_at<=now()) expired_lease_count, count(*) FILTER (WHERE status='failed') failed_count, CASE WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0 THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now()-min(available_at) FILTER (WHERE status='pending' AND available_at<=now())))::bigint,0) END oldest_due_age_seconds FROM notification_deliveries WHERE organization_id=$1 AND project_id=$2";
+const PROJECT_SNAPSHOT_SQL: &str = "SELECT (
+                                        SELECT count(*)
+                                        FROM webhook_destinations
+                                        WHERE organization_id=$1
+                                            AND project_id=$2
+                                            AND enabled=true
+                                    ) enabled_destination_count,
+                                        count(*) FILTER (WHERE status='pending') pending_count,
+                                        count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count,
+                                        count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count,
+                                        count(*) FILTER (WHERE status='in_flight') in_flight_count,
+                                        count(*) FILTER (
+                                            WHERE status='in_flight'
+                                            AND lease_expires_at<=now()
+                                        ) expired_lease_count,
+                                        count(*) FILTER (WHERE status='failed') failed_count,
+                                        CASE
+                                            WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0
+                                                THEN NULL
+                                            ELSE GREATEST(
+                                                EXTRACT(
+                                                    EPOCH FROM (
+                                                        now()-min(available_at) FILTER (
+                                                            WHERE status='pending'
+                                                            AND available_at<=now()
+                                                        )
+                                                    )
+                                                )::bigint,
+                                                0
+                                            )
+                                        END oldest_due_age_seconds
+                                    FROM notification_deliveries
+                                    WHERE organization_id=$1
+                                        AND project_id=$2";
 
-const GLOBAL_SNAPSHOT_SQL: &str = "SELECT (SELECT count(*) FROM webhook_destinations WHERE enabled=true) enabled_destination_count, count(*) FILTER (WHERE status='pending') pending_count, count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count, count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count, count(*) FILTER (WHERE status='in_flight') in_flight_count, count(*) FILTER (WHERE status='in_flight' AND lease_expires_at<=now()) expired_lease_count, count(*) FILTER (WHERE status='failed') failed_count, CASE WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0 THEN NULL ELSE GREATEST(EXTRACT(EPOCH FROM (now()-min(available_at) FILTER (WHERE status='pending' AND available_at<=now())))::bigint,0) END oldest_due_age_seconds FROM notification_deliveries";
+const GLOBAL_SNAPSHOT_SQL: &str = "SELECT (
+                                       SELECT count(*)
+                                       FROM webhook_destinations
+                                       WHERE enabled=true
+                                   ) enabled_destination_count,
+                                       count(*) FILTER (WHERE status='pending') pending_count,
+                                       count(*) FILTER (WHERE status='pending' AND available_at<=now()) due_count,
+                                       count(*) FILTER (WHERE status='pending' AND attempt_count>0) retrying_count,
+                                       count(*) FILTER (WHERE status='in_flight') in_flight_count,
+                                       count(*) FILTER (
+                                           WHERE status='in_flight'
+                                           AND lease_expires_at<=now()
+                                       ) expired_lease_count,
+                                       count(*) FILTER (WHERE status='failed') failed_count,
+                                       CASE
+                                           WHEN count(*) FILTER (WHERE status='pending' AND available_at<=now())=0
+                                               THEN NULL
+                                           ELSE GREATEST(
+                                               EXTRACT(
+                                                   EPOCH FROM (
+                                                       now()-min(available_at) FILTER (
+                                                           WHERE status='pending'
+                                                           AND available_at<=now()
+                                                       )
+                                                   )
+                                               )::bigint,
+                                               0
+                                           )
+                                       END oldest_due_age_seconds
+                                   FROM notification_deliveries";
 
 /// Input to [`NotificationDeliveryRepository::failed_for_retry`].
 #[derive(Debug)]
@@ -141,14 +203,24 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE notification_deliveries SET status='pending',recovery_generation=$4,attempt_count=0,available_at=now(),lease_owner=NULL,lease_expires_at=NULL,terminal_at=NULL,last_error_class=NULL,last_error=NULL,last_recovery_operation_id=$5,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND status='failed'")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .bind(recovery_generation)
-            .bind(operation_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET status='pending',recovery_generation=$4,attempt_count=0,available_at=now(),
+                 lease_owner=NULL,lease_expires_at=NULL,terminal_at=NULL,
+                 last_error_class=NULL,last_error=NULL,last_recovery_operation_id=$5,
+                 updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3
+                 AND status='failed'",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .bind(recovery_generation)
+        .bind(operation_id)
+        .execute(executor)
+        .await
     }
 
     /// Cancels a pending delivery on a user's request. Affects no row unless
@@ -163,13 +235,24 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE notification_deliveries SET status='cancelled',terminal_at=now(),last_error_class='user_cancelled',last_error='delivery cancelled by authenticated project user',last_recovery_operation_id=$4,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND status='pending' AND lease_owner IS NULL AND lease_expires_at IS NULL")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .bind(operation_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET status='cancelled',terminal_at=now(),last_error_class='user_cancelled',
+                 last_error='delivery cancelled by authenticated project user',
+                 last_recovery_operation_id=$4,updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3
+                 AND status='pending'
+                 AND lease_owner IS NULL
+                 AND lease_expires_at IS NULL",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .bind(operation_id)
+        .execute(executor)
+        .await
     }
 
     /// Locks up to `limit` of the project's failed deliveries to enabled
@@ -190,16 +273,33 @@ impl NotificationDeliveryRepository {
             error_class,
             limit,
         } = input;
-        sqlx::query_as::<_, (Uuid, i32)>("SELECT d.id,d.recovery_generation FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.status='failed' AND w.enabled=true AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::timestamptz IS NULL OR d.terminal_at<$4) AND ($5::timestamptz IS NULL OR d.terminal_at>=$5) AND ($6::text IS NULL OR d.last_error_class=$6) ORDER BY d.terminal_at,d.created_at,d.id FOR UPDATE OF d SKIP LOCKED LIMIT $7")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(failed_before)
-            .bind(failed_after)
-            .bind(error_class)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT d.id,d.recovery_generation
+             FROM notification_deliveries d
+             JOIN webhook_destinations w ON w.organization_id=d.organization_id
+                 AND w.project_id=d.project_id
+                 AND w.id=d.destination_id
+             WHERE d.organization_id=$1
+                 AND d.project_id=$2
+                 AND d.status='failed'
+                 AND w.enabled=true
+                 AND ($3::uuid IS NULL OR d.destination_id=$3)
+                 AND ($4::timestamptz IS NULL OR d.terminal_at<$4)
+                 AND ($5::timestamptz IS NULL OR d.terminal_at>=$5)
+                 AND ($6::text IS NULL OR d.last_error_class=$6)
+             ORDER BY d.terminal_at,d.created_at,d.id
+             FOR UPDATE OF d SKIP LOCKED
+             LIMIT $7",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(failed_before)
+        .bind(failed_after)
+        .bind(error_class)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// How many deliveries [`Self::failed_for_retry`] would select without a
@@ -216,15 +316,29 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.status='failed' AND w.enabled=true AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::timestamptz IS NULL OR d.terminal_at<$4) AND ($5::timestamptz IS NULL OR d.terminal_at>=$5) AND ($6::text IS NULL OR d.last_error_class=$6)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(failed_before)
-            .bind(failed_after)
-            .bind(error_class)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM notification_deliveries d
+             JOIN webhook_destinations w ON w.organization_id=d.organization_id
+                 AND w.project_id=d.project_id
+                 AND w.id=d.destination_id
+             WHERE d.organization_id=$1
+                 AND d.project_id=$2
+                 AND d.status='failed'
+                 AND w.enabled=true
+                 AND ($3::uuid IS NULL OR d.destination_id=$3)
+                 AND ($4::timestamptz IS NULL OR d.terminal_at<$4)
+                 AND ($5::timestamptz IS NULL OR d.terminal_at>=$5)
+                 AND ($6::text IS NULL OR d.last_error_class=$6)",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(failed_before)
+        .bind(failed_after)
+        .bind(error_class)
+        .fetch_one(executor)
+        .await
     }
 
     /// Locks a delivery of the project for a recovery command and returns
@@ -242,12 +356,28 @@ impl NotificationDeliveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT d.status,w.enabled destination_enabled,d.lease_expires_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3 FOR UPDATE OF d")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT d.status,w.enabled destination_enabled,d.lease_expires_at,
+                 d.recovery_generation,d.attempt_count,
+                 (
+                     SELECT count(*)
+                     FROM notification_delivery_attempts a
+                     WHERE a.delivery_id=d.id
+                 ) total_attempt_count
+             FROM notification_deliveries d
+             JOIN webhook_destinations w ON w.organization_id=d.organization_id
+                 AND w.project_id=d.project_id
+                 AND w.id=d.destination_id
+             WHERE d.organization_id=$1
+                 AND d.project_id=$2
+                 AND d.id=$3
+             FOR UPDATE OF d",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Creates the delivery of a first-seen message to one destination, once
@@ -274,21 +404,33 @@ impl NotificationDeliveryRepository {
             last_error_class,
             last_error,
         } = input;
-        sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,outbox_message_id,origin,source,event_name,payload,status,max_attempts,terminal_at,last_error_class,last_error) VALUES ($1,$2,$3,$4,$5,'outbox',$6,'runtime_group.first_seen',$7,$8,$9,$10,$11,$12) ON CONFLICT (outbox_message_id,destination_id) WHERE outbox_message_id IS NOT NULL DO NOTHING")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(outbox_message_id)
-            .bind(source)
-            .bind(payload)
-            .bind(status)
-            .bind(max_attempts)
-            .bind(terminal_at)
-            .bind(last_error_class)
-            .bind(last_error)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO notification_deliveries (
+                 id,organization_id,project_id,destination_id,outbox_message_id,origin,
+                 source,event_name,payload,status,max_attempts,terminal_at,last_error_class,
+                 last_error
+             )
+             VALUES (
+                 $1,$2,$3,$4,$5,'outbox',$6,'runtime_group.first_seen',$7,$8,$9,$10,$11,$12
+             )
+             ON CONFLICT (outbox_message_id,destination_id)
+             WHERE outbox_message_id IS NOT NULL
+             DO NOTHING",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(outbox_message_id)
+        .bind(source)
+        .bind(payload)
+        .bind(status)
+        .bind(max_attempts)
+        .bind(terminal_at)
+        .bind(last_error_class)
+        .bind(last_error)
+        .execute(executor)
+        .await
     }
 
     /// Leases up to `limit` due deliveries to `lease_owner` for
@@ -311,12 +453,38 @@ impl NotificationDeliveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH candidates AS (SELECT id FROM notification_deliveries WHERE (status='pending' AND available_at<=now()) OR (status='in_flight' AND lease_expires_at<=now()) ORDER BY available_at,created_at FOR UPDATE SKIP LOCKED LIMIT $1), claimed AS (UPDATE notification_deliveries d SET status='in_flight',lease_owner=$2,lease_expires_at=now()+make_interval(secs=>$3),updated_at=now() FROM candidates c WHERE d.id=c.id RETURNING d.*) SELECT c.id,c.organization_id,c.project_id,c.destination_id,c.outbox_message_id,c.source,c.event_name,c.payload,c.recovery_generation,c.attempt_count,c.max_attempts,c.lease_owner,w.url,w.encrypted_secret,w.secret_nonce FROM claimed c JOIN webhook_destinations w ON w.id=c.destination_id AND w.organization_id=c.organization_id AND w.project_id=c.project_id WHERE w.enabled=true")
-            .bind(limit)
-            .bind(lease_owner)
-            .bind(lease_seconds)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH candidates AS (
+                 SELECT id
+                 FROM notification_deliveries
+                 WHERE (status='pending' AND available_at<=now())
+                     OR (status='in_flight' AND lease_expires_at<=now())
+                 ORDER BY available_at,created_at
+                 FOR UPDATE SKIP LOCKED
+                 LIMIT $1
+             ),
+                 claimed AS (
+                     UPDATE notification_deliveries d
+                     SET status='in_flight',lease_owner=$2,
+                         lease_expires_at=now()+make_interval(secs=>$3),updated_at=now()
+                     FROM candidates c
+                     WHERE d.id=c.id
+                     RETURNING d.*
+                 )
+             SELECT c.id,c.organization_id,c.project_id,c.destination_id,c.outbox_message_id,
+                 c.source,c.event_name,c.payload,c.recovery_generation,c.attempt_count,
+                 c.max_attempts,c.lease_owner,w.url,w.encrypted_secret,w.secret_nonce
+             FROM claimed c
+             JOIN webhook_destinations w ON w.id=c.destination_id
+                 AND w.organization_id=c.organization_id
+                 AND w.project_id=c.project_id
+             WHERE w.enabled=true",
+        )
+        .bind(limit)
+        .bind(lease_owner)
+        .bind(lease_seconds)
+        .fetch_all(executor)
+        .await
     }
 
     /// Creates a single-attempt test delivery already leased to
@@ -337,16 +505,25 @@ impl NotificationDeliveryRepository {
             lease_owner,
             lease_seconds,
         } = input;
-        sqlx::query("INSERT INTO notification_deliveries (id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,max_attempts) VALUES ($1,$2,$3,$4,'test','test','okoscope.test',$5,'in_flight',$6,now()+make_interval(secs=>$7),1)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(payload)
-            .bind(lease_owner)
-            .bind(lease_seconds)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO notification_deliveries (
+                 id,organization_id,project_id,destination_id,origin,source,event_name,
+                 payload,status,lease_owner,lease_expires_at,max_attempts
+             )
+             VALUES (
+                 $1,$2,$3,$4,'test','test','okoscope.test',$5,'in_flight',$6,
+                 now()+make_interval(secs=>$7),1
+             )",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(payload)
+        .bind(lease_owner)
+        .bind(lease_seconds)
+        .execute(executor)
+        .await
     }
 
     /// Resolves a delivery id used as a list cursor into its
@@ -360,12 +537,18 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT created_at,id FROM notification_deliveries WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT created_at,id
+             FROM notification_deliveries
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of the project's deliveries, newest first, after the cursor
@@ -394,19 +577,45 @@ impl NotificationDeliveryRepository {
             cursor_id,
             fetch_limit,
         } = input;
-        sqlx::query_as("SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,d.event_name,d.payload,w.name destination_name,w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count,d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,d.last_recovery_operation_id FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND ($3::uuid IS NULL OR d.destination_id=$3) AND ($4::text IS NULL OR d.status=$4) AND ($5::text IS NULL OR d.source=$5) AND ($6::text IS NULL OR d.origin=$6) AND ($7::timestamptz IS NULL OR d.created_at >= $7) AND ($8::timestamptz IS NULL OR (d.created_at,d.id)<($8,$9)) ORDER BY d.created_at DESC,d.id DESC LIMIT $10")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(status)
-            .bind(source)
-            .bind(origin)
-            .bind(since)
-            .bind(cursor_created_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,
+                 d.event_name,d.payload,w.name destination_name,
+                 w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,
+                 d.attempt_count,
+                 (
+                     SELECT count(*)
+                     FROM notification_delivery_attempts a
+                     WHERE a.delivery_id=d.id
+                 ) total_attempt_count,
+                 d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,
+                 d.last_recovery_operation_id
+             FROM notification_deliveries d
+             JOIN webhook_destinations w ON w.organization_id=d.organization_id
+                 AND w.project_id=d.project_id
+                 AND w.id=d.destination_id
+             WHERE d.organization_id=$1
+                 AND d.project_id=$2
+                 AND ($3::uuid IS NULL OR d.destination_id=$3)
+                 AND ($4::text IS NULL OR d.status=$4)
+                 AND ($5::text IS NULL OR d.source=$5)
+                 AND ($6::text IS NULL OR d.origin=$6)
+                 AND ($7::timestamptz IS NULL OR d.created_at >= $7)
+                 AND ($8::timestamptz IS NULL OR (d.created_at,d.id)<($8,$9))
+             ORDER BY d.created_at DESC,d.id DESC
+             LIMIT $10",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(status)
+        .bind(source)
+        .bind(origin)
+        .bind(since)
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// A delivery's attempts in order.
@@ -424,12 +633,21 @@ impl NotificationDeliveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,http_status,error_class,response_excerpt FROM notification_delivery_attempts WHERE organization_id=$1 AND project_id=$2 AND delivery_id=$3 ORDER BY recovery_generation DESC,attempt_number DESC LIMIT 100")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,
+                 outcome,http_status,error_class,response_excerpt
+             FROM notification_delivery_attempts
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND delivery_id=$3
+             ORDER BY recovery_generation DESC,attempt_number DESC
+             LIMIT 100",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// One delivery of the project with the columns of [`Self::page`].
@@ -443,12 +661,31 @@ impl NotificationDeliveryRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,d.event_name,d.payload,w.name destination_name,w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,d.attempt_count,(SELECT count(*) FROM notification_delivery_attempts a WHERE a.delivery_id=d.id) total_attempt_count,d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,d.last_recovery_operation_id FROM notification_deliveries d JOIN webhook_destinations w ON w.organization_id=d.organization_id AND w.project_id=d.project_id AND w.id=d.destination_id WHERE d.organization_id=$1 AND d.project_id=$2 AND d.id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT d.id,d.project_id,d.destination_id,d.outbox_message_id,d.origin,d.source,
+                 d.event_name,d.payload,w.name destination_name,
+                 w.enabled destination_enabled,d.status,d.available_at,d.recovery_generation,
+                 d.attempt_count,
+                 (
+                     SELECT count(*)
+                     FROM notification_delivery_attempts a
+                     WHERE a.delivery_id=d.id
+                 ) total_attempt_count,
+                 d.max_attempts,d.last_error_class,d.created_at,d.updated_at,d.terminal_at,
+                 d.last_recovery_operation_id
+             FROM notification_deliveries d
+             JOIN webhook_destinations w ON w.organization_id=d.organization_id
+                 AND w.project_id=d.project_id
+                 AND w.id=d.destination_id
+             WHERE d.organization_id=$1
+                 AND d.project_id=$2
+                 AND d.id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records one delivery attempt, finished now.
@@ -473,21 +710,28 @@ impl NotificationDeliveryRepository {
             error_class,
             response_excerpt,
         } = input;
-        sqlx::query("INSERT INTO notification_delivery_attempts (id,organization_id,project_id,delivery_id,recovery_generation,attempt_number,started_at,finished_at,duration_ms,outcome,http_status,error_class,response_excerpt) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(delivery_id)
-            .bind(recovery_generation)
-            .bind(attempt_number)
-            .bind(started_at)
-            .bind(duration_ms)
-            .bind(outcome)
-            .bind(http_status)
-            .bind(error_class)
-            .bind(response_excerpt)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO notification_delivery_attempts (
+                 id,organization_id,project_id,delivery_id,recovery_generation,
+                 attempt_number,started_at,finished_at,duration_ms,outcome,http_status,
+                 error_class,response_excerpt
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12)",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(delivery_id)
+        .bind(recovery_generation)
+        .bind(attempt_number)
+        .bind(started_at)
+        .bind(duration_ms)
+        .bind(outcome)
+        .bind(http_status)
+        .bind(error_class)
+        .bind(response_excerpt)
+        .execute(executor)
+        .await
     }
 
     /// Returns a delivery leased to `lease_owner` to pending, due after
@@ -503,14 +747,21 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE notification_deliveries SET status='pending',attempt_count=$3,available_at=now()+make_interval(secs=>$4),lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),last_error_class=$5,last_error=$5 WHERE id=$1 AND lease_owner=$2")
-            .bind(delivery_id)
-            .bind(lease_owner)
-            .bind(attempt_count)
-            .bind(delay_seconds)
-            .bind(error_class)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET status='pending',attempt_count=$3,
+                 available_at=now()+make_interval(secs=>$4),lease_owner=NULL,
+                 lease_expires_at=NULL,updated_at=now(),last_error_class=$5,last_error=$5
+             WHERE id=$1
+                 AND lease_owner=$2",
+        )
+        .bind(delivery_id)
+        .bind(lease_owner)
+        .bind(attempt_count)
+        .bind(delay_seconds)
+        .bind(error_class)
+        .execute(executor)
+        .await
     }
 
     /// Ends a delivery leased to `lease_owner` with a terminal status.
@@ -525,14 +776,20 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE notification_deliveries SET status=$3,attempt_count=$4,lease_owner=NULL,lease_expires_at=NULL,updated_at=now(),terminal_at=now(),last_error_class=$5,last_error=$5 WHERE id=$1 AND lease_owner=$2")
-            .bind(delivery_id)
-            .bind(lease_owner)
-            .bind(status)
-            .bind(attempt_count)
-            .bind(error_class)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET status=$3,attempt_count=$4,lease_owner=NULL,lease_expires_at=NULL,
+                 updated_at=now(),terminal_at=now(),last_error_class=$5,last_error=$5
+             WHERE id=$1
+                 AND lease_owner=$2",
+        )
+        .bind(delivery_id)
+        .bind(lease_owner)
+        .bind(status)
+        .bind(attempt_count)
+        .bind(error_class)
+        .execute(executor)
+        .await
     }
 
     /// Cancels the destination's pending and in-flight deliveries because it
@@ -546,12 +803,21 @@ impl NotificationDeliveryRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE notification_deliveries SET status='cancelled',terminal_at=now(),updated_at=now(),lease_owner=NULL,lease_expires_at=NULL,last_error_class='destination_disabled',last_error='destination disabled before delivery' WHERE organization_id=$1 AND project_id=$2 AND destination_id=$3 AND status IN ('pending','in_flight')")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET status='cancelled',terminal_at=now(),updated_at=now(),lease_owner=NULL,
+                 lease_expires_at=NULL,last_error_class='destination_disabled',
+                 last_error='destination disabled before delivery'
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND destination_id=$3
+                 AND status IN ('pending','in_flight')",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .execute(executor)
+        .await
     }
 }
 

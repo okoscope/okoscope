@@ -138,8 +138,16 @@ mod tests {
         let organization = Uuid::new_v4();
         let project = Uuid::new_v4();
         let destination = Uuid::new_v4();
-        sqlx::query("INSERT INTO organizations(id,slug,name,notification_retention_enabled,notification_retention_days) VALUES($1,'boundary','Boundary',true,1)")
-            .bind(organization).execute(&mut *tx).await.unwrap();
+        sqlx::query(
+            "INSERT INTO organizations(
+                 id,slug,name,notification_retention_enabled,notification_retention_days
+             )
+             VALUES($1,'boundary','Boundary',true,1)",
+        )
+        .bind(organization)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,'p','Project')",
         )
@@ -148,15 +156,41 @@ mod tests {
         .execute(&mut *tx)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO webhook_destinations(id,organization_id,project_id,name,url,encrypted_secret,secret_nonce) VALUES($1,$2,$3,'receiver','https://example.test/hook',$4,$5)")
-            .bind(destination).bind(organization).bind(project).bind(vec![4_u8;48]).bind(vec![5_u8;24])
-            .execute(&mut *tx).await.unwrap();
+        sqlx::query(
+            "INSERT INTO webhook_destinations(
+                 id,organization_id,project_id,name,url,encrypted_secret,secret_nonce
+             )
+             VALUES($1,$2,$3,'receiver','https://example.test/hook',$4,$5)",
+        )
+        .bind(destination)
+        .bind(organization)
+        .bind(project)
+        .bind(vec![4_u8; 48])
+        .bind(vec![5_u8; 24])
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         let boundary = Uuid::new_v4();
         let expired = Uuid::new_v4();
         for (id, offset) in [(boundary, 0_f64), (expired, 0.000_001)] {
-            sqlx::query("INSERT INTO notification_deliveries(id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,max_attempts,terminal_at) VALUES($1,$2,$3,$4,'test','test','okoscope.test','{}','succeeded',3,now()-interval '1 day'-make_interval(secs=>$5))")
-                .bind(id).bind(organization).bind(project).bind(destination).bind(offset)
-                .execute(&mut *tx).await.unwrap();
+            sqlx::query(
+                "INSERT INTO notification_deliveries(
+                     id,organization_id,project_id,destination_id,origin,source,event_name,
+                     payload,status,max_attempts,terminal_at
+                 )
+                 VALUES(
+                     $1,$2,$3,$4,'test','test','okoscope.test','{}','succeeded',3,
+                     now()-interval '1 day'-make_interval(secs=>$5)
+                 )",
+            )
+            .bind(id)
+            .bind(organization)
+            .bind(project)
+            .bind(destination)
+            .bind(offset)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         }
         // now() is constant within this transaction, so this checks exactly one
         // microsecond either side without wall-clock sleeps or timing tolerances.

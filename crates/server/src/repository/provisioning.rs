@@ -22,13 +22,21 @@ impl ProvisioningKeyRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO provisioning_idempotency_keys(id,operation,key_hash,request_fingerprint) VALUES($1,$2,$3,$4) ON CONFLICT(operation,key_hash) DO NOTHING RETURNING id")
-            .bind(reservation_id)
-            .bind(operation)
-            .bind(key_hash)
-            .bind(request_fingerprint)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO provisioning_idempotency_keys(
+                 id,operation,key_hash,request_fingerprint
+             )
+             VALUES($1,$2,$3,$4)
+             ON CONFLICT(operation,key_hash)
+             DO NOTHING
+             RETURNING id",
+        )
+        .bind(reservation_id)
+        .bind(operation)
+        .bind(key_hash)
+        .bind(request_fingerprint)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The request fingerprint an idempotency key was reserved with, and the
@@ -41,11 +49,16 @@ impl ProvisioningKeyRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Vec<u8>, Option<Uuid>)>("SELECT request_fingerprint,resource_id FROM provisioning_idempotency_keys WHERE operation=$1 AND key_hash=$2")
-            .bind(operation)
-            .bind(key_hash)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (Vec<u8>, Option<Uuid>)>(
+            "SELECT request_fingerprint,resource_id
+             FROM provisioning_idempotency_keys
+             WHERE operation=$1
+                 AND key_hash=$2",
+        )
+        .bind(operation)
+        .bind(key_hash)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records the resource a reserved key produced.

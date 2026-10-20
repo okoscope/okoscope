@@ -255,8 +255,16 @@ fn inbound_event(
 
 async fn agent(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node','test')")
-        .bind(id).bind(ids.organization_id).bind(ids.cluster_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node','test')",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -278,9 +286,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(ids.organization_id)
-        .bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -443,7 +459,21 @@ async fn release_api_is_paginated_conflict_safe_and_tenant_scoped(pool: sqlx::Pg
         .unwrap();
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
     assert_eq!(server::database::REQUIRED_MIGRATION, 32);
-    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='runtime_events' AND column_name='release_id') OR (table_name='runtime_event_group_memberships' AND column_name='release_id'))").fetch_one(&pool).await.unwrap();
+    let columns: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM information_schema.columns
+         WHERE table_schema='public'
+             AND (
+                 (table_name='runtime_events' AND column_name='release_id')
+                 OR (
+                     table_name='runtime_event_group_memberships'
+                     AND column_name='release_id'
+                 )
+             )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(columns, 2);
 }
 
@@ -678,7 +708,15 @@ async fn ingestion_builds_idempotent_release_summaries_and_complete_diff(pool: s
             .unwrap(),
         0
     );
-    let counts: Vec<(Uuid, i64)> = sqlx::query_as("SELECT release_id,sum(occurrence_count)::bigint FROM runtime_event_group_releases GROUP BY release_id ORDER BY release_id").fetch_all(&pool).await.unwrap();
+    let counts: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT release_id,sum(occurrence_count)::bigint
+         FROM runtime_event_group_releases
+         GROUP BY release_id
+         ORDER BY release_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts.iter().map(|(_, count)| *count).sum::<i64>(), 8);
     assert!(
         counts

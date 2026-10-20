@@ -57,14 +57,20 @@ impl ApplicationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO applications (id, organization_id, project_id, slug, name) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (project_id, slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(slug)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO applications (id, organization_id, project_id, slug, name)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (project_id, slug)
+             DO UPDATE SET name = EXCLUDED.name
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(slug)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// The project's first 200 applications, oldest first.
@@ -76,10 +82,16 @@ impl ApplicationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 ORDER BY created_at,id LIMIT 200")
-            .bind(project_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,organization_id,project_id,slug,name,created_at
+             FROM applications
+             WHERE project_id=$1
+             ORDER BY created_at,id
+             LIMIT 200",
+        )
+        .bind(project_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// One application of the project with the columns of
@@ -93,11 +105,16 @@ impl ApplicationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,organization_id,project_id,slug,name,created_at FROM applications WHERE project_id=$1 AND id=$2")
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,organization_id,project_id,slug,name,created_at
+             FROM applications
+             WHERE project_id=$1
+                 AND id=$2",
+        )
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The organization of an application of the project.
@@ -134,12 +151,23 @@ impl ApplicationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.project_id=$1 AND ($2::uuid IS NULL OR a.id>$2) ORDER BY a.id LIMIT $3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, crate::repository::event_groups::aggregates::COUNT_ALL_FOR_APPLICATION,crate::repository::event_groups::aggregates::LATEST_SEEN_ALL_FOR_APPLICATION))
-            .bind(project_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,
+                 {} runtime_group_count,{} latest_observed_at
+             FROM applications a
+             WHERE a.project_id=$1
+                 AND ($2::uuid IS NULL OR a.id>$2)
+             ORDER BY a.id
+             LIMIT $3",
+            crate::repository::releases::aggregates::COUNT_FOR_APPLICATION,
+            crate::repository::event_groups::aggregates::COUNT_ALL_FOR_APPLICATION,
+            crate::repository::event_groups::aggregates::LATEST_SEEN_ALL_FOR_APPLICATION
+        ))
+        .bind(project_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Creates an application in a project, returning the stored row, or
@@ -353,7 +381,8 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'a','A')",
+            "INSERT INTO applications(id,organization_id,project_id,slug,name)
+             VALUES($1,$2,$3,'a','A')",
         )
         .bind(application)
         .bind(organization)

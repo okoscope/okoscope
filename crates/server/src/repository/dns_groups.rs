@@ -163,7 +163,28 @@ impl DnsGroupRepository {
             fetch_limit,
         } = input;
         let sql = format!(
-            "{GROUP_CTE}, filtered AS (SELECT *,count(*) OVER()::bigint total_group_count,sum(observation_count) OVER()::bigint total_observation_count FROM groups WHERE ($17::text IS NULL OR display_name ILIKE $17 OR EXISTS(SELECT 1 FROM unnest(exact_names) n WHERE n ILIKE $17))) SELECT display_name,process_command,grouping_reason,confidence,first_seen_at,last_seen_at,observation_count,variant_count,query_types,release_count,cluster_count,namespace_count,workload_count,pod_count,container_count,total_group_count,total_observation_count FROM filtered WHERE ($18::timestamptz IS NULL OR (last_seen_at,display_name,process_command)<($18,$19,$20)) ORDER BY last_seen_at DESC,display_name DESC,process_command DESC LIMIT $21"
+            "{GROUP_CTE},
+                 filtered AS (
+                     SELECT *,count(*) OVER()::bigint total_group_count,
+                         sum(observation_count) OVER()::bigint total_observation_count
+                     FROM groups
+                     WHERE (
+                         $17::text IS NULL
+                         OR display_name ILIKE $17
+                         OR EXISTS(SELECT 1 FROM unnest(exact_names) n WHERE n ILIKE $17)
+                     )
+                 )
+             SELECT display_name,process_command,grouping_reason,confidence,first_seen_at,
+                 last_seen_at,observation_count,variant_count,query_types,release_count,
+                 cluster_count,namespace_count,workload_count,pod_count,container_count,
+                 total_group_count,total_observation_count
+             FROM filtered
+             WHERE (
+                 $18::timestamptz IS NULL
+                 OR (last_seen_at,display_name,process_command)<($18,$19,$20)
+             )
+             ORDER BY last_seen_at DESC,display_name DESC,process_command DESC
+             LIMIT $21"
         );
         bind_filter(sqlx::query_as(&sql), filter)
             .bind(pattern)
@@ -189,7 +210,24 @@ impl DnsGroupRepository {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
         let sql = format!(
-            "{GROUP_CTE}, filtered AS (SELECT *,count(*) OVER()::bigint total_group_count,sum(observation_count) OVER()::bigint total_observation_count FROM groups WHERE ($17::text IS NULL OR display_name ILIKE $17 OR EXISTS(SELECT 1 FROM unnest(exact_names) n WHERE n ILIKE $17))) SELECT display_name,process_command,grouping_reason,confidence,first_seen_at,last_seen_at,observation_count,variant_count,query_types,release_count,cluster_count,namespace_count,workload_count,pod_count,container_count,total_group_count,total_observation_count FROM filtered ORDER BY observation_count DESC,display_name ASC,process_command ASC LIMIT $18"
+            "{GROUP_CTE},
+                 filtered AS (
+                     SELECT *,count(*) OVER()::bigint total_group_count,
+                         sum(observation_count) OVER()::bigint total_observation_count
+                     FROM groups
+                     WHERE (
+                         $17::text IS NULL
+                         OR display_name ILIKE $17
+                         OR EXISTS(SELECT 1 FROM unnest(exact_names) n WHERE n ILIKE $17)
+                     )
+                 )
+             SELECT display_name,process_command,grouping_reason,confidence,first_seen_at,
+                 last_seen_at,observation_count,variant_count,query_types,release_count,
+                 cluster_count,namespace_count,workload_count,pod_count,container_count,
+                 total_group_count,total_observation_count
+             FROM filtered
+             ORDER BY observation_count DESC,display_name ASC,process_command ASC
+             LIMIT $18"
         );
         bind_filter(sqlx::query_as(&sql), filter)
             .bind(pattern)
@@ -217,7 +255,21 @@ impl DnsGroupRepository {
         T: for<'r> FromRow<'r, PgRow> + Send + Unpin,
     {
         let sql = format!(
-            "{GROUP_CTE}, selected AS (SELECT n.item_id,n.canonical_name name,n.query_type,min(n.observed_at) first_seen_at,max(n.observed_at) last_seen_at,count(DISTINCT n.occurrence_id)::bigint observation_count FROM normalized n WHERE n.display_name=$17 AND n.process_command=$18 GROUP BY n.item_id,n.canonical_name,n.query_type) SELECT item_id,name,query_type,first_seen_at,last_seen_at,observation_count FROM selected WHERE ($19::uuid IS NULL OR item_id>$19) ORDER BY item_id ASC LIMIT $20"
+            "{GROUP_CTE},
+                 selected AS (
+                     SELECT n.item_id,n.canonical_name name,n.query_type,
+                         min(n.observed_at) first_seen_at,max(n.observed_at) last_seen_at,
+                         count(DISTINCT n.occurrence_id)::bigint observation_count
+                     FROM normalized n
+                     WHERE n.display_name=$17
+                         AND n.process_command=$18
+                     GROUP BY n.item_id,n.canonical_name,n.query_type
+                 )
+             SELECT item_id,name,query_type,first_seen_at,last_seen_at,observation_count
+             FROM selected
+             WHERE ($19::uuid IS NULL OR item_id>$19)
+             ORDER BY item_id ASC
+             LIMIT $20"
         );
         bind_filter(sqlx::query_as(&sql), filter)
             .bind(display_name)

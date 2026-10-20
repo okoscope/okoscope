@@ -94,8 +94,15 @@ async fn previously_applied_thread_windows_upgrade_without_checksum_change(pool:
 #[sqlx::test(migrator = "MIGRATOR")]
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn runtime_behavior_user_labels_have_durable_scoped_schema(pool: sqlx::PgPool) {
-    let columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='runtime_behavior_user_labels'")
-        .fetch_all(&pool).await.unwrap();
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema=current_schema()
+             AND table_name='runtime_behavior_user_labels'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     for column in [
         "inventory_kind",
         "identity_version",
@@ -109,8 +116,15 @@ async fn runtime_behavior_user_labels_have_durable_scoped_schema(pool: sqlx::PgP
             "missing {column}"
         );
     }
-    let indexes: Vec<String> = sqlx::query_scalar("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='runtime_behavior_user_labels'")
-        .fetch_all(&pool).await.unwrap();
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname
+         FROM pg_indexes
+         WHERE schemaname=current_schema()
+             AND tablename='runtime_behavior_user_labels'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert!(
         indexes
             .iter()
@@ -137,8 +151,15 @@ async fn transactional_mail_schema_has_verified_backfill_defaults_and_secret_col
         assert!(exists, "{table} must exist");
     }
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'verified@example.com',$2,now())")
-        .bind(user_id).bind("x".repeat(32)).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at)
+         VALUES($1,'verified@example.com',$2,now())",
+    )
+    .bind(user_id)
+    .bind("x".repeat(32))
+    .execute(&pool)
+    .await
+    .unwrap();
     let row: (bool, String) = sqlx::query_as(
         "SELECT email_verified_at IS NOT NULL,preferred_locale FROM users WHERE id=$1",
     )
@@ -147,8 +168,15 @@ async fn transactional_mail_schema_has_verified_backfill_defaults_and_secret_col
     .await
     .unwrap();
     assert_eq!(row, (true, "en".into()));
-    let columns: Vec<String> = sqlx::query_scalar("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='transactional_mail_outbox'")
-        .fetch_all(&pool).await.unwrap();
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema=current_schema()
+             AND table_name='transactional_mail_outbox'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     for expected in [
         "payload_ciphertext",
         "payload_nonce",
@@ -168,7 +196,11 @@ async fn transactional_mail_schema_has_verified_backfill_defaults_and_secret_col
 #[ignore = "requires a PostgreSQL server with DATABASE_URL"]
 async fn navigation_latest_observation_index_exists(pool: sqlx::PgPool) {
     let definition: String = sqlx::query_scalar(
-        "SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() AND tablename='runtime_events' AND indexname='runtime_events_application_observed_idx'",
+        "SELECT indexdef
+         FROM pg_indexes
+         WHERE schemaname=current_schema()
+             AND tablename='runtime_events'
+             AND indexname='runtime_events_application_observed_idx'",
     )
     .fetch_one(&pool)
     .await
@@ -226,14 +258,19 @@ async fn automatic_release_schema_preserves_manual_releases(pool: sqlx::PgPool) 
         .await
         .unwrap();
     let release_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'legacy-v1',now())")
-        .bind(release_id)
-        .bind(ids.organization_id)
-        .bind(ids.project_id)
-        .bind(ids.application_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,'legacy-v1',now())",
+    )
+    .bind(release_id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let row: (String, Option<i16>, Option<Vec<u8>>) =
         sqlx::query_as("SELECT source,identity_version,identity_digest FROM releases WHERE id=$1")
@@ -271,8 +308,15 @@ async fn access_control_schema_preserves_visibility_and_rejects_cross_tenant_gra
     let first = bootstrap(&pool, &config("access-first")).await.unwrap();
     let second = bootstrap(&pool, &config("access-second")).await.unwrap();
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,'member@example.com',$2,now(),'Member')")
-        .bind(user_id).bind("x".repeat(32)).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,'member@example.com',$2,now(),'Member')",
+    )
+    .bind(user_id)
+    .bind("x".repeat(32))
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'member')",
     )
@@ -281,8 +325,19 @@ async fn access_control_schema_preserves_visibility_and_rejects_cross_tenant_gra
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) SELECT p.organization_id,p.id,$1,'member' FROM projects p JOIN organization_memberships m ON m.organization_id=p.organization_id AND m.user_id=$1 ON CONFLICT(project_id,user_id) DO NOTHING")
-        .bind(user_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+         SELECT p.organization_id,p.id,$1,'member'
+         FROM projects p
+         JOIN organization_memberships m ON m.organization_id=p.organization_id
+             AND m.user_id=$1
+         ON CONFLICT(project_id,user_id)
+         DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let visible: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM project_memberships WHERE project_id=$1 AND user_id=$2)",
     )
@@ -295,8 +350,15 @@ async fn access_control_schema_preserves_visibility_and_rejects_cross_tenant_gra
         visible,
         "upgrade backfill must preserve existing Project visibility"
     );
-    let cross_tenant = sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
-        .bind(second.organization_id).bind(second.project_id).bind(user_id).execute(&pool).await;
+    let cross_tenant = sqlx::query(
+        "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+         VALUES($1,$2,$3,'member')",
+    )
+    .bind(second.organization_id)
+    .bind(second.project_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await;
     assert!(
         cross_tenant.is_err(),
         "Project memberships must require same-tenant Organization membership"
@@ -361,8 +423,16 @@ async fn access_control_schema_protects_last_super_admin_and_owner(pool: sqlx::P
 
 async fn insert_verified_user(pool: &sqlx::PgPool, email: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,$2,$3,now(),'Administrator')")
-        .bind(id).bind(email).bind("x".repeat(32)).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,$2,$3,now(),'Administrator')",
+    )
+    .bind(id)
+    .bind(email)
+    .bind("x".repeat(32))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -383,36 +453,55 @@ async fn inventory_schema_enforces_identity_tenant_scope_and_indexes(pool: sqlx:
         .await
         .unwrap();
 
-    let duplicate = sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',1,$5,'{}'::jsonb,now(),now(),1)")
-        .bind(Uuid::new_v4())
-        .bind(first.organization_id)
-        .bind(first.project_id)
-        .bind(first.application_id)
-        .bind(&digest)
-        .execute(&pool)
-        .await;
+    let duplicate = sqlx::query(
+        "INSERT INTO runtime_inventory_items(
+             id,organization_id,project_id,application_id,inventory_kind,
+             identity_version,identity_digest,semantic_summary,first_seen_at,
+             last_seen_at,occurrence_count
+         )
+         VALUES($1,$2,$3,$4,'process',1,$5,'{}'::jsonb,now(),now(),1)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(first.application_id)
+    .bind(&digest)
+    .execute(&pool)
+    .await;
     assert!(
         duplicate.is_err(),
         "semantic identity must be unique per application and version"
     );
 
-    let cross_tenant = sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',1,$5,'{}'::jsonb,now(),now(),1)")
-        .bind(Uuid::new_v4())
-        .bind(first.organization_id)
-        .bind(first.project_id)
-        .bind(second.application_id)
-        .bind(vec![8_u8; 32])
-        .execute(&pool)
-        .await;
+    let cross_tenant = sqlx::query(
+        "INSERT INTO runtime_inventory_items(
+             id,organization_id,project_id,application_id,inventory_kind,
+             identity_version,identity_digest,semantic_summary,first_seen_at,
+             last_seen_at,occurrence_count
+         )
+         VALUES($1,$2,$3,$4,'process',1,$5,'{}'::jsonb,now(),now(),1)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(second.application_id)
+    .bind(vec![8_u8; 32])
+    .execute(&pool)
+    .await;
     assert!(
         cross_tenant.is_err(),
         "application foreign key must preserve tenant scope"
     );
 
-    let indexes: Vec<String> = sqlx::query_scalar("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename LIKE 'runtime_inventory_%'")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexname
+         FROM pg_indexes
+         WHERE schemaname=current_schema()
+             AND tablename LIKE 'runtime_inventory_%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     for required in [
         "runtime_inventory_items_recent_idx",
         "runtime_inventory_items_kind_recent_idx",
@@ -450,7 +539,12 @@ async fn managed_policy_schema_enforces_revision_and_suppression_contracts(pool:
     }
 
     let immutable_trigger: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='runtime_policy_revisions_immutable' AND NOT tgisinternal)",
+        "SELECT EXISTS(
+             SELECT 1
+             FROM pg_trigger
+             WHERE tgname='runtime_policy_revisions_immutable'
+                 AND NOT tgisinternal
+         )",
     )
     .fetch_one(&pool)
     .await
@@ -458,7 +552,13 @@ async fn managed_policy_schema_enforces_revision_and_suppression_contracts(pool:
     assert!(immutable_trigger);
 
     let constraints: Vec<String> = sqlx::query_scalar(
-        "SELECT conname FROM pg_constraint WHERE conrelid IN ('runtime_policies'::regclass,'runtime_policy_revisions'::regclass,'runtime_policy_commands'::regclass,'runtime_policy_suppressions'::regclass) ORDER BY conname",
+        "SELECT conname
+         FROM pg_constraint
+         WHERE conrelid IN (
+             'runtime_policies'::regclass,'runtime_policy_revisions'::regclass,
+             'runtime_policy_commands'::regclass,'runtime_policy_suppressions'::regclass
+         )
+         ORDER BY conname",
     )
     .fetch_all(&pool)
     .await

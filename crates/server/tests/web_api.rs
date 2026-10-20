@@ -64,14 +64,17 @@ async fn session(pool: &sqlx::PgPool, organization_id: Uuid, role: &str) -> Stri
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(organization_id)
-        .bind(token.digest().to_vec())
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -128,8 +131,19 @@ async fn browser_foundation_is_correlated_cors_safe_and_tenant_scoped(pool: sqlx
     let second = bootstrap(&pool, &second_config).await.unwrap();
     let first_session = session(&pool, first.organization_id, "owner").await;
     let second_session = session(&pool, second.organization_id, "owner").await;
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'1.0.0',now())")
-        .bind(Uuid::new_v4()).bind(first.organization_id).bind(first.project_id).bind(first.application_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,'1.0.0',now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(first.application_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = health::router(
         pool.clone(),
         true,
@@ -333,13 +347,16 @@ async fn navigation_pagination_is_stable_and_cursor_is_scoped(pool: sqlx::PgPool
     let mut project_ids = [Uuid::new_v4(), Uuid::new_v4()];
     project_ids.sort();
     for (index, project_id) in project_ids.into_iter().enumerate() {
-        sqlx::query("INSERT INTO projects(id,organization_id,slug,name,created_at) VALUES($1,$2,$3,$3,'2026-01-01T00:00:00Z')")
-            .bind(project_id)
-            .bind(owner.organization_id)
-            .bind(format!("tied-{index}"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO projects(id,organization_id,slug,name,created_at)
+             VALUES($1,$2,$3,$3,'2026-01-01T00:00:00Z')",
+        )
+        .bind(project_id)
+        .bind(owner.organization_id)
+        .bind(format!("tied-{index}"))
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     let app = health::router(pool, true, None, &WebApiConfig::default());
 
@@ -407,11 +424,36 @@ async fn recovery_api_is_tenant_scoped_idempotent_and_correlated(pool: sqlx::PgP
     let foreign_session = session(&pool, foreign.organization_id, "owner").await;
     let destination_id = Uuid::new_v4();
     let delivery_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO webhook_destinations(id,organization_id,project_id,name,url,encrypted_secret,secret_nonce) VALUES($1,$2,$3,'receiver','https://receiver.example/hook',$4,$5)")
-        .bind(destination_id).bind(owner.organization_id).bind(owner.project_id)
-        .bind(vec![1_u8; 48]).bind(vec![2_u8; 24]).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO notification_deliveries(id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,attempt_count,max_attempts,terminal_at,last_error_class) VALUES($1,$2,$3,$4,'test','test','okoscope.test','{}','failed',1,3,now(),'timeout')")
-        .bind(delivery_id).bind(owner.organization_id).bind(owner.project_id).bind(destination_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO webhook_destinations(
+             id,organization_id,project_id,name,url,encrypted_secret,secret_nonce
+         )
+         VALUES($1,$2,$3,'receiver','https://receiver.example/hook',$4,$5)",
+    )
+    .bind(destination_id)
+    .bind(owner.organization_id)
+    .bind(owner.project_id)
+    .bind(vec![1_u8; 48])
+    .bind(vec![2_u8; 24])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO notification_deliveries(
+             id,organization_id,project_id,destination_id,origin,source,event_name,
+             payload,status,attempt_count,max_attempts,terminal_at,last_error_class
+         )
+         VALUES(
+             $1,$2,$3,$4,'test','test','okoscope.test','{}','failed',1,3,now(),'timeout'
+         )",
+    )
+    .bind(delivery_id)
+    .bind(owner.organization_id)
+    .bind(owner.project_id)
+    .bind(destination_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let notification_service = notifications(pool.clone(), false);
     let app = health::router(
         pool,

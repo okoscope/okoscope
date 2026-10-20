@@ -16,7 +16,11 @@ use uuid::Uuid;
 /// `workload_namespace`, `workload_kind`, `workload_name`, `workload_labels`,
 /// `chart_version`, `configuration_schema_version`, `created_at` and
 /// `updated_at`.
-const INSTALL_SELECT: &str = "SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at FROM application_installations";
+const INSTALL_SELECT: &str =
+    "SELECT id,application_id,credential_id,cluster_name,workload_namespace,
+         workload_kind,workload_name,workload_labels,chart_version,
+         configuration_schema_version,created_at,updated_at
+     FROM application_installations";
 
 /// Input to [`InstallationRepository::record_status`].
 #[derive(Debug)]
@@ -86,16 +90,31 @@ impl InstallationRepository {
             reason,
             observed_at,
         } = input;
-        sqlx::query("INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) SELECT i.id,$4,$5,$6,$7 FROM application_installations i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1 ON CONFLICT(installation_id,node_name) DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,observed_at=EXCLUDED.observed_at,updated_at=now() WHERE application_installation_status.observed_at<=EXCLUDED.observed_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(node_name)
-            .bind(state)
-            .bind(reason)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO application_installation_status(
+                 installation_id,node_name,state,reason,observed_at
+             )
+             SELECT i.id,$4,$5,$6,$7
+             FROM application_installations i
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             ORDER BY i.created_at DESC
+             LIMIT 1
+             ON CONFLICT(installation_id,node_name)
+             DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,
+                 observed_at=EXCLUDED.observed_at,updated_at=now()
+             WHERE application_installation_status.observed_at<=EXCLUDED.observed_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(node_name)
+        .bind(state)
+        .bind(reason)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// The application's installations, oldest first, with the columns of
@@ -158,11 +177,18 @@ impl InstallationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at,request_hash FROM application_installations WHERE organization_id=$1 AND idempotency_key=$2")
-            .bind(organization_id)
-            .bind(idempotency_key)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at,request_hash
+             FROM application_installations
+             WHERE organization_id=$1
+                 AND idempotency_key=$2",
+        )
+        .bind(organization_id)
+        .bind(idempotency_key)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a new installation and returns it with the columns of
@@ -188,23 +214,33 @@ impl InstallationRepository {
             chart_version,
             configuration_schema_version,
         } = input;
-        sqlx::query_as("INSERT INTO application_installations(id,organization_id,project_id,application_id,credential_id,idempotency_key,request_hash,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(credential_id)
-            .bind(idempotency_key)
-            .bind(request_hash)
-            .bind(cluster_name)
-            .bind(workload_namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(workload_labels)
-            .bind(chart_version)
-            .bind(configuration_schema_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "INSERT INTO application_installations(
+                 id,organization_id,project_id,application_id,credential_id,idempotency_key,
+                 request_hash,cluster_name,workload_namespace,workload_kind,workload_name,
+                 workload_labels,chart_version,configuration_schema_version
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             RETURNING id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(credential_id)
+        .bind(idempotency_key)
+        .bind(request_hash)
+        .bind(cluster_name)
+        .bind(workload_namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(workload_labels)
+        .bind(chart_version)
+        .bind(configuration_schema_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// Updates an installation's cluster and workload intent and returns it
@@ -229,18 +265,29 @@ impl InstallationRepository {
             workload_name,
             workload_labels,
         } = input;
-        sqlx::query_as("UPDATE application_installations SET cluster_name=$5,workload_namespace=$6,workload_kind=$7,workload_name=$8,workload_labels=$9,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(installation_id)
-            .bind(cluster_name)
-            .bind(workload_namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(workload_labels)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE application_installations
+             SET cluster_name=$5,workload_namespace=$6,workload_kind=$7,workload_name=$8,
+                 workload_labels=$9,updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+             RETURNING id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(installation_id)
+        .bind(cluster_name)
+        .bind(workload_namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(workload_labels)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Locks an installation in the application and returns its credential.
@@ -254,13 +301,21 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT credential_id FROM application_installations WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 FOR UPDATE")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(installation_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT credential_id
+             FROM application_installations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(installation_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Points an installation at a new credential.
@@ -292,12 +347,21 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>("SELECT c.last_used_at,c.revoked_at FROM application_installations i JOIN application_ingestion_credentials c ON c.id=i.credential_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            "SELECT c.last_used_at,c.revoked_at
+             FROM application_installations i
+             JOIN application_ingestion_credentials c ON c.id=i.credential_id
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             ORDER BY i.created_at DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The most recently reported installation status of the application:
@@ -312,12 +376,22 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>, i64)>("SELECT s.state,s.reason,max(s.observed_at),count(*) FROM application_installation_status s JOIN application_installations i ON i.id=s.installation_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 GROUP BY s.state,s.reason ORDER BY max(s.observed_at) DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>, i64)>(
+            "SELECT s.state,s.reason,max(s.observed_at),count(*)
+             FROM application_installation_status s
+             JOIN application_installations i ON i.id=s.installation_id
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             GROUP BY s.state,s.reason
+             ORDER BY max(s.observed_at) DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 }
 
@@ -651,7 +725,10 @@ mod tests {
             ),
         ] {
             sqlx::query(
-                "INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) VALUES($1,$2,$3,$4,$5)",
+                "INSERT INTO application_installation_status(
+                     installation_id,node_name,state,reason,observed_at
+                 )
+                 VALUES($1,$2,$3,$4,$5)",
             )
             .bind(installation)
             .bind(node)

@@ -49,20 +49,27 @@ impl AccessAuditRepository {
             new_role,
             request_id,
         } = input;
-        sqlx::query("INSERT INTO access_audit_records(id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded',$11,now()+interval '365 days')")
-            .bind(id)
-            .bind(actor_kind)
-            .bind(actor_user_id)
-            .bind(action)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(target_user_id)
-            .bind(invitation_id)
-            .bind(previous_role)
-            .bind(new_role)
-            .bind(request_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO access_audit_records(
+                 id,actor_kind,actor_user_id,action,organization_id,project_id,
+                 target_user_id,invitation_id,previous_role,new_role,outcome,request_id,
+                 retain_until
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'succeeded',$11,now()+interval '365 days')",
+        )
+        .bind(id)
+        .bind(actor_kind)
+        .bind(actor_user_id)
+        .bind(action)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(target_user_id)
+        .bind(invitation_id)
+        .bind(previous_role)
+        .bind(new_role)
+        .bind(request_id)
+        .execute(executor)
+        .await
     }
 
     /// A page of access audit records by id, within one organization when
@@ -79,12 +86,21 @@ impl AccessAuditRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,actor_kind,actor_user_id,action,organization_id,project_id,target_user_id,invitation_id,previous_role,new_role,outcome,request_id,created_at FROM access_audit_records WHERE ($1::uuid IS NULL OR organization_id=$1) AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3")
-            .bind(organization_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,actor_kind,actor_user_id,action,organization_id,project_id,
+                 target_user_id,invitation_id,previous_role,new_role,outcome,request_id,
+                 created_at
+             FROM access_audit_records
+             WHERE ($1::uuid IS NULL OR organization_id=$1)
+                 AND ($2::uuid IS NULL OR id>$2)
+             ORDER BY id
+             LIMIT $3",
+        )
+        .bind(organization_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 }
 
@@ -212,7 +228,10 @@ mod insert_tests {
         .await
         .unwrap();
         let record: (String, String, Option<String>, bool) = sqlx::query_as(
-            "SELECT outcome,action,new_role,retain_until BETWEEN now()+interval '364 days' AND now()+interval '366 days' FROM access_audit_records WHERE id=$1",
+            "SELECT outcome,action,new_role,
+                 retain_until BETWEEN now()+interval '364 days' AND now()+interval '366 days'
+             FROM access_audit_records
+             WHERE id=$1",
         )
         .bind(id)
         .fetch_one(&pool)

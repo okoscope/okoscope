@@ -35,13 +35,19 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO clusters (id, organization_id, external_id, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, external_id) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(external_id)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO clusters (id, organization_id, external_id, name)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (organization_id, external_id)
+             DO UPDATE SET name = EXCLUDED.name
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(external_id)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records a cluster credential by its hash, or reinstates a revoked one.
@@ -55,13 +61,20 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO cluster_credentials (id, organization_id, cluster_id, credential_hash) VALUES ($1, $2, $3, $4) ON CONFLICT (credential_hash) DO UPDATE SET revoked_at = NULL")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(credential_hash)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO cluster_credentials (
+                 id, organization_id, cluster_id, credential_hash
+             )
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (credential_hash)
+             DO UPDATE SET revoked_at = NULL",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(credential_hash)
+        .execute(executor)
+        .await
     }
 
     /// Records the cluster an agent reports by its external id, or updates
@@ -76,13 +89,19 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO clusters(id,organization_id,external_id,name) VALUES($1,$2,$3,COALESCE($4,$3)) ON CONFLICT(organization_id,external_id) DO UPDATE SET name=COALESCE($4,clusters.name) RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(external_id)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO clusters(id,organization_id,external_id,name)
+             VALUES($1,$2,$3,COALESCE($4,$3))
+             ON CONFLICT(organization_id,external_id)
+             DO UPDATE SET name=COALESCE($4,clusters.name)
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(external_id)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records the agent of a node, or refreshes its version, platform and
@@ -104,17 +123,28 @@ impl ClusterRepository {
             kernel_release,
             capabilities,
         } = input;
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version, architecture, kernel_release, capabilities) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (cluster_id, node_name) DO UPDATE SET agent_version=EXCLUDED.agent_version, architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release, capabilities=EXCLUDED.capabilities, last_seen_at=now() RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(node_name)
-            .bind(agent_version)
-            .bind(architecture)
-            .bind(kernel_release)
-            .bind(capabilities)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO agents (
+                 id, organization_id, cluster_id, node_name, agent_version, architecture,
+                 kernel_release, capabilities
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (cluster_id, node_name)
+             DO UPDATE SET agent_version=EXCLUDED.agent_version,
+                 architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release,
+                 capabilities=EXCLUDED.capabilities, last_seen_at=now()
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(node_name)
+        .bind(agent_version)
+        .bind(architecture)
+        .bind(kernel_release)
+        .bind(capabilities)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records a new agent session.
@@ -129,14 +159,19 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO agent_sessions (id, organization_id, cluster_id, agent_id, protocol_version) VALUES ($1,$2,$3,$4,$5)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(agent_id)
-            .bind(protocol_version)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO agent_sessions (
+                 id, organization_id, cluster_id, agent_id, protocol_version
+             )
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(agent_id)
+        .bind(protocol_version)
+        .execute(executor)
+        .await
     }
 
     /// Records that the agent was seen now.
@@ -424,7 +459,10 @@ mod tests {
         .await
         .unwrap();
         let status: (String, Option<String>) = sqlx::query_as(
-            "SELECT state,reason FROM application_installation_status WHERE installation_id=$1 AND node_name='node-b'",
+            "SELECT state,reason
+             FROM application_installation_status
+             WHERE installation_id=$1
+                 AND node_name='node-b'",
         )
         .bind(installation.id)
         .fetch_one(&pool)

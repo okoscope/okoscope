@@ -88,12 +88,18 @@ impl OrganizationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO organizations (id, slug, name) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-            .bind(id)
-            .bind(slug)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO organizations (id, slug, name)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (slug)
+             DO UPDATE SET name = EXCLUDED.name
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(slug)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Locks the organization row for update. Fails with `RowNotFound` when
@@ -152,11 +158,17 @@ impl OrganizationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,slug,name,status,created_at,updated_at FROM organizations WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id LIMIT $2")
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,slug,name,status,created_at,updated_at
+             FROM organizations
+             WHERE ($1::uuid IS NULL OR id>$1)
+             ORDER BY id
+             LIMIT $2",
+        )
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One organization with the columns of [`Self::platform_page`].

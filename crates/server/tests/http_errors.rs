@@ -70,13 +70,16 @@ fn config(name: &str) -> BootstrapConfig {
 
 async fn user(pool: &sqlx::PgPool) -> Uuid {
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,$2,$3,now(),$2)")
-        .bind(user_id)
-        .bind(format!("{user_id}@example.test"))
-        .bind("x".repeat(32))
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,$2,$3,now(),$2)",
+    )
+    .bind(user_id)
+    .bind(format!("{user_id}@example.test"))
+    .bind("x".repeat(32))
+    .execute(pool)
+    .await
+    .unwrap();
     user_id
 }
 
@@ -92,17 +95,32 @@ async fn member_session(pool: &sqlx::PgPool, ids: &BootstrapIds, role: &str) -> 
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(ids.organization_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
 async fn super_admin_session(pool: &sqlx::PgPool, user_id: Uuid) -> String {
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until)
+         VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 

@@ -1965,7 +1965,10 @@ mod tests {
             )
             .await;
             sqlx::query_scalar(
-                "SELECT id FROM runtime_inventory_items WHERE application_id=$1 AND semantic_summary->>'executable'='/bin/a'",
+                "SELECT id
+                 FROM runtime_inventory_items
+                 WHERE application_id=$1
+                     AND semantic_summary->>'executable'='/bin/a'",
             )
             .bind(tenant.application_id)
             .fetch_one(pool)

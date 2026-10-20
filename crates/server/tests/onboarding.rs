@@ -127,8 +127,19 @@ async fn setup_is_atomic_single_use_and_secret_safe(pool: sqlx::PgPool) {
     assert_eq!(body["platform_role"], "super_admin");
     assert!(body["active_organization_id"].is_null());
     assert!(!cookie.contains(SETUP_TOKEN));
-    let counts: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM organizations),(SELECT count(*) FROM platform_role_assignments WHERE role='super_admin' AND revoked_at IS NULL),(SELECT count(*) FROM access_audit_records WHERE action='setup.completed')")
-        .fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM organizations),
+             (
+                 SELECT count(*)
+                 FROM platform_role_assignments
+                 WHERE role='super_admin'
+                     AND revoked_at IS NULL
+             ),
+             (SELECT count(*) FROM access_audit_records WHERE action='setup.completed')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (1, 0, 1, 1));
 
     let replay = call(
@@ -195,11 +206,14 @@ async fn concurrent_setup_creates_exactly_one_super_admin(pool: sqlx::PgPool) {
     assert!(statuses.contains(&StatusCode::CREATED));
     assert!(statuses.contains(&StatusCode::CONFLICT));
     let owners: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM platform_role_assignments WHERE role='super_admin' AND revoked_at IS NULL",
+        "SELECT count(*)
+         FROM platform_role_assignments
+         WHERE role='super_admin'
+             AND revoked_at IS NULL",
     )
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(owners, 1);
 }
 
@@ -301,8 +315,16 @@ async fn installation_resume_update_replace_and_readiness_are_safe(pool: sqlx::P
         .unwrap()
         .to_owned();
     let application_id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'app','App')")
-        .bind(application_id).bind(organization_id).bind(project_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO applications(id,organization_id,project_id,slug,name)
+         VALUES($1,$2,$3,'app','App')",
+    )
+    .bind(application_id)
+    .bind(organization_id)
+    .bind(project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let uri = installation_uri(
         &serde_json::json!({"project_id":project_id,"application_id":application_id}),
     );
@@ -415,14 +437,17 @@ async fn installation_resume_update_replace_and_readiness_are_safe(pool: sqlx::P
     .await
     .unwrap();
     let session = server::auth::SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(uuid::Uuid::new_v4())
-        .bind(member)
-        .bind(organization_id)
-        .bind(session.digest().to_vec())
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(member)
+    .bind(organization_id)
+    .bind(session.digest().to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
     let member_cookie = format!("okoscope_session={}", session.expose());
     for path in [
         uri.clone(),

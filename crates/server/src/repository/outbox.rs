@@ -24,15 +24,23 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO outbox_messages (id, organization_id, project_id, topic, aggregate_id, schema_version, source, payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,$5,$6) ON CONFLICT (topic, aggregate_id, schema_version) DO NOTHING")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(group_id)
-            .bind(source)
-            .bind(payload)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO outbox_messages (
+                 id, organization_id, project_id, topic, aggregate_id, schema_version,
+                 source, payload
+             )
+             VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,$5,$6)
+             ON CONFLICT (topic, aggregate_id, schema_version)
+             DO NOTHING",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(group_id)
+        .bind(source)
+        .bind(payload)
+        .execute(executor)
+        .await
     }
 
     /// How many outbox messages are not processed yet.
@@ -59,14 +67,22 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO outbox_messages (id,organization_id,project_id,topic,aggregate_id,schema_version,source,payload) VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,'live',$5) ON CONFLICT (topic,aggregate_id,schema_version) DO NOTHING")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(group_id)
-            .bind(payload)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO outbox_messages (
+                 id,organization_id,project_id,topic,aggregate_id,schema_version,source,
+                 payload
+             )
+             VALUES ($1,$2,$3,'runtime_group.first_seen',$4,1,'live',$5)
+             ON CONFLICT (topic,aggregate_id,schema_version)
+             DO NOTHING",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(group_id)
+        .bind(payload)
+        .execute(executor)
+        .await
     }
 
     /// Locks up to `limit` unprocessed, unmaterialized first-seen messages,
@@ -79,10 +95,19 @@ impl OutboxRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,organization_id,project_id,aggregate_id,source,payload,created_at FROM outbox_messages WHERE topic='runtime_group.first_seen' AND processed_at IS NULL AND materialized_at IS NULL ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT $1")
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,organization_id,project_id,aggregate_id,source,payload,created_at
+             FROM outbox_messages
+             WHERE topic='runtime_group.first_seen'
+                 AND processed_at IS NULL
+                 AND materialized_at IS NULL
+             ORDER BY created_at,id
+             FOR UPDATE SKIP LOCKED
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Records the policy eligibility a message was evaluated with.
@@ -97,14 +122,19 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE outbox_messages SET policy_eligibility_reason=$2,policy_evaluated_at=$3,policy_revision_id=$4,policy_suppression_id=$5 WHERE id=$1")
-            .bind(id)
-            .bind(reason)
-            .bind(evaluated_at)
-            .bind(policy_revision_id)
-            .bind(policy_suppression_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE outbox_messages
+             SET policy_eligibility_reason=$2,policy_evaluated_at=$3,policy_revision_id=$4,
+                 policy_suppression_id=$5
+             WHERE id=$1",
+        )
+        .bind(id)
+        .bind(reason)
+        .bind(evaluated_at)
+        .bind(policy_revision_id)
+        .bind(policy_suppression_id)
+        .execute(executor)
+        .await
     }
 
     /// Marks a message materialized and processed for `completion_reason`.
@@ -116,11 +146,15 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason=$2 WHERE id=$1")
-            .bind(id)
-            .bind(completion_reason)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE outbox_messages
+             SET materialized_at=now(),processed_at=now(),completion_reason=$2
+             WHERE id=$1",
+        )
+        .bind(id)
+        .bind(completion_reason)
+        .execute(executor)
+        .await
     }
 
     /// Marks a message materialized and processed because the project has no
@@ -132,10 +166,16 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='no_destinations',policy_eligibility_reason='no_destinations' WHERE id=$1")
-            .bind(id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE outbox_messages
+             SET materialized_at=now(),processed_at=now(),
+                 completion_reason='no_destinations',
+                 policy_eligibility_reason='no_destinations'
+             WHERE id=$1",
+        )
+        .bind(id)
+        .execute(executor)
+        .await
     }
 
     /// Marks a message materialized and processed because every delivery was
@@ -147,10 +187,16 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE outbox_messages SET materialized_at=now(),processed_at=now(),completion_reason='backfill_suppressed',policy_eligibility_reason='backfill_suppressed' WHERE id=$1")
-            .bind(id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE outbox_messages
+             SET materialized_at=now(),processed_at=now(),
+                 completion_reason='backfill_suppressed',
+                 policy_eligibility_reason='backfill_suppressed'
+             WHERE id=$1",
+        )
+        .bind(id)
+        .execute(executor)
+        .await
     }
 
     /// Marks a message materialized; it is processed once its deliveries end.
@@ -176,10 +222,21 @@ impl OutboxRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE outbox_messages o SET processed_at=now(),completion_reason='deliveries_terminal' WHERE o.id=$1 AND o.materialized_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notification_deliveries d WHERE d.outbox_message_id=o.id AND d.status NOT IN ('succeeded','failed','suppressed','cancelled'))")
-            .bind(id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE outbox_messages o
+             SET processed_at=now(),completion_reason='deliveries_terminal'
+             WHERE o.id=$1
+                 AND o.materialized_at IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM notification_deliveries d
+                     WHERE d.outbox_message_id=o.id
+                         AND d.status NOT IN ('succeeded','failed','suppressed','cancelled')
+                 )",
+        )
+        .bind(id)
+        .execute(executor)
+        .await
     }
 }
 
@@ -222,7 +279,9 @@ mod tests {
 
     async fn state(pool: &PgPool, id: Uuid) -> State {
         sqlx::query_as(
-            "SELECT materialized_at,processed_at,completion_reason,policy_eligibility_reason FROM outbox_messages WHERE id=$1",
+            "SELECT materialized_at,processed_at,completion_reason,policy_eligibility_reason
+             FROM outbox_messages
+             WHERE id=$1",
         )
         .bind(id)
         .fetch_one(pool)

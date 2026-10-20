@@ -17,7 +17,15 @@ use uuid::Uuid;
 /// `project_name`, `recipient_email`, `role`, `inviter_display_name`,
 /// `locale`, `created_at`, `expires_at`, `accepted_at`,
 /// `accepted_by_user_id`, `revoked_at` and `replaced_at`.
-const INVITATION_SELECT: &str = "SELECT i.id,i.organization_id,o.name organization_name,i.project_id,p.name project_name,i.recipient_email,i.role,u.display_name inviter_display_name,i.locale,i.created_at,i.expires_at,i.accepted_at,i.accepted_by_user_id,i.revoked_at,i.replaced_at FROM invitations i JOIN organizations o ON o.id=i.organization_id LEFT JOIN projects p ON p.id=i.project_id JOIN users u ON u.id=i.inviter_user_id";
+const INVITATION_SELECT: &str =
+    "SELECT i.id,i.organization_id,o.name organization_name,i.project_id,
+         p.name project_name,i.recipient_email,i.role,
+         u.display_name inviter_display_name,i.locale,i.created_at,i.expires_at,
+         i.accepted_at,i.accepted_by_user_id,i.revoked_at,i.replaced_at
+     FROM invitations i
+     JOIN organizations o ON o.id=i.organization_id
+     LEFT JOIN projects p ON p.id=i.project_id
+     JOIN users u ON u.id=i.inviter_user_id";
 
 /// Input to [`InvitationRepository::insert`].
 #[derive(Debug)]
@@ -220,18 +228,24 @@ impl InvitationRepository {
             token_digest,
             expires_at,
         } = input;
-        sqlx::query("INSERT INTO invitations(id,organization_id,project_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9+interval '365 days')")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(recipient_email)
-            .bind(role)
-            .bind(inviter_user_id)
-            .bind(locale)
-            .bind(token_digest)
-            .bind(expires_at)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO invitations(
+                 id,organization_id,project_id,recipient_email,role,inviter_user_id,locale,
+                 token_digest,expires_at,retain_until
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9+interval '365 days')",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(recipient_email)
+        .bind(role)
+        .bind(inviter_user_id)
+        .bind(locale)
+        .bind(token_digest)
+        .bind(expires_at)
+        .execute(executor)
+        .await
     }
 
     /// Reports whether a user with this email already belongs to the project.
@@ -243,11 +257,19 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users u JOIN project_memberships m ON m.user_id=u.id WHERE u.email=$1 AND m.project_id=$2)")
-            .bind(recipient_email)
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM users u
+                 JOIN project_memberships m ON m.user_id=u.id
+                 WHERE u.email=$1
+                     AND m.project_id=$2
+             )",
+        )
+        .bind(recipient_email)
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Reports whether a user with this email already belongs to the
@@ -260,11 +282,19 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users u JOIN organization_memberships m ON m.user_id=u.id WHERE u.email=$1 AND m.organization_id=$2)")
-            .bind(recipient_email)
-            .bind(organization_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM users u
+                 JOIN organization_memberships m ON m.user_id=u.id
+                 WHERE u.email=$1
+                     AND m.organization_id=$2
+             )",
+        )
+        .bind(recipient_email)
+        .bind(organization_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// How many invitations the user issued in the last hour.
@@ -275,10 +305,15 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM invitations WHERE inviter_user_id=$1 AND created_at>now()-interval '1 hour'")
-            .bind(inviter_user_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM invitations
+             WHERE inviter_user_id=$1
+                 AND created_at>now()-interval '1 hour'",
+        )
+        .bind(inviter_user_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Locks the invitation for this recipient and scope that is neither
@@ -293,12 +328,22 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Uuid, DateTime<Utc>)>("SELECT id,expires_at FROM invitations WHERE organization_id=$1 AND project_id IS NOT DISTINCT FROM $2 AND recipient_email=$3 AND accepted_at IS NULL AND revoked_at IS NULL AND replaced_at IS NULL FOR UPDATE")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(recipient_email)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (Uuid, DateTime<Utc>)>(
+            "SELECT id,expires_at
+             FROM invitations
+             WHERE organization_id=$1
+                 AND project_id IS NOT DISTINCT FROM $2
+                 AND recipient_email=$3
+                 AND accepted_at IS NULL
+                 AND revoked_at IS NULL
+                 AND replaced_at IS NULL
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(recipient_email)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Marks an invitation revoked now.
@@ -325,11 +370,15 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE invitations SET revoked_at=NULL,replaced_at=now(),replaced_by_invitation_id=$2 WHERE id=$1")
-            .bind(expired_id)
-            .bind(replacement_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE invitations
+             SET revoked_at=NULL,replaced_at=now(),replaced_by_invitation_id=$2
+             WHERE id=$1",
+        )
+        .bind(expired_id)
+        .bind(replacement_id)
+        .execute(executor)
+        .await
     }
 
     /// The organization name, project name when scoped to a project, and
@@ -343,12 +392,18 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (String, Option<String>, String)>("SELECT o.name,p.name,u.display_name FROM organizations o LEFT JOIN projects p ON p.id=$2 JOIN users u ON u.id=$3 WHERE o.id=$1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(inviter_user_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT o.name,p.name,u.display_name
+             FROM organizations o
+             LEFT JOIN projects p ON p.id=$2
+             JOIN users u ON u.id=$3
+             WHERE o.id=$1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(inviter_user_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// How many invitations the user resent in the last hour, counted from
@@ -360,10 +415,16 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM access_audit_records WHERE actor_user_id=$1 AND action='invitation.resent' AND created_at>now()-interval '1 hour'")
-            .bind(actor_user_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM access_audit_records
+             WHERE actor_user_id=$1
+                 AND action='invitation.resent'
+                 AND created_at>now()-interval '1 hour'",
+        )
+        .bind(actor_user_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Accepts a live invitation on behalf of the user. Affects no row when
@@ -376,11 +437,19 @@ impl InvitationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE invitations SET accepted_at=now(),accepted_by_user_id=$2 WHERE id=$1 AND accepted_at IS NULL AND revoked_at IS NULL AND replaced_at IS NULL AND expires_at>now()")
-            .bind(invitation_id)
-            .bind(user_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE invitations
+             SET accepted_at=now(),accepted_by_user_id=$2
+             WHERE id=$1
+                 AND accepted_at IS NULL
+                 AND revoked_at IS NULL
+                 AND replaced_at IS NULL
+                 AND expires_at>now()",
+        )
+        .bind(invitation_id)
+        .bind(user_id)
+        .execute(executor)
+        .await
     }
 }
 
@@ -665,7 +734,9 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "UPDATE invitations SET created_at=now()-interval '2 hours',expires_at=now()-interval '1 hour' WHERE id=$1",
+            "UPDATE invitations
+             SET created_at=now()-interval '2 hours',expires_at=now()-interval '1 hour'
+             WHERE id=$1",
         )
         .bind(expired)
         .execute(&pool)

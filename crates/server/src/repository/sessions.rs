@@ -54,10 +54,45 @@ impl SessionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE user_sessions s SET last_used_at=now() FROM users u WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id AND o.status='active')) RETURNING s.id session_id,s.user_id,s.organization_id,(SELECT m.role FROM organization_memberships m WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id) role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=s.user_id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,s.privileged_until")
-            .bind(token_hash)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE user_sessions s
+             SET last_used_at=now()
+             FROM users u
+             WHERE s.token_hash=$1
+                 AND s.revoked_at IS NULL
+                 AND s.expires_at>now()
+                 AND u.id=s.user_id
+                 AND u.disabled_at IS NULL
+                 AND (
+                     s.organization_id IS NULL
+                     OR EXISTS(
+                         SELECT 1
+                         FROM organization_memberships m
+                         JOIN organizations o ON o.id=m.organization_id
+                         WHERE m.user_id=s.user_id
+                             AND m.organization_id=s.organization_id
+                             AND o.status='active'
+                     )
+                 )
+             RETURNING s.id session_id,s.user_id,s.organization_id,
+                 (
+                     SELECT m.role
+                     FROM organization_memberships m
+                     WHERE m.user_id=s.user_id
+                         AND m.organization_id=s.organization_id
+                 ) role,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=s.user_id
+                         AND p.role='super_admin'
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 s.privileged_until",
+        )
+        .bind(token_hash)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a new session under the digest of its token.
@@ -227,7 +262,8 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+            "INSERT INTO organization_memberships(organization_id,user_id,role)
+             VALUES($1,$2,'owner')",
         )
         .bind(id)
         .bind(user)

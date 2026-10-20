@@ -194,13 +194,16 @@ async fn effective_access_matrix_is_tenant_safe(pool: sqlx::PgPool) {
         .unwrap()
         .is_none()
     );
-    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
-        .bind(organization_id)
-        .bind(project_id)
-        .bind(member)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+         VALUES($1,$2,$3,'member')",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
     let assigned = resolve_project_access(
         &pool,
         principal(

@@ -132,14 +132,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(ids.organization_id)
-        .bind(token.digest().as_slice())
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -163,24 +166,45 @@ fn assert_summary_count_invariants(summary: &serde_json::Value) {
 
 async fn release(pool: &sqlx::PgPool, ids: &BootstrapIds, version: &str, age_days: i64) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,$5,$6)")
-        .bind(id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(version)
-        .bind(Utc::now() - Duration::days(age_days)).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(version)
+    .bind(Utc::now() - Duration::days(age_days))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
 async fn inventory_item(pool: &sqlx::PgPool, ids: &BootstrapIds, seed: u8) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',2,$5,jsonb_build_object('executable',$6),now(),now(),1)")
-        .bind(id)
-        .bind(ids.organization_id)
-        .bind(ids.project_id)
-        .bind(ids.application_id)
-        .bind(vec![seed; 32])
-        .bind(format!("/app/process-{seed}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_inventory_items(
+             id,organization_id,project_id,application_id,inventory_kind,
+             identity_version,identity_digest,semantic_summary,first_seen_at,
+             last_seen_at,occurrence_count
+         )
+         VALUES(
+             $1,$2,$3,$4,'process',2,$5,jsonb_build_object('executable',$6),now(),now(),1
+         )",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(vec![seed; 32])
+    .bind(format!("/app/process-{seed}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -200,21 +224,28 @@ async fn inventory_sighting(
     item_id: Uuid,
     sighting: Sighting<'_>,
 ) {
-    sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,now(),now())")
-        .bind(ids.organization_id)
-        .bind(ids.project_id)
-        .bind(ids.application_id)
-        .bind(item_id)
-        .bind(sighting.cluster_id)
-        .bind(sighting.namespace)
-        .bind(sighting.workload_kind)
-        .bind(sighting.workload_name)
-        .bind(sighting.pod_uid)
-        .bind(sighting.container_name)
-        .bind(sighting.occurrence_count)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_inventory_sightings(
+             organization_id,project_id,application_id,item_id,cluster_id,namespace,
+             workload_kind,workload_name,pod_uid,pod_name,container_name,
+             occurrence_count,first_seen_at,last_seen_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,now(),now())",
+    )
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(item_id)
+    .bind(sighting.cluster_id)
+    .bind(sighting.namespace)
+    .bind(sighting.workload_kind)
+    .bind(sighting.workload_name)
+    .bind(sighting.pod_uid)
+    .bind(sighting.container_name)
+    .bind(sighting.occurrence_count)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[sqlx::test(migrator = "server::database::MIGRATOR")]
@@ -233,8 +264,16 @@ async fn inventory_api_covers_kinds_filters_evidence_pagination_and_tenant_isola
     let unknown_release = release(&pool, &first, "v3", 1).await;
     let foreign_release = release(&pool, &second, "foreign", 1).await;
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-a','test')")
-        .bind(agent_id).bind(first.organization_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-a','test')",
+    )
+    .bind(agent_id)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: first.organization_id,
@@ -789,18 +828,25 @@ async fn inventory_summary_normalizes_legacy_lifecycle_kinds(pool: sqlx::PgPool)
     {
         let mut digest = vec![0_u8; 32];
         digest[0] = u8::try_from(index + 1).unwrap();
-        sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,$5,2,$6,'{}'::jsonb,$7,$7,$8)")
-            .bind(Uuid::new_v4())
-            .bind(ids.organization_id)
-            .bind(ids.project_id)
-            .bind(ids.application_id)
-            .bind(kind)
-            .bind(digest)
-            .bind(observed_at)
-            .bind(occurrence_count)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO runtime_inventory_items(
+                 id,organization_id,project_id,application_id,inventory_kind,
+                 identity_version,identity_digest,semantic_summary,first_seen_at,
+                 last_seen_at,occurrence_count
+             )
+             VALUES($1,$2,$3,$4,$5,2,$6,'{}'::jsonb,$7,$7,$8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(ids.organization_id)
+        .bind(ids.project_id)
+        .bind(ids.application_id)
+        .bind(kind)
+        .bind(digest)
+        .bind(observed_at)
+        .bind(occurrence_count)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     let response = inventory_api::router(pool)
@@ -835,12 +881,15 @@ async fn inventory_facets_deduplicate_items_and_sum_distinct_sightings(pool: sql
     let ids = bootstrap(&pool, &test_config).await.unwrap();
     test_config.api_credential = owner_session(&pool, &ids).await;
     let second_cluster = Uuid::new_v4();
-    sqlx::query("INSERT INTO clusters(id,organization_id,external_id,name) VALUES($1,$2,'second','Second cluster')")
-        .bind(second_cluster)
-        .bind(ids.organization_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO clusters(id,organization_id,external_id,name)
+         VALUES($1,$2,'second','Second cluster')",
+    )
+    .bind(second_cluster)
+    .bind(ids.organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let item_id = inventory_item(&pool, &ids, 1).await;
     for sighting in [
         Sighting {
@@ -1099,8 +1148,16 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
         .unwrap();
     let second_session = owner_session(&pool, &second).await;
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-a','test')")
-        .bind(agent_id).bind(first.organization_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-a','test')",
+    )
+    .bind(agent_id)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: first.organization_id,
@@ -1368,9 +1425,25 @@ async fn logical_dns_groups_normalize_only_corroborated_same_process_evidence(po
         .execute(&pool)
         .await
         .unwrap();
-    let plan: Vec<String> = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS) SELECT e.id FROM runtime_inventory_items i JOIN runtime_inventory_event_memberships m ON m.item_id=i.id JOIN runtime_events e ON e.id=m.event_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 AND i.identity_version=2 AND i.inventory_kind='domain' AND e.observed_at>=now()-interval '1 day'")
-        .bind(first.organization_id).bind(first.project_id).bind(first.application_id)
-        .fetch_all(&pool).await.unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, BUFFERS)
+         SELECT e.id
+         FROM runtime_inventory_items i
+         JOIN runtime_inventory_event_memberships m ON m.item_id=i.id
+         JOIN runtime_events e ON e.id=m.event_id
+         WHERE i.organization_id=$1
+             AND i.project_id=$2
+             AND i.application_id=$3
+             AND i.identity_version=2
+             AND i.inventory_kind='domain'
+             AND e.observed_at>=now()-interval '1 day'",
+    )
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(first.application_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert!(plan.iter().any(|line| line.contains("runtime_inventory")));
     eprintln!("logical DNS scoped foundation plan: {plan:?}");
 }

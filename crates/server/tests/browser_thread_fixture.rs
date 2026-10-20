@@ -41,8 +41,17 @@ async fn seed_browser_thread_windows() {
     };
     let ids = bootstrap(&pool, &config).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,$4,'test')")
-        .bind(agent_id).bind(organization_id).bind(ids.cluster_id).bind(format!("fixture-{agent_id}")).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,$4,'test')",
+    )
+    .bind(agent_id)
+    .bind(organization_id)
+    .bind(ids.cluster_id)
+    .bind(format!("fixture-{agent_id}"))
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let issued = server::application_credentials::issue(
         &mut tx,

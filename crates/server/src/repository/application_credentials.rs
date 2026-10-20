@@ -43,16 +43,22 @@ impl ApplicationCredentialRepository {
             credential_hash,
             token_hint,
         } = input;
-        sqlx::query_as("INSERT INTO application_ingestion_credentials(id,organization_id,project_id,application_id,name,credential_hash,token_hint) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,name,token_hint,created_at,last_used_at,revoked_at")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(name)
-            .bind(credential_hash)
-            .bind(token_hint)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "INSERT INTO application_ingestion_credentials(
+                 id,organization_id,project_id,application_id,name,credential_hash,token_hint
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7)
+             RETURNING id,name,token_hint,created_at,last_used_at,revoked_at",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(name)
+        .bind(credential_hash)
+        .bind(token_hint)
+        .fetch_one(executor)
+        .await
     }
 
     /// The application's credentials with the columns of [`Self::insert`].
@@ -66,12 +72,19 @@ impl ApplicationCredentialRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,name,token_hint,created_at,last_used_at,revoked_at FROM application_ingestion_credentials WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 ORDER BY created_at,id")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,name,token_hint,created_at,last_used_at,revoked_at
+             FROM application_ingestion_credentials
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+             ORDER BY created_at,id",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// Revokes one of the application's credentials, keeping an earlier
@@ -86,13 +99,21 @@ impl ApplicationCredentialRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Option<DateTime<Utc>>>("UPDATE application_ingestion_credentials SET revoked_at=coalesce(revoked_at,now()) WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 RETURNING revoked_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(credential_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "UPDATE application_ingestion_credentials
+             SET revoked_at=coalesce(revoked_at,now())
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+             RETURNING revoked_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(credential_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Resolves an unrevoked credential by its hash into its id and tenant
@@ -104,10 +125,16 @@ impl ApplicationCredentialRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>("UPDATE application_ingestion_credentials SET last_used_at=now() WHERE credential_hash=$1 AND revoked_at IS NULL RETURNING id,organization_id,project_id,application_id")
-            .bind(credential_hash)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
+            "UPDATE application_ingestion_credentials
+             SET last_used_at=now()
+             WHERE credential_hash=$1
+                 AND revoked_at IS NULL
+             RETURNING id,organization_id,project_id,application_id",
+        )
+        .bind(credential_hash)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Reports whether the credential still belongs to the application and
@@ -122,13 +149,23 @@ impl ApplicationCredentialRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM application_ingestion_credentials WHERE id=$1 AND organization_id=$2 AND project_id=$3 AND application_id=$4 AND revoked_at IS NULL)")
-            .bind(credential_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM application_ingestion_credentials
+                 WHERE id=$1
+                     AND organization_id=$2
+                     AND project_id=$3
+                     AND application_id=$4
+                     AND revoked_at IS NULL
+             )",
+        )
+        .bind(credential_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Revokes a credential, keeping an earlier revocation time.
@@ -139,10 +176,14 @@ impl ApplicationCredentialRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE application_ingestion_credentials SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1")
-            .bind(credential_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE application_ingestion_credentials
+             SET revoked_at=coalesce(revoked_at,now())
+             WHERE id=$1",
+        )
+        .bind(credential_id)
+        .execute(executor)
+        .await
     }
 }
 
