@@ -10,14 +10,17 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-# No exemptions. cargo-audit reports two findings this check does not, because
+# cargo-audit reports two findings this check does not, because
 # it scans Cargo.lock while this walks the resolved dependency graph: rsa
 # (RUSTSEC-2023-0071, no fix available) is reachable only through the
 # unbuilt sqlx-mysql backend, and the yanked chacha20 0.10.1 through a rand
 # version nothing builds. Neither is compiled or shipped, so neither needs
 # excusing here. Add an entry only with a reason that says why the advisory
 # cannot affect this project.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0381", reason = "Flags webpki-roots 0.26.11, which sqlx-core 0.8 pulls in. That release is a semver shim whose TLS_SERVER_ROOTS re-exports webpki-roots 1.x, locked at the fixed 1.0.10; no 0.26.x release clears the flag." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained, not vulnerable, and has no successor release. It comes in through serde_yaml from kube-client and the agent, which parse only operator-supplied configuration (agent config, kubeconfig), and the server's OpenAPI tests." },
+]
 
 [licenses]
 # The project ships under Apache-2.0, so every dependency must be permissive.
