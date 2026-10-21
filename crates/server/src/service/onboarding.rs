@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
 use crate::application_credentials;
-use crate::auth::{SessionToken, UserPrincipal, hash_password, normalize_email, validate_password};
+use crate::auth::{
+    SessionToken, UserPrincipal, hash_password_blocking, normalize_email, validate_password,
+};
 use crate::repository::application_credentials::ApplicationCredentialRepository;
 use crate::repository::events::EventRepository;
 use crate::repository::installations::{
@@ -261,8 +263,9 @@ impl OnboardingService {
         request_id: &str,
     ) -> Result<SetupCompleted> {
         let email = validate_setup(&input, self.setup_digest, self.setup_expires_at)?;
-        let password_hash =
-            hash_password(&input.password).map_err(|_| OnboardingServiceError::Internal)?;
+        let password_hash = hash_password_blocking(&input.password)
+            .await
+            .map_err(|_| OnboardingServiceError::Internal)?;
         let mut tx = self.pool.begin().await?;
         UserRepository::lock_setup(&mut *tx).await?;
         let has_super_admin = UserRepository::active_super_admin_exists(&mut *tx).await?;

@@ -1,5 +1,5 @@
 use crate::repository::sessions::SessionRepository;
-use std::{fmt, str::FromStr, time::Duration};
+use std::{fmt, str::FromStr, sync::LazyLock, time::Duration};
 
 use argon2::{
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
@@ -209,6 +209,42 @@ pub fn verify_password(value: &str, encoded: &str) -> bool {
     })
 }
 
+/// Verified against when a sign-in names no stored hash, so an unknown email
+/// costs the same as a wrong password.
+static ENUMERATION_DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
+    hash_password("okoscope enumeration resistance").expect("dummy password is valid")
+});
+
+/// [`hash_password`] on the blocking pool. Argon2 takes tens of milliseconds of
+/// CPU and 19 MiB per call, which must not stall the async workers.
+pub async fn hash_password_blocking(value: &str) -> Result<String, argon2::password_hash::Error> {
+    let value = Zeroizing::new(value.to_owned());
+    run_blocking(move || hash_password(&value)).await
+}
+
+/// [`verify_password`] on the blocking pool. Without a stored hash it verifies
+/// against a fixed dummy hash and fails, so an unknown account takes as long
+/// as a wrong password.
+pub async fn verify_password_blocking(value: &str, encoded: Option<String>) -> bool {
+    let value = Zeroizing::new(value.to_owned());
+    run_blocking(move || {
+        if let Some(encoded) = encoded {
+            verify_password(&value, &encoded)
+        } else {
+            let _ = verify_password(&value, &ENUMERATION_DUMMY_HASH);
+            false
+        }
+    })
+    .await
+}
+
+async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    }
+}
+
 pub struct SessionToken {
     plaintext: Zeroizing<String>,
     digest: [u8; 32],
@@ -288,6 +324,22 @@ mod tests {
         assert!(!hash.contains(password));
         assert!(verify_password(password, &hash));
         assert!(!verify_password("incorrect password", &hash));
+    }
+
+    #[tokio::test]
+    async fn blocking_pool_variants_hash_and_verify() {
+        let password = "correct horse battery staple";
+        let hash = hash_password_blocking(password).await.unwrap();
+        assert!(verify_password(password, &hash));
+        assert!(verify_password_blocking(password, Some(hash.clone())).await);
+        assert!(!verify_password_blocking("incorrect password", Some(hash)).await);
+        assert!(hash_password_blocking("short").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn verifying_without_a_stored_hash_fails() {
+        assert!(!verify_password_blocking("okoscope enumeration resistance", None).await);
+        assert!(!verify_password_blocking("correct horse battery staple", None).await);
     }
 
     #[test]

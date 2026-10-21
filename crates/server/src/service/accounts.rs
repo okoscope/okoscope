@@ -14,8 +14,8 @@ use zeroize::Zeroizing;
 
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
 use crate::auth::{
-    AuthenticatedUser, IdentityPrincipal, OrganizationRole, SessionToken, hash_password,
-    normalize_email, session_digest, validate_password, verify_password,
+    AuthenticatedUser, IdentityPrincipal, OrganizationRole, SessionToken, hash_password_blocking,
+    normalize_email, session_digest, validate_password, verify_password_blocking,
 };
 use crate::repository::email_actions::EmailActionRepository;
 use crate::repository::{
@@ -211,8 +211,9 @@ impl AccountService {
                 "organization slug or name is invalid",
             ));
         }
-        let password_hash =
-            hash_password(&input.password).map_err(|_| AccountServiceError::PasswordHashing)?;
+        let password_hash = hash_password_blocking(&input.password)
+            .await
+            .map_err(|_| AccountServiceError::PasswordHashing)?;
         let user_id = Uuid::new_v4();
         let organization_id = Uuid::new_v4();
         let mut tx = self.pool.begin().await?;
@@ -252,14 +253,11 @@ impl AccountService {
         let email = normalize_email(email).unwrap_or_default();
         let found: Option<AuthenticatedUser> =
             UserRepository::sign_in_by_email(&self.pool, &email).await?;
-        let dummy_hash = hash_password("okoscope enumeration resistance")
-            .map_err(|_| AccountServiceError::PasswordHashing)?;
-        let password_ok = found
-            .as_ref()
-            .is_some_and(|user| verify_password(password, &user.password_hash));
-        if found.is_none() {
-            let _ = verify_password(password, &dummy_hash);
-        }
+        let password_ok = verify_password_blocking(
+            password,
+            found.as_ref().map(|user| user.password_hash.clone()),
+        )
+        .await;
         let Some(user) = found.filter(|user| password_ok && user.disabled_at.is_none()) else {
             crate::metrics::record_authentication(false);
             return Err(AccountServiceError::InvalidCredentials);
@@ -358,8 +356,9 @@ impl AccountService {
         self.validate_new_password(new_password)?;
         let digest = action_digest(token, "reset_password")
             .ok_or(AccountServiceError::ActionTokenInvalid)?;
-        let password_hash =
-            hash_password(new_password).map_err(|_| AccountServiceError::PasswordHashing)?;
+        let password_hash = hash_password_blocking(new_password)
+            .await
+            .map_err(|_| AccountServiceError::PasswordHashing)?;
         let mut tx = self.pool.begin().await?;
         let user_id = EmailActionRepository::consume(&mut *tx, digest.to_vec(), "reset_password")
             .await?
@@ -389,11 +388,12 @@ impl AccountService {
     ) -> Result<SignedIn> {
         self.validate_new_password(new_password)?;
         let user = self.user_of(principal).await?;
-        if !verify_password(current_password, &user.password_hash) {
+        if !verify_password_blocking(current_password, Some(user.password_hash.clone())).await {
             return Err(AccountServiceError::CurrentPasswordInvalid);
         }
-        let password_hash =
-            hash_password(new_password).map_err(|_| AccountServiceError::PasswordHashing)?;
+        let password_hash = hash_password_blocking(new_password)
+            .await
+            .map_err(|_| AccountServiceError::PasswordHashing)?;
         let mut tx = self.pool.begin().await?;
         UserRepository::set_password_hash(&mut *tx, user.user_id, password_hash).await?;
         revoke_security_state(&mut tx, user.user_id, Some(principal.session_id)).await?;

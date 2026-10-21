@@ -460,7 +460,7 @@ impl AccessService {
         require_platform(principal, false)?;
         let password_hash: String =
             UserRepository::password_hash(&self.pool, principal.user_id).await?;
-        if !crate::auth::verify_password(current_password, &password_hash) {
+        if !crate::auth::verify_password_blocking(current_password, Some(password_hash)).await {
             return Err(AccessServiceError::CurrentPasswordInvalid);
         }
         let until = Utc::now() + Duration::minutes(15);

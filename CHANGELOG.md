@@ -52,6 +52,10 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
   Kubernetes sends to stop a pod. Previously only Ctrl+C was handled, so on
   every rollout the server skipped draining notifications and mail, and the
   agent dropped pending file aggregates and unacknowledged event batches.
+- Password hashing and verification run on the blocking thread pool, and a
+  sign-in costs one Argon2 verification instead of two. Previously every
+  sign-in hashed a dummy password on an async worker, so a burst of login
+  attempts could stall HTTP and agent gRPC traffic.
 
 ### Upgrade notes
 
