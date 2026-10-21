@@ -105,19 +105,7 @@ async fn serve(
     });
     metrics::configure_mail(mail_task.is_some());
     metrics::configure_notification_retention(options.retention.enabled);
-    let runtime_retention_task = tokio::spawn(server::runtime_retention::worker::run(
-        pool.clone(),
-        shutdown_receiver.clone(),
-    ));
-    let retention_task = tokio::spawn(server::notification::retention::run(
-        pool.clone(),
-        options.retention,
-        shutdown_receiver.clone(),
-    ));
-    let policy_worker_task = tokio::spawn(server::policy_recompute::run(
-        pool.clone(),
-        shutdown_receiver.clone(),
-    ));
+    let maintenance_tasks = spawn_maintenance(&pool, options.retention, &shutdown_receiver);
     let grpc_server = grpc
         .add_service(AgentServiceServer::new(AgentSessionService::new(
             pool.clone(),
@@ -142,7 +130,6 @@ async fn serve(
         health_server.await.context("health server")
     })?;
     let _ = shutdown_sender.send(true);
-    let _ = runtime_retention_task.await;
     signal_task.abort();
     if let Some(worker_task) = worker_task {
         metrics::record_notification_drain_started();
@@ -158,9 +145,38 @@ async fn serve(
         }
     }
     drain_mail_worker(mail_task).await;
-    let _ = retention_task.await;
-    let _ = policy_worker_task.await;
+    for task in maintenance_tasks {
+        let _ = task.await;
+    }
     Ok(())
+}
+
+/// Starts the periodic database maintenance workers. Each stops on the
+/// shutdown signal; the caller awaits them after draining delivery.
+fn spawn_maintenance(
+    pool: &sqlx::PgPool,
+    retention: server::notification::retention::RetentionConfig,
+    shutdown: &tokio::sync::watch::Receiver<bool>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    vec![
+        tokio::spawn(server::runtime_retention::worker::run(
+            pool.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(server::notification::retention::run(
+            pool.clone(),
+            retention,
+            shutdown.clone(),
+        )),
+        tokio::spawn(server::policy_recompute::run(
+            pool.clone(),
+            shutdown.clone(),
+        )),
+        tokio::spawn(server::agent_health::run_retention(
+            pool.clone(),
+            shutdown.clone(),
+        )),
+    ]
 }
 
 /// Resolves on Ctrl+C or on SIGTERM, which Kubernetes sends to stop a pod.

@@ -61,15 +61,18 @@ pub struct HealthBucketQuery {
 pub struct AgentHealthRepository;
 
 impl AgentHealthRepository {
-    /// Deletes signal and diagnostic buckets older than `cutoff`, at most 500
-    /// rows per table per call, oldest first. The bound keeps each pass short;
-    /// the caller runs it on every heartbeat, so the backlog drains over time.
+    /// Deletes signal and diagnostic buckets older than `cutoff`, at most
+    /// `limit` rows per table per call, oldest first. Returns the most rows
+    /// deleted from either table, so a result below `limit` means both are
+    /// drained.
     ///
-    /// Issues a statement per table on one connection; pass `&mut *tx`.
+    /// Issues a statement per table on one connection.
     pub async fn prune_buckets(
         conn: &mut sqlx::PgConnection,
         cutoff: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let mut most = 0;
         for table in [
             "application_agent_signal_buckets",
             "application_agent_diagnostic_buckets",
@@ -81,12 +84,18 @@ impl AgentHealthRepository {
                      FROM {table}
                      WHERE bucket_at<$1
                      ORDER BY bucket_at
-                     LIMIT 500
+                     LIMIT $2
                  )"
             );
-            sqlx::query(&query).bind(cutoff).execute(&mut *conn).await?;
+            let deleted = sqlx::query(&query)
+                .bind(cutoff)
+                .bind(limit)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
+            most = most.max(deleted);
         }
-        Ok(())
+        Ok(most)
     }
 
     /// Records that an agent serves an application from a cluster, with the
@@ -1006,9 +1015,13 @@ mod tests {
         );
 
         let mut conn = pool.acquire().await.unwrap();
-        AgentHealthRepository::prune_buckets(&mut conn, at(6))
+        let deleted = AgentHealthRepository::prune_buckets(&mut conn, at(6), 500)
             .await
             .unwrap();
+        assert!(
+            (1..500).contains(&deleted),
+            "a short batch reports that both tables are drained"
+        );
         drop(conn);
         let left: Vec<_> = buckets(&pool, &own, 1)
             .await
@@ -1016,6 +1029,56 @@ mod tests {
             .map(|b| b.bucket_at)
             .collect();
         assert_eq!(left, [at(6), at(12)]);
+    }
+
+    /// The retention worker's pass drains a backlog larger than one batch and
+    /// keeps the buckets inside the retention window.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn retention_pass_drains_past_one_batch(pool: PgPool) {
+        let own = tenant(&pool, "agent-health-retention").await;
+        register(&pool, &own, own.agent_id, json!([])).await;
+        let now = Utc::now();
+        let expired = now - Duration::hours(crate::service::agent_health::HEALTH_RETENTION_HOURS);
+        sqlx::query(
+            "INSERT INTO application_agent_signal_buckets(
+                 organization_id,project_id,application_id,agent_id,bucket_at,
+                 first_received_at,last_received_at
+             )
+             SELECT $1,$2,$3,$4,b,b,b
+             FROM (
+                 SELECT date_trunc('minute',$5::timestamptz)-make_interval(mins=>n) b
+                 FROM generate_series(1,1200) n
+                 UNION ALL
+                 SELECT date_trunc('minute',$6::timestamptz)-make_interval(mins=>n)
+                 FROM generate_series(1,5) n
+             ) minutes",
+        )
+        .bind(own.organization_id)
+        .bind(own.project_id)
+        .bind(own.application_id)
+        .bind(own.agent_id)
+        .bind(expired)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let batches = crate::service::agent_health::prune(&pool, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            batches, 3,
+            "1200 expired rows take two full batches and a short one"
+        );
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM application_agent_signal_buckets WHERE agent_id=$1",
+        )
+        .bind(own.agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 5, "buckets inside the window stay");
     }
 
     /// Ending a session sets its disconnect time once; a second end keeps it.

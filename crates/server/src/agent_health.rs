@@ -17,7 +17,7 @@ use crate::web_api::{RequestId, error_response};
 
 pub use crate::service::agent_health::{
     FRESHNESS_SECONDS, HEALTH_RETENTION_HOURS, MAX_CAPABILITIES, MAX_CAPABILITY_CHARS, end_session,
-    record_heartbeat, register_application_agent, validate_capabilities,
+    prune, record_heartbeat, register_application_agent, run_retention, validate_capabilities,
 };
 
 #[derive(Clone, Debug)]
