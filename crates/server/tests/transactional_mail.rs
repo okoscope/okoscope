@@ -68,8 +68,13 @@ async fn encrypted_outbox_is_atomic_captured_and_erased(pool: sqlx::PgPool) {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].recipient, "owner@example.com");
     assert!(messages[0].text.contains("#token=secret"));
-    let erased: bool = sqlx::query_scalar("SELECT payload_ciphertext IS NULL AND delivered_at IS NOT NULL FROM transactional_mail_outbox")
-        .fetch_one(&pool).await.unwrap();
+    let erased: bool = sqlx::query_scalar(
+        "SELECT payload_ciphertext IS NULL AND delivered_at IS NOT NULL
+         FROM transactional_mail_outbox",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(erased);
 }
 
@@ -139,16 +144,33 @@ async fn invitation_mail_is_encrypted_referenced_and_delivered_once(pool: sqlx::
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,'inviter@example.com',$2,now(),'Inviter')")
-        .bind(inviter_id)
-        .bind(server::auth::hash_password("correct horse battery staple").unwrap())
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,'inviter@example.com',$2,now(),'Inviter')",
+    )
+    .bind(inviter_id)
+    .bind(server::auth::hash_password("correct horse battery staple").unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
     let expires_at = Utc::now() + Duration::days(7);
-    sqlx::query("INSERT INTO invitations(id,organization_id,recipient_email,role,inviter_user_id,locale,token_digest,expires_at,retain_until) VALUES($1,$2,'recipient@example.com','member',$3,'en',$4,$5,$5+interval '365 days')")
-        .bind(invitation_id).bind(organization_id).bind(inviter_id).bind(vec![9_u8; 32])
-        .bind(expires_at).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO invitations(
+             id,organization_id,recipient_email,role,inviter_user_id,locale,token_digest,
+             expires_at,retain_until
+         )
+         VALUES(
+             $1,$2,'recipient@example.com','member',$3,'en',$4,$5,$5+interval '365 days'
+         )",
+    )
+    .bind(invitation_id)
+    .bind(organization_id)
+    .bind(inviter_id)
+    .bind(vec![9_u8; 32])
+    .bind(expires_at)
+    .execute(&pool)
+    .await
+    .unwrap();
     let config = config();
     let mut tx = pool.begin().await.unwrap();
     enqueue_invitation(
@@ -170,9 +192,13 @@ async fn invitation_mail_is_encrypted_referenced_and_delivered_once(pool: sqlx::
     .unwrap();
     tx.commit().await.unwrap();
     let row: (Option<Uuid>, Option<Uuid>, Vec<u8>) = sqlx::query_as(
-        "SELECT invitation_id,action_id,payload_ciphertext FROM transactional_mail_outbox WHERE logical_key='invitation:test'",
+        "SELECT invitation_id,action_id,payload_ciphertext
+         FROM transactional_mail_outbox
+         WHERE logical_key='invitation:test'",
     )
-    .fetch_one(&pool).await.unwrap();
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0, Some(invitation_id));
     assert_eq!(row.1, None);
     assert!(!String::from_utf8_lossy(&row.2).contains("secret"));
@@ -186,11 +212,26 @@ async fn invitation_mail_is_encrypted_referenced_and_delivered_once(pool: sqlx::
     .unwrap();
     assert_eq!(sender.messages().len(), 1);
     assert!(sender.messages()[0].text.contains("/invite#token=secret"));
-    sqlx::query("UPDATE invitations SET created_at=now()-interval '400 days',expires_at=now()-interval '399 days',retain_until=now()-interval '1 day' WHERE id=$1")
-        .bind(invitation_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE invitations
+         SET created_at=now()-interval '400 days',expires_at=now()-interval '399 days',
+             retain_until=now()-interval '1 day'
+         WHERE id=$1",
+    )
+    .bind(invitation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     cleanup(&pool).await.unwrap();
-    let retained_reference: (i64, Option<Uuid>) = sqlx::query_as("SELECT (SELECT count(*) FROM invitations WHERE id=$1),invitation_id FROM transactional_mail_outbox WHERE logical_key='invitation:test'")
-        .bind(invitation_id).fetch_one(&pool).await.unwrap();
+    let retained_reference: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM invitations WHERE id=$1),invitation_id
+         FROM transactional_mail_outbox
+         WHERE logical_key='invitation:test'",
+    )
+    .bind(invitation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(retained_reference, (0, None));
 }
 

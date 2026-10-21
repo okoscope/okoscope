@@ -5,6 +5,19 @@
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`ClusterRepository::register_agent`].
+#[derive(Debug)]
+pub struct AgentRegistration<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub cluster_id: Uuid,
+    pub node_name: &'a str,
+    pub agent_version: &'a str,
+    pub architecture: Option<&'a str>,
+    pub kernel_release: Option<&'a str>,
+    pub capabilities: serde_json::Value,
+}
+
 /// Clusters, cluster credentials, agents and agent sessions.
 #[derive(Clone, Copy, Debug)]
 pub struct ClusterRepository;
@@ -22,13 +35,19 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO clusters (id, organization_id, external_id, name) VALUES ($1, $2, $3, $4) ON CONFLICT (organization_id, external_id) DO UPDATE SET name = EXCLUDED.name RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(external_id)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO clusters (id, organization_id, external_id, name)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (organization_id, external_id)
+             DO UPDATE SET name = EXCLUDED.name
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(external_id)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records a cluster credential by its hash, or reinstates a revoked one.
@@ -42,13 +61,20 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO cluster_credentials (id, organization_id, cluster_id, credential_hash) VALUES ($1, $2, $3, $4) ON CONFLICT (credential_hash) DO UPDATE SET revoked_at = NULL")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(credential_hash)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO cluster_credentials (
+                 id, organization_id, cluster_id, credential_hash
+             )
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (credential_hash)
+             DO UPDATE SET revoked_at = NULL",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(credential_hash)
+        .execute(executor)
+        .await
     }
 
     /// Records the cluster an agent reports by its external id, or updates
@@ -63,43 +89,62 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO clusters(id,organization_id,external_id,name) VALUES($1,$2,$3,COALESCE($4,$3)) ON CONFLICT(organization_id,external_id) DO UPDATE SET name=COALESCE($4,clusters.name) RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(external_id)
-            .bind(name)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO clusters(id,organization_id,external_id,name)
+             VALUES($1,$2,$3,COALESCE($4,$3))
+             ON CONFLICT(organization_id,external_id)
+             DO UPDATE SET name=COALESCE($4,clusters.name)
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(external_id)
+        .bind(name)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records the agent of a node, or refreshes its version, platform and
     /// capabilities, and returns its id.
-    #[allow(clippy::too_many_arguments)]
     pub async fn register_agent<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        cluster_id: Uuid,
-        node_name: &str,
-        agent_version: &str,
-        architecture: Option<&str>,
-        kernel_release: Option<&str>,
-        capabilities: serde_json::Value,
+        input: AgentRegistration<'_>,
     ) -> Result<Uuid, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version, architecture, kernel_release, capabilities) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (cluster_id, node_name) DO UPDATE SET agent_version=EXCLUDED.agent_version, architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release, capabilities=EXCLUDED.capabilities, last_seen_at=now() RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(node_name)
-            .bind(agent_version)
-            .bind(architecture)
-            .bind(kernel_release)
-            .bind(capabilities)
-            .fetch_one(executor)
-            .await
+        let AgentRegistration {
+            id,
+            organization_id,
+            cluster_id,
+            node_name,
+            agent_version,
+            architecture,
+            kernel_release,
+            capabilities,
+        } = input;
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO agents (
+                 id, organization_id, cluster_id, node_name, agent_version, architecture,
+                 kernel_release, capabilities
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             ON CONFLICT (cluster_id, node_name)
+             DO UPDATE SET agent_version=EXCLUDED.agent_version,
+                 architecture=EXCLUDED.architecture, kernel_release=EXCLUDED.kernel_release,
+                 capabilities=EXCLUDED.capabilities, last_seen_at=now()
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(node_name)
+        .bind(agent_version)
+        .bind(architecture)
+        .bind(kernel_release)
+        .bind(capabilities)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records a new agent session.
@@ -114,14 +159,19 @@ impl ClusterRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO agent_sessions (id, organization_id, cluster_id, agent_id, protocol_version) VALUES ($1,$2,$3,$4,$5)")
-            .bind(id)
-            .bind(organization_id)
-            .bind(cluster_id)
-            .bind(agent_id)
-            .bind(protocol_version)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO agent_sessions (
+                 id, organization_id, cluster_id, agent_id, protocol_version
+             )
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(cluster_id)
+        .bind(agent_id)
+        .bind(protocol_version)
+        .execute(executor)
+        .await
     }
 
     /// Records that the agent was seen now.
@@ -141,6 +191,10 @@ impl ClusterRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::AgentRegistration;
+    use crate::repository::installations::{
+        InstallationRepository, InstallationStatusReport, NewInstallation,
+    };
     use chrono::{DateTime, Utc};
     use serde_json::json;
     use sqlx::PgPool;
@@ -152,7 +206,6 @@ mod tests {
     }
 
     use super::ClusterRepository;
-    use crate::repository::installations::InstallationRepository;
     use crate::repository::test_support::tenant;
     use crate::repository::{ApplicationRepository, OrganizationRepository, ProjectRepository};
 
@@ -300,14 +353,16 @@ mod tests {
             async move {
                 ClusterRepository::register_agent(
                     &pool,
-                    Uuid::new_v4(),
-                    own.organization_id,
-                    own.cluster_id,
-                    "node-b",
-                    version,
-                    Some("x86_64"),
-                    None,
-                    json!(["exec"]),
+                    AgentRegistration {
+                        id: Uuid::new_v4(),
+                        organization_id: own.organization_id,
+                        cluster_id: own.cluster_id,
+                        node_name: "node-b",
+                        agent_version: version,
+                        architecture: Some("x86_64"),
+                        kernel_release: None,
+                        capabilities: json!(["exec"]),
+                    },
                 )
                 .await
                 .unwrap()
@@ -370,37 +425,44 @@ mod tests {
         };
         let installation: Created = InstallationRepository::insert(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            credential,
-            "key",
-            &[1; 32],
-            "cluster",
-            "production",
-            "Deployment",
-            Some("api"),
-            None,
-            "1.0.0",
-            1,
+            NewInstallation {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                credential_id: credential,
+                idempotency_key: "key",
+                request_hash: &[1; 32],
+                cluster_name: "cluster",
+                workload_namespace: "production",
+                workload_kind: "Deployment",
+                workload_name: Some("api"),
+                workload_labels: None,
+                chart_version: "1.0.0",
+                configuration_schema_version: 1,
+            },
         )
         .await
         .unwrap();
         InstallationRepository::record_status(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            "node-b",
-            "waiting_for_event",
-            Some("event_not_observed"),
-            Utc::now(),
+            InstallationStatusReport {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                node_name: "node-b",
+                state: "waiting_for_event",
+                reason: Some("event_not_observed"),
+                observed_at: Utc::now(),
+            },
         )
         .await
         .unwrap();
         let status: (String, Option<String>) = sqlx::query_as(
-            "SELECT state,reason FROM application_installation_status WHERE installation_id=$1 AND node_name='node-b'",
+            "SELECT state,reason
+             FROM application_installation_status
+             WHERE installation_id=$1
+                 AND node_name='node-b'",
         )
         .bind(installation.id)
         .fetch_one(&pool)

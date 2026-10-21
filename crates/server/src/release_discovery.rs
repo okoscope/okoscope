@@ -1,5 +1,7 @@
-use crate::repository::deployments::DeploymentRepository;
-use crate::repository::releases::ReleaseRepository;
+use crate::repository::deployments::{
+    DeploymentRepository, NewDeploymentEpisode, NewDeploymentRevision, NewDeploymentSnapshot,
+};
+use crate::repository::releases::{ObservedRelease, ReleaseRepository};
 use event_model::{
     ReleaseIdentity, RevisionReadinessSnapshot, WorkloadRevisionEvidence, revision_digest,
 };
@@ -42,22 +44,24 @@ pub async fn persist_revision_evidence(
     let digest = revision_digest(evidence);
     let revision_id: Option<Uuid> = DeploymentRepository::insert_revision(
         &mut *tx,
-        Uuid::new_v4(),
-        scope.organization_id,
-        application.project_id,
-        application.application_id,
-        scope.cluster_id,
-        release_id,
-        i16::try_from(evidence.release_identity.version).unwrap_or(i16::MAX),
-        digest.as_slice(),
-        &evidence.namespace,
-        &evidence.workload_uid,
-        &evidence.workload_kind,
-        &evidence.workload_name,
-        &evidence.replica_set_uid,
-        &evidence.replica_set_name,
-        evidence.pod_template_hash.as_deref(),
-        evidence.observed_at,
+        NewDeploymentRevision {
+            id: Uuid::new_v4(),
+            organization_id: scope.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+            cluster_id: scope.cluster_id,
+            release_id,
+            identity_version: i16::try_from(evidence.release_identity.version).unwrap_or(i16::MAX),
+            identity_digest: digest.as_slice(),
+            namespace: &evidence.namespace,
+            workload_uid: &evidence.workload_uid,
+            workload_kind: &evidence.workload_kind,
+            workload_name: &evidence.workload_name,
+            replica_set_uid: &evidence.replica_set_uid,
+            replica_set_name: &evidence.replica_set_name,
+            pod_template_hash: evidence.pod_template_hash.as_deref(),
+            observed_at: evidence.observed_at,
+        },
     )
     .await?;
     let Some(revision_id) = revision_id else {
@@ -111,15 +115,18 @@ pub(crate) async fn resolve_observed_release(
     let version = format!("sha256:{}", hex::encode(identity.digest));
     ReleaseRepository::insert_observed(
         &mut **tx,
-        Uuid::new_v4(),
-        organization_id,
-        project_id,
-        application_id,
-        version,
-        observed_at,
-        i16::try_from(identity.version).unwrap_or(i16::MAX),
-        identity.digest.as_slice(),
-        to_value(&identity.containers).expect("release components serialize"),
+        ObservedRelease {
+            id: Uuid::new_v4(),
+            organization_id,
+            project_id,
+            application_id,
+            version,
+            deployed_at: observed_at,
+            identity_version: i16::try_from(identity.version).unwrap_or(i16::MAX),
+            identity_digest: identity.digest.as_slice(),
+            identity_components: to_value(&identity.containers)
+                .expect("release components serialize"),
+        },
     )
     .await
 }
@@ -150,16 +157,18 @@ async fn open_episode(
     let episode_id = Uuid::new_v4();
     DeploymentRepository::insert_episode(
         &mut **tx,
-        episode_id,
-        scope.organization_id,
-        application.project_id,
-        application.application_id,
-        scope.cluster_id,
-        release_id,
-        revision_id,
-        prior_count + 1,
-        transition,
-        observed_at,
+        NewDeploymentEpisode {
+            id: episode_id,
+            organization_id: scope.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+            cluster_id: scope.cluster_id,
+            release_id,
+            revision_id,
+            occurrence_number: prior_count + 1,
+            transition_kind: transition,
+            observed_at,
+        },
     )
     .await?;
     for (predecessor_id, _) in predecessors {
@@ -211,18 +220,21 @@ pub async fn persist_readiness_snapshot(
     };
     DeploymentRepository::insert_snapshot(
         &mut *tx,
-        scope.organization_id,
-        application.project_id,
-        application.application_id,
-        scope.cluster_id,
-        revision_id,
-        &snapshot.snapshot_id,
-        snapshot.observed_at,
-        snapshot.initialized,
-        snapshot.continuous,
-        i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX),
-        i32::try_from(snapshot.ready_pod_count).unwrap_or(i32::MAX),
-        i32::try_from(snapshot.workload_ready_pod_count).unwrap_or(i32::MAX),
+        NewDeploymentSnapshot {
+            organization_id: scope.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+            cluster_id: scope.cluster_id,
+            revision_id,
+            snapshot_id: &snapshot.snapshot_id,
+            observed_at: snapshot.observed_at,
+            initialized: snapshot.initialized,
+            continuous: snapshot.continuous,
+            pod_count: i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX),
+            ready_pod_count: i32::try_from(snapshot.ready_pod_count).unwrap_or(i32::MAX),
+            workload_ready_pod_count: i32::try_from(snapshot.workload_ready_pod_count)
+                .unwrap_or(i32::MAX),
+        },
     )
     .await?;
     let pod_count = i32::try_from(snapshot.pod_count).unwrap_or(i32::MAX);
@@ -372,8 +384,18 @@ mod tests {
         persist_readiness_snapshot(&pool, scope, application, &zero_snapshot)
             .await
             .unwrap();
-        let share: Option<f64> = sqlx::query_scalar("SELECT CASE WHEN workload_ready_pod_count>0 THEN ready_pod_count::double precision/workload_ready_pod_count::double precision END FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-b'")
-            .fetch_one(&pool).await.unwrap();
+        let share: Option<f64> = sqlx::query_scalar(
+            "SELECT CASE
+                 WHEN workload_ready_pod_count>0
+                     THEN ready_pod_count::double precision/workload_ready_pod_count::double precision
+             END
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-b'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(share, None);
         let revision_a = revision_digest(&release_a);
         persist_readiness_snapshot(
@@ -393,8 +415,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let state: String = sqlx::query_scalar("SELECT state FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-a'")
-            .fetch_one(&pool).await.unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT state
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(state, "active");
         persist_readiness_snapshot(
             &pool,
@@ -418,14 +447,28 @@ mod tests {
         persist_revision_evidence(&pool, scope, application, &returned_a)
             .await
             .unwrap();
-        let rows: Vec<(String, i64)> = sqlx::query_as("SELECT e.transition_kind,e.occurrence_number FROM deployment_episodes e JOIN kubernetes_workload_revisions r ON r.id=e.revision_id WHERE r.replica_set_uid='rs-a' ORDER BY e.occurrence_number")
-            .fetch_all(&pool).await.unwrap();
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT e.transition_kind,e.occurrence_number
+             FROM deployment_episodes e
+             JOIN kubernetes_workload_revisions r ON r.id=e.revision_id
+             WHERE r.replica_set_uid='rs-a'
+             ORDER BY e.occurrence_number",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             rows,
             vec![("unknown".into(), 1), ("rollback_candidate".into(), 2)]
         );
-        let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)")
-            .fetch_one(&pool).await.unwrap();
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(counts, (2, 2, 3));
     }
 
@@ -451,7 +494,9 @@ mod tests {
         first.unwrap();
         second.unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await
@@ -465,7 +510,8 @@ mod tests {
                 .is_err()
         );
         let counts: (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions)",
         )
         .fetch_one(&pool)
         .await
@@ -494,7 +540,9 @@ mod tests {
             .await
             .unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await
@@ -514,7 +562,9 @@ mod tests {
             .await
             .unwrap();
         let counts: (i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM kubernetes_workload_revisions),(SELECT count(*) FROM deployment_episodes)",
+            "SELECT (SELECT count(*) FROM releases),
+                 (SELECT count(*) FROM kubernetes_workload_revisions),
+                 (SELECT count(*) FROM deployment_episodes)",
         )
         .fetch_one(&pool)
         .await

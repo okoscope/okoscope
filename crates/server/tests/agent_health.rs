@@ -69,8 +69,17 @@ async fn organization_session(pool: &sqlx::PgPool, organization: Uuid, role: &st
     .await
     .unwrap();
     let token = server::auth::SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user).bind(organization).bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user)
+    .bind(organization)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -83,8 +92,19 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
     let unscoped_member = organization_session(&pool, first.organization_id, "member").await;
     let foreign_credential = owner_session(&pool, second.organization_id).await;
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version,architecture,kernel_release) VALUES($1,$2,$3,'node-health','1.2.3','x86_64','6.9')")
-        .bind(agent_id).bind(first.organization_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(
+             id,organization_id,cluster_id,node_name,agent_version,architecture,
+             kernel_release
+         )
+         VALUES($1,$2,$3,'node-health','1.2.3','x86_64','6.9')",
+    )
+    .bind(agent_id)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let scope = ApplicationCredentialScope {
         credential_id: Uuid::new_v4(),
         organization_id: first.organization_id,
@@ -148,9 +168,16 @@ async fn health_includes_no_event_agent_ranges_deltas_and_tenant_isolation(pool:
         .unwrap();
     }
     let other_application = Uuid::new_v4();
-    sqlx::query("INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'other-app','Other Application')")
-        .bind(other_application).bind(first.organization_id).bind(first.project_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO applications(id,organization_id,project_id,slug,name)
+         VALUES($1,$2,$3,'other-app','Other Application')",
+    )
+    .bind(other_application)
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let other_scope = ApplicationCredentialScope {
         credential_id: Uuid::new_v4(),
         application_id: other_application,

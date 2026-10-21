@@ -16,7 +16,56 @@ use uuid::Uuid;
 /// `workload_namespace`, `workload_kind`, `workload_name`, `workload_labels`,
 /// `chart_version`, `configuration_schema_version`, `created_at` and
 /// `updated_at`.
-const INSTALL_SELECT: &str = "SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at FROM application_installations";
+const INSTALL_SELECT: &str =
+    "SELECT id,application_id,credential_id,cluster_name,workload_namespace,
+         workload_kind,workload_name,workload_labels,chart_version,
+         configuration_schema_version,created_at,updated_at
+     FROM application_installations";
+
+/// Input to [`InstallationRepository::record_status`].
+#[derive(Debug)]
+pub struct InstallationStatusReport<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub node_name: &'a str,
+    pub state: &'a str,
+    pub reason: Option<&'a str>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Input to [`InstallationRepository::insert`].
+#[derive(Debug)]
+pub struct NewInstallation<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub credential_id: Uuid,
+    pub idempotency_key: &'a str,
+    pub request_hash: &'a [u8],
+    pub cluster_name: &'a str,
+    pub workload_namespace: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: Option<&'a str>,
+    pub workload_labels: Option<serde_json::Value>,
+    pub chart_version: &'a str,
+    pub configuration_schema_version: i32,
+}
+
+/// Input to [`InstallationRepository::update`].
+#[derive(Debug)]
+pub struct InstallationUpdate<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub installation_id: Uuid,
+    pub cluster_name: &'a str,
+    pub workload_namespace: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: Option<&'a str>,
+    pub workload_labels: Option<serde_json::Value>,
+}
 
 /// Agent installations and the evidence of their connection.
 #[derive(Clone, Copy, Debug)]
@@ -25,30 +74,47 @@ pub struct InstallationRepository;
 impl InstallationRepository {
     /// Records the onboarding status a node reports for the application's
     /// installations.
-    #[allow(clippy::too_many_arguments)]
     pub async fn record_status<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        node_name: &str,
-        state: &str,
-        reason: Option<&str>,
-        observed_at: DateTime<Utc>,
+        input: InstallationStatusReport<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) SELECT i.id,$4,$5,$6,$7 FROM application_installations i WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1 ON CONFLICT(installation_id,node_name) DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,observed_at=EXCLUDED.observed_at,updated_at=now() WHERE application_installation_status.observed_at<=EXCLUDED.observed_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(node_name)
-            .bind(state)
-            .bind(reason)
-            .bind(observed_at)
-            .execute(executor)
-            .await
+        let InstallationStatusReport {
+            organization_id,
+            project_id,
+            application_id,
+            node_name,
+            state,
+            reason,
+            observed_at,
+        } = input;
+        sqlx::query(
+            "INSERT INTO application_installation_status(
+                 installation_id,node_name,state,reason,observed_at
+             )
+             SELECT i.id,$4,$5,$6,$7
+             FROM application_installations i
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             ORDER BY i.created_at DESC
+             LIMIT 1
+             ON CONFLICT(installation_id,node_name)
+             DO UPDATE SET state=EXCLUDED.state,reason=EXCLUDED.reason,
+                 observed_at=EXCLUDED.observed_at,updated_at=now()
+             WHERE application_installation_status.observed_at<=EXCLUDED.observed_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(node_name)
+        .bind(state)
+        .bind(reason)
+        .bind(observed_at)
+        .execute(executor)
+        .await
     }
 
     /// The application's installations, oldest first, with the columns of
@@ -111,88 +177,117 @@ impl InstallationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at,request_hash FROM application_installations WHERE organization_id=$1 AND idempotency_key=$2")
-            .bind(organization_id)
-            .bind(idempotency_key)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at,request_hash
+             FROM application_installations
+             WHERE organization_id=$1
+                 AND idempotency_key=$2",
+        )
+        .bind(organization_id)
+        .bind(idempotency_key)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a new installation and returns it with the columns of
     /// [`INSTALL_SELECT`]. A repeated idempotency key violates a unique index.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn insert<'e, E, T>(
-        executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        credential_id: Uuid,
-        idempotency_key: &str,
-        request_hash: &[u8],
-        cluster_name: &str,
-        workload_namespace: &str,
-        workload_kind: &str,
-        workload_name: Option<&str>,
-        workload_labels: Option<serde_json::Value>,
-        chart_version: &str,
-        configuration_schema_version: i32,
-    ) -> Result<T, sqlx::Error>
+    pub async fn insert<'e, E, T>(executor: E, input: NewInstallation<'_>) -> Result<T, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("INSERT INTO application_installations(id,organization_id,project_id,application_id,credential_id,idempotency_key,request_hash,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(credential_id)
-            .bind(idempotency_key)
-            .bind(request_hash)
-            .bind(cluster_name)
-            .bind(workload_namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(workload_labels)
-            .bind(chart_version)
-            .bind(configuration_schema_version)
-            .fetch_one(executor)
-            .await
+        let NewInstallation {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            credential_id,
+            idempotency_key,
+            request_hash,
+            cluster_name,
+            workload_namespace,
+            workload_kind,
+            workload_name,
+            workload_labels,
+            chart_version,
+            configuration_schema_version,
+        } = input;
+        sqlx::query_as(
+            "INSERT INTO application_installations(
+                 id,organization_id,project_id,application_id,credential_id,idempotency_key,
+                 request_hash,cluster_name,workload_namespace,workload_kind,workload_name,
+                 workload_labels,chart_version,configuration_schema_version
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             RETURNING id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(credential_id)
+        .bind(idempotency_key)
+        .bind(request_hash)
+        .bind(cluster_name)
+        .bind(workload_namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(workload_labels)
+        .bind(chart_version)
+        .bind(configuration_schema_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// Updates an installation's cluster and workload intent and returns it
     /// with the columns of [`INSTALL_SELECT`]. `None` when there is no such
     /// installation in the application.
-    #[allow(clippy::too_many_arguments)]
     pub async fn update<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        installation_id: Uuid,
-        cluster_name: &str,
-        workload_namespace: &str,
-        workload_kind: &str,
-        workload_name: Option<&str>,
-        workload_labels: Option<serde_json::Value>,
+        input: InstallationUpdate<'_>,
     ) -> Result<Option<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE application_installations SET cluster_name=$5,workload_namespace=$6,workload_kind=$7,workload_name=$8,workload_labels=$9,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 RETURNING id,application_id,credential_id,cluster_name,workload_namespace,workload_kind,workload_name,workload_labels,chart_version,configuration_schema_version,created_at,updated_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(installation_id)
-            .bind(cluster_name)
-            .bind(workload_namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(workload_labels)
-            .fetch_optional(executor)
-            .await
+        let InstallationUpdate {
+            organization_id,
+            project_id,
+            application_id,
+            installation_id,
+            cluster_name,
+            workload_namespace,
+            workload_kind,
+            workload_name,
+            workload_labels,
+        } = input;
+        sqlx::query_as(
+            "UPDATE application_installations
+             SET cluster_name=$5,workload_namespace=$6,workload_kind=$7,workload_name=$8,
+                 workload_labels=$9,updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+             RETURNING id,application_id,credential_id,cluster_name,workload_namespace,
+                 workload_kind,workload_name,workload_labels,chart_version,
+                 configuration_schema_version,created_at,updated_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(installation_id)
+        .bind(cluster_name)
+        .bind(workload_namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(workload_labels)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Locks an installation in the application and returns its credential.
@@ -206,13 +301,21 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT credential_id FROM application_installations WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4 FOR UPDATE")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(installation_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT credential_id
+             FROM application_installations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND id=$4
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(installation_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Points an installation at a new credential.
@@ -244,12 +347,21 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>("SELECT c.last_used_at,c.revoked_at FROM application_installations i JOIN application_ingestion_credentials c ON c.id=i.credential_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 ORDER BY i.created_at DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            "SELECT c.last_used_at,c.revoked_at
+             FROM application_installations i
+             JOIN application_ingestion_credentials c ON c.id=i.credential_id
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             ORDER BY i.created_at DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The most recently reported installation status of the application:
@@ -264,17 +376,28 @@ impl InstallationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>, i64)>("SELECT s.state,s.reason,max(s.observed_at),count(*) FROM application_installation_status s JOIN application_installations i ON i.id=s.installation_id WHERE i.organization_id=$1 AND i.project_id=$2 AND i.application_id=$3 GROUP BY s.state,s.reason ORDER BY max(s.observed_at) DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>, i64)>(
+            "SELECT s.state,s.reason,max(s.observed_at),count(*)
+             FROM application_installation_status s
+             JOIN application_installations i ON i.id=s.installation_id
+             WHERE i.organization_id=$1
+                 AND i.project_id=$2
+                 AND i.application_id=$3
+             GROUP BY s.state,s.reason
+             ORDER BY max(s.observed_at) DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{InstallationUpdate, NewInstallation};
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use serde_json::json;
     use sqlx::{FromRow, PgPool};
@@ -323,20 +446,22 @@ mod tests {
     ) -> Result<Installation, sqlx::Error> {
         InstallationRepository::insert(
             pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            credential_id,
-            key,
-            &[1; 32],
-            "cluster",
-            "production",
-            "Deployment",
-            Some("api"),
-            None,
-            "1.0.0",
-            1,
+            NewInstallation {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                credential_id,
+                idempotency_key: key,
+                request_hash: &[1; 32],
+                cluster_name: "cluster",
+                workload_namespace: "production",
+                workload_kind: "Deployment",
+                workload_name: Some("api"),
+                workload_labels: None,
+                chart_version: "1.0.0",
+                configuration_schema_version: 1,
+            },
         )
         .await
     }
@@ -393,15 +518,17 @@ mod tests {
 
         let updated: Installation = InstallationRepository::update(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            first.id,
-            "renamed",
-            "production",
-            "Deployment",
-            None,
-            Some(json!({"app": "api"})),
+            InstallationUpdate {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                installation_id: first.id,
+                cluster_name: "renamed",
+                workload_namespace: "production",
+                workload_kind: "Deployment",
+                workload_name: None,
+                workload_labels: Some(json!({"app": "api"})),
+            },
         )
         .await
         .unwrap()
@@ -414,15 +541,17 @@ mod tests {
         assert!(
             InstallationRepository::update::<_, Installation>(
                 &pool,
-                other.organization_id,
-                other.project_id,
-                other.application_id,
-                first.id,
-                "x",
-                "production",
-                "Deployment",
-                Some("api"),
-                None,
+                InstallationUpdate {
+                    organization_id: other.organization_id,
+                    project_id: other.project_id,
+                    application_id: other.application_id,
+                    installation_id: first.id,
+                    cluster_name: "x",
+                    workload_namespace: "production",
+                    workload_kind: "Deployment",
+                    workload_name: Some("api"),
+                    workload_labels: None
+                }
             )
             .await
             .unwrap()
@@ -596,7 +725,10 @@ mod tests {
             ),
         ] {
             sqlx::query(
-                "INSERT INTO application_installation_status(installation_id,node_name,state,reason,observed_at) VALUES($1,$2,$3,$4,$5)",
+                "INSERT INTO application_installation_status(
+                     installation_id,node_name,state,reason,observed_at
+                 )
+                 VALUES($1,$2,$3,$4,$5)",
             )
             .bind(installation)
             .bind(node)

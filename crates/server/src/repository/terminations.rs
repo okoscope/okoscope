@@ -6,6 +6,94 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`TerminationRepository::kernel_exit_candidates`].
+#[derive(Debug)]
+pub struct KernelExitCandidateQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub workload_uid: &'a str,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub container_id: &'a str,
+    pub observed_at: DateTime<Utc>,
+    pub tolerance: String,
+}
+
+/// Input to [`TerminationRepository::add_restart`].
+#[derive(Debug)]
+pub struct NewRestart {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub projection_version: i16,
+    pub event_id: Uuid,
+    pub window_started_at: DateTime<Utc>,
+    pub window_ended_at: DateTime<Utc>,
+    pub restart_delta: i32,
+}
+
+/// Input to [`TerminationRepository::restart_window_end`].
+#[derive(Debug)]
+pub struct RestartWindowEndQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub container_id: &'a str,
+    pub projection_version: i16,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+/// Input to [`TerminationRepository::restarts_in_window`].
+#[derive(Debug)]
+pub struct RestartWindowQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub container_id: &'a str,
+    pub projection_version: i16,
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+/// Input to [`TerminationRepository::upsert_restart_loop`].
+#[derive(Debug)]
+pub struct RestartLoop<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub container_id: &'a str,
+    pub projection_version: i16,
+    pub window_started_at: DateTime<Utc>,
+    pub window_ended_at: DateTime<Utc>,
+    pub observed_restart_count: i32,
+    pub previous_termination: Option<serde_json::Value>,
+    pub waiting_reason: Option<&'a str>,
+}
+
+/// Input to [`TerminationRepository::attach_restart_loop_group`].
+#[derive(Debug)]
+pub struct RestartLoopGroup<'a> {
+    pub group_id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub pod_uid: &'a str,
+    pub container_name: &'a str,
+    pub container_id: &'a str,
+    pub projection_version: i16,
+}
+
 /// Termination correlations and restart-loop projections.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminationRepository;
@@ -13,34 +101,50 @@ pub struct TerminationRepository;
 impl TerminationRepository {
     /// Kernel process exits of the same container within `tolerance` (an
     /// interval such as `"30 seconds"`) of a termination.
-    #[allow(clippy::too_many_arguments)]
     pub async fn kernel_exit_candidates<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        workload_uid: &str,
-        pod_uid: &str,
-        container_name: &str,
-        container_id: &str,
-        observed_at: DateTime<Utc>,
-        tolerance: String,
+        input: KernelExitCandidateQuery<'_>,
     ) -> Result<Vec<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND workload_uid=$4 AND pod_uid=$5 AND container_name=$6 AND container_id=$7 AND event_kind='process.exit' AND observed_at BETWEEN $8-$9::interval AND $8+$9::interval ORDER BY observed_at,id LIMIT 2")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(workload_uid)
-            .bind(pod_uid)
-            .bind(container_name)
-            .bind(container_id)
-            .bind(observed_at)
-            .bind(tolerance)
-            .fetch_all(executor)
-            .await
+        let KernelExitCandidateQuery {
+            organization_id,
+            project_id,
+            application_id,
+            workload_uid,
+            pod_uid,
+            container_name,
+            container_id,
+            observed_at,
+            tolerance,
+        } = input;
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM runtime_events
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND workload_uid=$4
+                 AND pod_uid=$5
+                 AND container_name=$6
+                 AND container_id=$7
+                 AND event_kind='process.exit'
+                 AND observed_at BETWEEN $8-$9::interval AND $8+$9::interval
+             ORDER BY observed_at,id
+             LIMIT 2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(workload_uid)
+        .bind(pod_uid)
+        .bind(container_name)
+        .bind(container_id)
+        .bind(observed_at)
+        .bind(tolerance)
+        .fetch_all(executor)
+        .await
     }
 
     /// Records, or replaces, how a termination correlated.
@@ -56,15 +160,23 @@ impl TerminationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_event_correlation_outcomes (organization_id,project_id,event_id,status,candidate_count,tolerance_seconds) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (event_id) DO UPDATE SET status=EXCLUDED.status,candidate_count=EXCLUDED.candidate_count,tolerance_seconds=EXCLUDED.tolerance_seconds,updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(event_id)
-            .bind(status)
-            .bind(candidate_count)
-            .bind(tolerance_seconds)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_event_correlation_outcomes (
+                 organization_id,project_id,event_id,status,candidate_count,tolerance_seconds
+             )
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (event_id)
+             DO UPDATE SET status=EXCLUDED.status,candidate_count=EXCLUDED.candidate_count,
+                 tolerance_seconds=EXCLUDED.tolerance_seconds,updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(event_id)
+        .bind(status)
+        .bind(candidate_count)
+        .bind(tolerance_seconds)
+        .execute(executor)
+        .await
     }
 
     /// Links a termination to the kernel exit it explains, once.
@@ -78,183 +190,273 @@ impl TerminationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_event_correlations (organization_id,project_id,lifecycle_event_id,kernel_event_id,correlation_kind) VALUES ($1,$2,$3,$4,'qualified') ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(lifecycle_event_id)
-            .bind(kernel_event_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_event_correlations (
+                 organization_id,project_id,lifecycle_event_id,kernel_event_id,
+                 correlation_kind
+             )
+             VALUES ($1,$2,$3,$4,'qualified')
+             ON CONFLICT
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(lifecycle_event_id)
+        .bind(kernel_event_id)
+        .execute(executor)
+        .await
     }
 
     /// Adds a restart to the projection, once per event.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_restart<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        projection_version: i16,
-        event_id: Uuid,
-        window_started_at: DateTime<Utc>,
-        window_ended_at: DateTime<Utc>,
-        restart_delta: i32,
+        input: NewRestart,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_restart_projection_memberships (organization_id,project_id,projection_version,event_id,window_started_at,window_ended_at,restart_delta) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(projection_version)
-            .bind(event_id)
-            .bind(window_started_at)
-            .bind(window_ended_at)
-            .bind(restart_delta)
-            .execute(executor)
-            .await
+        let NewRestart {
+            organization_id,
+            project_id,
+            projection_version,
+            event_id,
+            window_started_at,
+            window_ended_at,
+            restart_delta,
+        } = input;
+        sqlx::query(
+            "INSERT INTO runtime_restart_projection_memberships (
+                 organization_id,project_id,projection_version,event_id,window_started_at,
+                 window_ended_at,restart_delta
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(projection_version)
+        .bind(event_id)
+        .bind(window_started_at)
+        .bind(window_ended_at)
+        .bind(restart_delta)
+        .execute(executor)
+        .await
     }
 
     /// The latest restart of the container within `[from, to]`, or `from`
     /// when there is none.
-    #[allow(clippy::too_many_arguments)]
     pub async fn restart_window_end<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        pod_uid: &str,
-        container_name: &str,
-        container_id: &str,
-        projection_version: i16,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
+        input: RestartWindowEndQuery<'_>,
     ) -> Result<DateTime<Utc>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, DateTime<Utc>>("SELECT COALESCE(max(e.observed_at),$9) FROM runtime_restart_projection_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND e.application_id=$3 AND e.cluster_id=$4 AND e.pod_uid=$5 AND e.container_name=$6 AND e.container_id=$7 AND m.projection_version=$8 AND e.observed_at BETWEEN $9 AND $10")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(pod_uid)
-            .bind(container_name)
-            .bind(container_id)
-            .bind(projection_version)
-            .bind(from)
-            .bind(to)
-            .fetch_one(executor)
-            .await
+        let RestartWindowEndQuery {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            pod_uid,
+            container_name,
+            container_id,
+            projection_version,
+            from,
+            to,
+        } = input;
+        sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT COALESCE(max(e.observed_at),$9)
+             FROM runtime_restart_projection_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.organization_id=$1
+                 AND m.project_id=$2
+                 AND e.application_id=$3
+                 AND e.cluster_id=$4
+                 AND e.pod_uid=$5
+                 AND e.container_name=$6
+                 AND e.container_id=$7
+                 AND m.projection_version=$8
+                 AND e.observed_at BETWEEN $9 AND $10",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(pod_uid)
+        .bind(container_name)
+        .bind(container_id)
+        .bind(projection_version)
+        .bind(from)
+        .bind(to)
+        .fetch_one(executor)
+        .await
     }
 
     /// The container's restarts within `(start, end]`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn restarts_in_window<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        pod_uid: &str,
-        container_name: &str,
-        container_id: &str,
-        projection_version: i16,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
+        input: RestartWindowQuery<'_>,
     ) -> Result<i64, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i64>("SELECT COALESCE(sum(m.restart_delta),0)::bigint FROM runtime_restart_projection_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.project_id=$2 AND e.application_id=$3 AND e.cluster_id=$4 AND e.pod_uid=$5 AND e.container_name=$6 AND e.container_id=$7 AND m.projection_version=$8 AND e.observed_at BETWEEN $9 AND $10")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(pod_uid)
-            .bind(container_name)
-            .bind(container_id)
-            .bind(projection_version)
-            .bind(start)
-            .bind(end)
-            .fetch_one(executor)
-            .await
+        let RestartWindowQuery {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            pod_uid,
+            container_name,
+            container_id,
+            projection_version,
+            start,
+            end,
+        } = input;
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(m.restart_delta),0)::bigint
+             FROM runtime_restart_projection_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.organization_id=$1
+                 AND m.project_id=$2
+                 AND e.application_id=$3
+                 AND e.cluster_id=$4
+                 AND e.pod_uid=$5
+                 AND e.container_name=$6
+                 AND e.container_id=$7
+                 AND m.projection_version=$8
+                 AND e.observed_at BETWEEN $9 AND $10",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(pod_uid)
+        .bind(container_name)
+        .bind(container_id)
+        .bind(projection_version)
+        .bind(start)
+        .bind(end)
+        .fetch_one(executor)
+        .await
     }
 
     /// Records, or updates, the container's restart-loop projection for the
     /// window.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_restart_loop<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        pod_uid: &str,
-        container_name: &str,
-        container_id: &str,
-        projection_version: i16,
-        window_started_at: DateTime<Utc>,
-        window_ended_at: DateTime<Utc>,
-        observed_restart_count: i32,
-        previous_termination: Option<serde_json::Value>,
-        waiting_reason: Option<&str>,
+        input: RestartLoop<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_restart_loop_projections (organization_id,project_id,application_id,cluster_id,pod_uid,container_name,runtime_container_id,projection_version,window_started_at,window_ended_at,observed_restart_count,latest_termination,latest_waiting_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (organization_id,project_id,application_id,cluster_id,pod_uid,container_name,runtime_container_id,projection_version) DO UPDATE SET window_started_at=EXCLUDED.window_started_at,window_ended_at=EXCLUDED.window_ended_at,observed_restart_count=EXCLUDED.observed_restart_count,latest_termination=COALESCE(EXCLUDED.latest_termination,runtime_restart_loop_projections.latest_termination),latest_waiting_reason=COALESCE(EXCLUDED.latest_waiting_reason,runtime_restart_loop_projections.latest_waiting_reason),updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(pod_uid)
-            .bind(container_name)
-            .bind(container_id)
-            .bind(projection_version)
-            .bind(window_started_at)
-            .bind(window_ended_at)
-            .bind(observed_restart_count)
-            .bind(previous_termination)
-            .bind(waiting_reason)
-            .execute(executor)
-            .await
+        let RestartLoop {
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            pod_uid,
+            container_name,
+            container_id,
+            projection_version,
+            window_started_at,
+            window_ended_at,
+            observed_restart_count,
+            previous_termination,
+            waiting_reason,
+        } = input;
+        sqlx::query(
+            "INSERT INTO runtime_restart_loop_projections (
+                 organization_id,project_id,application_id,cluster_id,pod_uid,container_name,
+                 runtime_container_id,projection_version,window_started_at,window_ended_at,
+                 observed_restart_count,latest_termination,latest_waiting_reason
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (
+                 organization_id,project_id,application_id,cluster_id,pod_uid,container_name,
+                 runtime_container_id,projection_version
+             )
+             DO UPDATE SET window_started_at=EXCLUDED.window_started_at,
+                 window_ended_at=EXCLUDED.window_ended_at,
+                 observed_restart_count=EXCLUDED.observed_restart_count,
+                 latest_termination=COALESCE(
+                     EXCLUDED.latest_termination,
+                     runtime_restart_loop_projections.latest_termination
+                 ),
+                 latest_waiting_reason=COALESCE(
+                     EXCLUDED.latest_waiting_reason,
+                     runtime_restart_loop_projections.latest_waiting_reason
+                 ),
+                 updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(pod_uid)
+        .bind(container_name)
+        .bind(container_id)
+        .bind(projection_version)
+        .bind(window_started_at)
+        .bind(window_ended_at)
+        .bind(observed_restart_count)
+        .bind(previous_termination)
+        .bind(waiting_reason)
+        .execute(executor)
+        .await
     }
 
     /// Points the container's restart-loop projection at its group.
-    #[allow(clippy::too_many_arguments)]
     pub async fn attach_restart_loop_group<'e, E>(
         executor: E,
-        group_id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        pod_uid: &str,
-        container_name: &str,
-        container_id: &str,
-        projection_version: i16,
+        input: RestartLoopGroup<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_restart_loop_projections SET group_id=$1 WHERE organization_id=$2 AND project_id=$3 AND application_id=$4 AND cluster_id=$5 AND pod_uid=$6 AND container_name=$7 AND runtime_container_id=$8 AND projection_version=$9")
-            .bind(group_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(pod_uid)
-            .bind(container_name)
-            .bind(container_id)
-            .bind(projection_version)
-            .execute(executor)
-            .await
+        let RestartLoopGroup {
+            group_id,
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            pod_uid,
+            container_name,
+            container_id,
+            projection_version,
+        } = input;
+        sqlx::query(
+            "UPDATE runtime_restart_loop_projections
+             SET group_id=$1
+             WHERE organization_id=$2
+                 AND project_id=$3
+                 AND application_id=$4
+                 AND cluster_id=$5
+                 AND pod_uid=$6
+                 AND container_name=$7
+                 AND runtime_container_id=$8
+                 AND projection_version=$9",
+        )
+        .bind(group_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(pod_uid)
+        .bind(container_name)
+        .bind(container_id)
+        .bind(projection_version)
+        .execute(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        KernelExitCandidateQuery, NewRestart, RestartLoop, RestartLoopGroup, RestartWindowEndQuery,
+        RestartWindowQuery,
+    };
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use serde_json::json;
     use sqlx::PgPool;
@@ -271,7 +473,11 @@ mod tests {
 
     async fn event_ids(pool: &PgPool, own: &Tenant, kind: &str) -> Vec<Uuid> {
         sqlx::query_scalar(
-            "SELECT id FROM runtime_events WHERE project_id=$1 AND event_kind=$2 ORDER BY observed_at,id",
+            "SELECT id
+             FROM runtime_events
+             WHERE project_id=$1
+                 AND event_kind=$2
+             ORDER BY observed_at,id",
         )
         .bind(own.project_id)
         .bind(kind)
@@ -296,15 +502,17 @@ mod tests {
             async move {
                 TerminationRepository::kernel_exit_candidates(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    "workload-a",
-                    "pod-uid",
-                    "app",
-                    container_id,
-                    at,
-                    tolerance.into(),
+                    KernelExitCandidateQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        workload_uid: "workload-a",
+                        pod_uid: "pod-uid",
+                        container_name: "app",
+                        container_id,
+                        observed_at: at,
+                        tolerance: tolerance.into(),
+                    },
                 )
                 .await
                 .unwrap()
@@ -325,7 +533,9 @@ mod tests {
         .await
         .unwrap();
         let outcome: (String, i32) = sqlx::query_as(
-            "SELECT status,candidate_count FROM runtime_event_correlation_outcomes WHERE event_id=$1",
+            "SELECT status,candidate_count
+             FROM runtime_event_correlation_outcomes
+             WHERE event_id=$1",
         )
         .bind(lifecycle_id)
         .fetch_one(&pool)
@@ -366,16 +576,18 @@ mod tests {
             async move {
                 TerminationRepository::restarts_in_window(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    own.cluster_id,
-                    "pod-uid",
-                    "app",
-                    "abc",
-                    1,
-                    start,
-                    end,
+                    RestartWindowQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        cluster_id: own.cluster_id,
+                        pod_uid: "pod-uid",
+                        container_name: "app",
+                        container_id: "abc",
+                        projection_version: 1,
+                        start,
+                        end,
+                    },
                 )
                 .await
                 .unwrap()
@@ -392,16 +604,18 @@ mod tests {
             async move {
                 TerminationRepository::restart_window_end(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    own.application_id,
-                    own.cluster_id,
-                    "pod-uid",
-                    "app",
-                    "abc",
-                    1,
-                    from,
-                    to,
+                    RestartWindowEndQuery {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        application_id: own.application_id,
+                        cluster_id: own.cluster_id,
+                        pod_uid: "pod-uid",
+                        container_name: "app",
+                        container_id: "abc",
+                        projection_version: 1,
+                        from,
+                        to,
+                    },
                 )
                 .await
                 .unwrap()
@@ -421,39 +635,46 @@ mod tests {
 
         TerminationRepository::upsert_restart_loop(
             &pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            "pod-uid",
-            "app",
-            "abc",
-            1,
-            at - Duration::minutes(7),
-            at + Duration::minutes(3),
-            9,
-            Some(json!({"reason": "OOMKilled"})),
-            Some("CrashLoopBackOff"),
+            RestartLoop {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                pod_uid: "pod-uid",
+                container_name: "app",
+                container_id: "abc",
+                projection_version: 1,
+                window_started_at: at - Duration::minutes(7),
+                window_ended_at: at + Duration::minutes(3),
+                observed_restart_count: 9,
+                previous_termination: Some(json!({"reason": "OOMKilled"})),
+                waiting_reason: Some("CrashLoopBackOff"),
+            },
         )
         .await
         .unwrap();
         let group = group_ids(&pool, &own).await[0];
         TerminationRepository::attach_restart_loop_group(
             &pool,
-            group,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            own.cluster_id,
-            "pod-uid",
-            "app",
-            "abc",
-            1,
+            RestartLoopGroup {
+                group_id: group,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cluster_id: own.cluster_id,
+                pod_uid: "pod-uid",
+                container_name: "app",
+                container_id: "abc",
+                projection_version: 1,
+            },
         )
         .await
         .unwrap();
         let projection: (i32, Option<Uuid>) = sqlx::query_as(
-            "SELECT observed_restart_count,group_id FROM runtime_restart_loop_projections WHERE project_id=$1 AND window_ended_at=$2",
+            "SELECT observed_restart_count,group_id
+             FROM runtime_restart_loop_projections
+             WHERE project_id=$1
+                 AND window_ended_at=$2",
         )
         .bind(own.project_id)
         .bind(at + Duration::minutes(3))
@@ -467,13 +688,15 @@ mod tests {
         for _ in 0..2 {
             TerminationRepository::add_restart(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                1,
-                exec_id,
-                at,
-                at + Duration::minutes(1),
-                1,
+                NewRestart {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    projection_version: 1,
+                    event_id: exec_id,
+                    window_started_at: at,
+                    window_ended_at: at + Duration::minutes(1),
+                    restart_delta: 1,
+                },
             )
             .await
             .unwrap();
@@ -516,7 +739,10 @@ mod tests {
                 1,
             ),
             (
-                "SELECT count(*) FROM runtime_event_group_memberships WHERE event_id=$1 AND fingerprint_version=101",
+                "SELECT count(*)
+                 FROM runtime_event_group_memberships
+                 WHERE event_id=$1
+                     AND fingerprint_version=101",
                 1,
             ),
         ] {
@@ -536,7 +762,10 @@ mod tests {
         .unwrap();
         assert!(links >= 1, "the exec item is linked to the group");
         let messages: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM outbox_messages WHERE aggregate_id=$1 AND topic='runtime_group.first_seen'",
+            "SELECT count(*)
+             FROM outbox_messages
+             WHERE aggregate_id=$1
+                 AND topic='runtime_group.first_seen'",
         )
         .bind(group)
         .fetch_one(&pool)

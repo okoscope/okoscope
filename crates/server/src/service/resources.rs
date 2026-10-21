@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::application_credentials::ApplicationCredentialScope;
 use crate::auth::{IdentityPrincipal, SessionScope};
-use crate::repository::resources::ResourceRepository;
+use crate::repository::resources::{
+    NewResourceContribution, ResourceFinding, ResourceHistoryQuery, ResourceRepository, RollupPoint,
+};
 use crate::repository::{ApplicationRepository, ProjectRepository};
 use crate::service::project_access::project_scope;
 
@@ -244,27 +246,30 @@ async fn insert_contribution(
     let values = serde_json::to_value(&aggregate.values).unwrap_or_else(|_| serde_json::json!({}));
     let result = ResourceRepository::insert_contribution(
         &mut **transaction,
-        aggregate.id,
-        application.organization_id,
-        application.project_id,
-        application.application_id,
-        scope.cluster_id,
-        agent_id,
-        release_id,
-        i16::try_from(aggregate.schema_version).unwrap_or(i16::MAX),
-        aggregate.interval_start,
-        aggregate.interval_end,
-        i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
-        i32::try_from(aggregate.sample_count).unwrap_or(i32::MAX),
-        i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX),
-        &aggregate.namespace,
-        &aggregate.workload_uid,
-        &aggregate.workload_kind,
-        &aggregate.workload_name,
-        &aggregate.container_name,
-        &aggregate.node_name,
-        i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
-        values,
+        NewResourceContribution {
+            id: aggregate.id,
+            organization_id: application.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+            cluster_id: scope.cluster_id,
+            agent_id,
+            release_id,
+            schema_version: i16::try_from(aggregate.schema_version).unwrap_or(i16::MAX),
+            interval_start: aggregate.interval_start,
+            interval_end: aggregate.interval_end,
+            covered_usec: i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
+            sample_count: i32::try_from(aggregate.sample_count).unwrap_or(i32::MAX),
+            contributing_containers: i32::try_from(aggregate.contributing_containers)
+                .unwrap_or(i32::MAX),
+            namespace: &aggregate.namespace,
+            workload_uid: &aggregate.workload_uid,
+            workload_kind: &aggregate.workload_kind,
+            workload_name: &aggregate.workload_name,
+            container_name: &aggregate.container_name,
+            node_name: &aggregate.node_name,
+            unavailable_sources: i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
+            values,
+        },
     )
     .await?;
     Ok(result.rows_affected() == 1)
@@ -546,25 +551,27 @@ async fn upsert_rollup(
         .saturating_mul(i64::from(aggregate.contributing_containers));
     ResourceRepository::add_rollup_point(
         &mut **transaction,
-        application.organization_id,
-        application.project_id,
-        application.application_id,
-        release_key,
-        release_id,
-        &aggregate.container_name,
-        aggregate.interval_start,
-        step,
-        metric.name,
-        metric.unit,
-        metric.value,
-        u64_as_f64(aggregate.covered_usec),
-        metric.limit,
-        i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
-        expected,
-        i64::from(aggregate.sample_count),
-        i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX),
-        i32::try_from(aggregate.ready_containers).unwrap_or(i32::MAX),
-        i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
+        RollupPoint {
+            organization_id: application.organization_id,
+            project_id: application.project_id,
+            application_id: application.application_id,
+            release_key,
+            release_id,
+            container_name: &aggregate.container_name,
+            interval_start: aggregate.interval_start,
+            step_seconds: step,
+            metric: metric.name,
+            unit: metric.unit,
+            value: metric.value,
+            value_weight: u64_as_f64(aggregate.covered_usec),
+            limit_value: metric.limit,
+            covered_usec: i64::try_from(aggregate.covered_usec).unwrap_or(i64::MAX),
+            expected_usec: expected,
+            sample_count: i64::from(aggregate.sample_count),
+            observed_replicas: i32::try_from(aggregate.contributing_containers).unwrap_or(i32::MAX),
+            ready_replicas: i32::try_from(aggregate.ready_containers).unwrap_or(i32::MAX),
+            unavailable_sources: i64::try_from(aggregate.unavailable_sources).unwrap_or(i64::MAX),
+        },
     )
     .await?;
     Ok(())
@@ -1292,18 +1299,20 @@ async fn persist_findings(
             "baseline_window":baseline_window,"target_window":target_window});
         ResourceRepository::upsert_finding(
             &mut *tx,
-            finding.id,
-            organization_id,
-            project_id,
-            application_id,
-            target_release_id,
-            baseline_release_id,
-            finding.reason_code,
-            finding.priority,
-            &finding.metric,
-            i16::try_from(finding.rule_version).unwrap_or(i16::MAX),
-            facts,
-            target_window.from,
+            ResourceFinding {
+                id: finding.id,
+                organization_id,
+                project_id,
+                application_id,
+                target_release_id,
+                baseline_release_id,
+                reason_code: finding.reason_code,
+                priority: finding.priority,
+                metric: &finding.metric,
+                rule_version: i16::try_from(finding.rule_version).unwrap_or(i16::MAX),
+                facts,
+                opened_at: target_window.from,
+            },
         )
         .await?;
     }
@@ -1612,15 +1621,17 @@ impl ResourceService {
         let step = validate_history_query(&query)?;
         let rows = ResourceRepository::history::<_, HistoryRow>(
             &self.pool,
-            organization_id,
-            project_id,
-            application_id,
-            &query.metric,
-            step,
-            query.from,
-            query.to,
-            query.release_id,
-            query.container.as_deref(),
+            ResourceHistoryQuery {
+                organization_id,
+                project_id,
+                application_id,
+                metric: &query.metric,
+                step_seconds: step,
+                from: query.from,
+                to: query.to,
+                release_id: query.release_id,
+                container_name: query.container.as_deref(),
+            },
         )
         .await?;
         Ok(history_response(query, step, rows))

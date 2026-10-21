@@ -6,6 +6,22 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`TransactionalMailRepository::insert`].
+#[derive(Debug)]
+pub struct NewMailMessage<'a> {
+    pub id: Uuid,
+    pub logical_key: &'a str,
+    pub template_kind: &'a str,
+    pub recipient_email: &'a str,
+    pub locale: &'a str,
+    pub payload_ciphertext: Vec<u8>,
+    pub payload_nonce: Vec<u8>,
+    pub action_id: Option<Uuid>,
+    pub invitation_id: Option<Uuid>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub retention: chrono::Duration,
+}
+
 /// Transactional mail outbox.
 #[derive(Clone, Copy, Debug)]
 pub struct TransactionalMailRepository;
@@ -17,45 +33,62 @@ impl TransactionalMailRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (i64, i64)>("SELECT count(*)::bigint,COALESCE(EXTRACT(EPOCH FROM (now()-min(available_at)))::bigint,0) FROM transactional_mail_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL AND available_at<=now()")
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT count(*)::bigint,
+                 COALESCE(EXTRACT(EPOCH FROM (now()-min(available_at)))::bigint,0)
+             FROM transactional_mail_outbox
+             WHERE delivered_at IS NULL
+                 AND terminal_at IS NULL
+                 AND available_at<=now()",
+        )
+        .fetch_one(executor)
+        .await
     }
 
     /// Queues an encrypted mail, once per logical key and recipient, kept
     /// for `retention` after it is created.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        logical_key: &str,
-        template_kind: &str,
-        recipient_email: &str,
-        locale: &str,
-        payload_ciphertext: Vec<u8>,
-        payload_nonce: Vec<u8>,
-        action_id: Option<Uuid>,
-        invitation_id: Option<Uuid>,
-        expires_at: Option<DateTime<Utc>>,
-        retention: chrono::Duration,
+        input: NewMailMessage<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO transactional_mail_outbox(id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,payload_nonce,action_id,invitation_id,expires_at,retain_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+$11) ON CONFLICT(logical_key,recipient_email) DO NOTHING")
-            .bind(id)
-            .bind(logical_key)
-            .bind(template_kind)
-            .bind(recipient_email)
-            .bind(locale)
-            .bind(payload_ciphertext)
-            .bind(payload_nonce)
-            .bind(action_id)
-            .bind(invitation_id)
-            .bind(expires_at)
-            .bind(retention)
-            .execute(executor)
-            .await
+        let NewMailMessage {
+            id,
+            logical_key,
+            template_kind,
+            recipient_email,
+            locale,
+            payload_ciphertext,
+            payload_nonce,
+            action_id,
+            invitation_id,
+            expires_at,
+            retention,
+        } = input;
+        sqlx::query(
+            "INSERT INTO transactional_mail_outbox(
+                 id,logical_key,template_kind,recipient_email,locale,payload_ciphertext,
+                 payload_nonce,action_id,invitation_id,expires_at,retain_until
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()+$11)
+             ON CONFLICT(logical_key,recipient_email)
+             DO NOTHING",
+        )
+        .bind(id)
+        .bind(logical_key)
+        .bind(template_kind)
+        .bind(recipient_email)
+        .bind(locale)
+        .bind(payload_ciphertext)
+        .bind(payload_nonce)
+        .bind(action_id)
+        .bind(invitation_id)
+        .bind(expires_at)
+        .bind(retention)
+        .execute(executor)
+        .await
     }
 
     /// Leases up to `limit` due mails to `worker_id` for `lease`, counting an
@@ -74,12 +107,31 @@ impl TransactionalMailRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH due AS (SELECT id FROM transactional_mail_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL AND available_at<=now() AND (claimed_until IS NULL OR claimed_until<now()) ORDER BY available_at,created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED) UPDATE transactional_mail_outbox o SET claimed_by=$2,claimed_until=now()+$3,attempt_count=attempt_count+1,last_attempt_at=now() FROM due WHERE o.id=due.id RETURNING o.id,o.template_kind,o.recipient_email,o.locale,o.payload_ciphertext,o.payload_nonce,o.attempt_count,o.expires_at")
-            .bind(limit)
-            .bind(worker_id)
-            .bind(lease)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH due AS (
+                 SELECT id
+                 FROM transactional_mail_outbox
+                 WHERE delivered_at IS NULL
+                     AND terminal_at IS NULL
+                     AND available_at<=now()
+                     AND (claimed_until IS NULL OR claimed_until<now())
+                 ORDER BY available_at,created_at,id
+                 LIMIT $1
+                 FOR UPDATE SKIP LOCKED
+             )
+             UPDATE transactional_mail_outbox o
+             SET claimed_by=$2,claimed_until=now()+$3,attempt_count=attempt_count+1,
+                 last_attempt_at=now()
+             FROM due
+             WHERE o.id=due.id
+             RETURNING o.id,o.template_kind,o.recipient_email,o.locale,o.payload_ciphertext,
+                 o.payload_nonce,o.attempt_count,o.expires_at",
+        )
+        .bind(limit)
+        .bind(worker_id)
+        .bind(lease)
+        .fetch_all(executor)
+        .await
     }
 
     /// Marks a mail leased to `worker_id` delivered and erases its payload.
@@ -91,11 +143,17 @@ impl TransactionalMailRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE transactional_mail_outbox SET delivered_at=now(),claimed_by=NULL,claimed_until=NULL,payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now() WHERE id=$1 AND claimed_by=$2")
-            .bind(id)
-            .bind(worker_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE transactional_mail_outbox
+             SET delivered_at=now(),claimed_by=NULL,claimed_until=NULL,
+                 payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now()
+             WHERE id=$1
+                 AND claimed_by=$2",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .execute(executor)
+        .await
     }
 
     /// Abandons a mail leased to `worker_id` for `reason` and erases its
@@ -109,12 +167,18 @@ impl TransactionalMailRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE transactional_mail_outbox SET terminal_at=now(),terminal_reason=$3,claimed_by=NULL,claimed_until=NULL,payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now() WHERE id=$1 AND claimed_by=$2")
-            .bind(id)
-            .bind(worker_id)
-            .bind(reason)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE transactional_mail_outbox
+             SET terminal_at=now(),terminal_reason=$3,claimed_by=NULL,claimed_until=NULL,
+                 payload_ciphertext=NULL,payload_nonce=NULL,ciphertext_erased_at=now()
+             WHERE id=$1
+                 AND claimed_by=$2",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .bind(reason)
+        .execute(executor)
+        .await
     }
 
     /// Releases a mail leased to `worker_id`, due again after
@@ -128,12 +192,18 @@ impl TransactionalMailRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE transactional_mail_outbox SET available_at=now()+make_interval(secs=>$3),claimed_by=NULL,claimed_until=NULL WHERE id=$1 AND claimed_by=$2")
-            .bind(id)
-            .bind(worker_id)
-            .bind(delay_seconds)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE transactional_mail_outbox
+             SET available_at=now()+make_interval(secs=>$3),claimed_by=NULL,
+                 claimed_until=NULL
+             WHERE id=$1
+                 AND claimed_by=$2",
+        )
+        .bind(id)
+        .bind(worker_id)
+        .bind(delay_seconds)
+        .execute(executor)
+        .await
     }
 
     /// Deletes delivered or abandoned mail past its retention.
@@ -143,21 +213,26 @@ impl TransactionalMailRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM transactional_mail_outbox WHERE retain_until<now() AND (delivered_at IS NOT NULL OR terminal_at IS NOT NULL)")
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM transactional_mail_outbox
+             WHERE retain_until<now()
+                 AND (delivered_at IS NOT NULL OR terminal_at IS NOT NULL)",
+        )
+        .execute(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::NewMailMessage;
+    use crate::repository::invitations::{InvitationRepository, NewInvitationRecord};
     use chrono::{DateTime, Duration, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::TransactionalMailRepository;
     use crate::repository::email_actions::EmailActionRepository;
-    use crate::repository::invitations::InvitationRepository;
     use crate::repository::test_support::{tenant, user};
     use crate::repository::{MembershipRepository, UserRepository};
 
@@ -180,17 +255,19 @@ mod tests {
         let id = Uuid::new_v4();
         TransactionalMailRepository::insert(
             pool,
-            id,
-            key,
-            "verify_email",
-            "someone@example.test",
-            "en",
-            vec![1; 16],
-            vec![2; 24],
-            None,
-            None,
-            None,
-            Duration::days(30),
+            NewMailMessage {
+                id,
+                logical_key: key,
+                template_kind: "verify_email",
+                recipient_email: "someone@example.test",
+                locale: "en",
+                payload_ciphertext: vec![1; 16],
+                payload_nonce: vec![2; 24],
+                action_id: None,
+                invitation_id: None,
+                expires_at: None,
+                retention: Duration::days(30),
+            },
         )
         .await
         .unwrap();
@@ -199,7 +276,9 @@ mod tests {
 
     async fn state(pool: &PgPool, id: Uuid) -> State {
         sqlx::query_as(
-            "SELECT delivered_at,terminal_at,terminal_reason,payload_ciphertext FROM transactional_mail_outbox WHERE id=$1",
+            "SELECT delivered_at,terminal_at,terminal_reason,payload_ciphertext
+             FROM transactional_mail_outbox
+             WHERE id=$1",
         )
         .bind(id)
         .fetch_one(pool)
@@ -277,11 +356,16 @@ mod tests {
             (0, 0)
         );
 
-        sqlx::query("UPDATE transactional_mail_outbox SET created_at=now()-interval '2 days',available_at=now()-interval '2 days',retain_until=now()-interval '1 day' WHERE id=$1")
-            .bind(first)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE transactional_mail_outbox
+             SET created_at=now()-interval '2 days',available_at=now()-interval '2 days',
+                 retain_until=now()-interval '1 day'
+             WHERE id=$1",
+        )
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
         TransactionalMailRepository::delete_retained(&pool)
             .await
             .unwrap();
@@ -313,11 +397,15 @@ mod tests {
             .await
             .unwrap();
         }
-        sqlx::query("UPDATE user_email_actions SET created_at=now()-interval '40 days',expires_at=now()-interval '39 days' WHERE id=$1")
-            .bind(stale)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE user_email_actions
+             SET created_at=now()-interval '40 days',expires_at=now()-interval '39 days'
+             WHERE id=$1",
+        )
+        .bind(stale)
+        .execute(&pool)
+        .await
+        .unwrap();
         EmailActionRepository::delete_stale(&pool).await.unwrap();
         let actions: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM user_email_actions")
             .fetch_all(&pool)
@@ -334,24 +422,31 @@ mod tests {
         ] {
             InvitationRepository::insert(
                 &pool,
-                id,
-                own.organization_id,
-                None,
-                email,
-                "member",
-                actor,
-                "en",
-                vec![digest; 32],
-                Utc::now() + Duration::days(1),
+                NewInvitationRecord {
+                    id,
+                    organization_id: own.organization_id,
+                    project_id: None,
+                    recipient_email: email,
+                    role: "member",
+                    inviter_user_id: actor,
+                    locale: "en",
+                    token_digest: vec![digest; 32],
+                    expires_at: Utc::now() + Duration::days(1),
+                },
             )
             .await
             .unwrap();
         }
-        sqlx::query("UPDATE invitations SET created_at=now()-interval '3 days',expires_at=now()-interval '2 days',retain_until=now()-interval '1 day' WHERE id=$1")
-            .bind(expired)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE invitations
+             SET created_at=now()-interval '3 days',expires_at=now()-interval '2 days',
+                 retain_until=now()-interval '1 day'
+             WHERE id=$1",
+        )
+        .bind(expired)
+        .execute(&pool)
+        .await
+        .unwrap();
         InvitationRepository::delete_retained(&pool).await.unwrap();
         let invitations: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM invitations")
             .fetch_all(&pool)
@@ -362,7 +457,11 @@ mod tests {
         let abandoned = tenant(&pool, "mail-cleanups-abandoned").await;
         let owner = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO users(id,email,password_hash,created_at) VALUES($1,$2,'$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHR2YWx1ZQ$0123456789abcdef',now()-interval '8 days')",
+            "INSERT INTO users(id,email,password_hash,created_at)
+             VALUES(
+                 $1,$2,'$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHR2YWx1ZQ$0123456789abcdef',
+                 now()-interval '8 days'
+             )",
         )
         .bind(owner)
         .bind(format!("{owner}@example.test"))

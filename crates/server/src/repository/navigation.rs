@@ -49,13 +49,23 @@ impl NavigationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3)) ORDER BY p.created_at,p.id LIMIT $4", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
-            .bind(organization_id)
-            .bind(cursor_created_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,
+                 {} runtime_group_count
+             FROM projects p
+             WHERE p.organization_id=$1
+                 AND ($2::timestamptz IS NULL OR (p.created_at,p.id)>($2,$3))
+             ORDER BY p.created_at,p.id
+             LIMIT $4",
+            crate::repository::applications::aggregates::COUNT_FOR_PROJECT,
+            aggregates::COUNT_ALL_FOR_PROJECT
+        ))
+        .bind(organization_id)
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One project with the same columns as [`Self::project_page`].
@@ -68,11 +78,19 @@ impl NavigationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,{} runtime_group_count FROM projects p WHERE p.organization_id=$1 AND p.id=$2", crate::repository::applications::aggregates::COUNT_FOR_PROJECT, aggregates::COUNT_ALL_FOR_PROJECT))
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT p.id,p.slug,p.name,p.created_at,p.archived_at,{} application_count,
+                 {} runtime_group_count
+             FROM projects p
+             WHERE p.organization_id=$1
+                 AND p.id=$2",
+            crate::repository::applications::aggregates::COUNT_FOR_PROJECT,
+            aggregates::COUNT_ALL_FOR_PROJECT
+        ))
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of a project's applications ordered by `(created_at, id)`,
@@ -92,14 +110,26 @@ impl NavigationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4)) ORDER BY a.created_at,a.id LIMIT $5", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(cursor_created_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,
+                 {} runtime_group_count,{} latest_observed_at
+             FROM applications a
+             WHERE a.organization_id=$1
+                 AND a.project_id=$2
+                 AND ($3::timestamptz IS NULL OR (a.created_at,a.id)>($3,$4))
+             ORDER BY a.created_at,a.id
+             LIMIT $5",
+            crate::repository::releases::aggregates::COUNT_FOR_APPLICATION,
+            aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,
+            aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION
+        ))
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(cursor_created_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One application with the same columns as [`Self::application_page`].
@@ -113,12 +143,22 @@ impl NavigationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as(&format!("SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,{} runtime_group_count,{} latest_observed_at FROM applications a WHERE a.organization_id=$1 AND a.project_id=$2 AND a.id=$3", crate::repository::releases::aggregates::COUNT_FOR_APPLICATION, aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION))
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(&format!(
+            "SELECT a.id,a.project_id,a.slug,a.name,a.created_at,{} release_count,
+                 {} runtime_group_count,{} latest_observed_at
+             FROM applications a
+             WHERE a.organization_id=$1
+                 AND a.project_id=$2
+                 AND a.id=$3",
+            crate::repository::releases::aggregates::COUNT_FOR_APPLICATION,
+            aggregates::COUNT_WITH_EVIDENCE_FOR_APPLICATION,
+            aggregates::LATEST_SEEN_WITH_EVIDENCE_FOR_APPLICATION
+        ))
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Reports whether a worker-page cursor names an agent of this application
@@ -134,14 +174,25 @@ impl NavigationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND agent_id=$4 GROUP BY agent_id HAVING max(observed_at)=$5)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(agent_id)
-            .bind(last_observed_at)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM runtime_events
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+                     AND agent_id=$4
+                 GROUP BY agent_id
+                 HAVING max(observed_at)=$5
+             )",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(agent_id)
+        .bind(last_observed_at)
+        .fetch_one(executor)
+        .await
     }
 
     /// A page of the agents that reported events for an application, most
@@ -162,15 +213,36 @@ impl NavigationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH observed AS (SELECT agent_id,min(observed_at) first_observed_at,max(observed_at) last_observed_at FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 GROUP BY agent_id) SELECT a.id agent_id,a.cluster_id,c.name cluster_name,a.node_name,a.agent_version,a.architecture,a.kernel_release,o.first_observed_at,o.last_observed_at,a.last_seen_at agent_last_seen_at FROM observed o JOIN agents a ON a.organization_id=$1 AND a.id=o.agent_id JOIN clusters c ON c.organization_id=$1 AND c.id=a.cluster_id WHERE ($4::timestamptz IS NULL OR (o.last_observed_at,o.agent_id)<($4,$5)) ORDER BY o.last_observed_at DESC,o.agent_id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cursor_last_observed_at)
-            .bind(cursor_agent_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH observed AS (
+                 SELECT agent_id,min(observed_at) first_observed_at,
+                     max(observed_at) last_observed_at
+                 FROM runtime_events
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+                 GROUP BY agent_id
+             )
+             SELECT a.id agent_id,a.cluster_id,c.name cluster_name,a.node_name,
+                 a.agent_version,a.architecture,a.kernel_release,o.first_observed_at,
+                 o.last_observed_at,a.last_seen_at agent_last_seen_at
+             FROM observed o
+             JOIN agents a ON a.organization_id=$1
+                 AND a.id=o.agent_id
+             JOIN clusters c ON c.organization_id=$1
+                 AND c.id=a.cluster_id
+             WHERE ($4::timestamptz IS NULL OR (o.last_observed_at,o.agent_id)<($4,$5))
+             ORDER BY o.last_observed_at DESC,o.agent_id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cursor_last_observed_at)
+        .bind(cursor_agent_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Resolves a project id used as a cursor into its `(created_at, id)`
@@ -203,12 +275,18 @@ impl NavigationRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT created_at,id FROM applications WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT created_at,id
+             FROM applications
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 }
 
@@ -374,14 +452,19 @@ mod tests {
             &[exec(&own, "/bin/a", earlier), exec(&own, "/bin/b", later)],
         )
         .await;
-        sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'1.0',now())")
-            .bind(Uuid::new_v4())
-            .bind(own.organization_id)
-            .bind(own.project_id)
-            .bind(own.application_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO releases(
+                 id,organization_id,project_id,application_id,version,deployed_at
+             )
+             VALUES($1,$2,$3,$4,'1.0',now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(own.organization_id)
+        .bind(own.project_id)
+        .bind(own.application_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let application: Application = NavigationRepository::application(
             &pool,

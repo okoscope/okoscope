@@ -103,6 +103,73 @@ pub mod aggregates {
            AND g.application_id=a.id AND g.occurrence_count>0)";
 }
 
+/// Input to [`EventGroupRepository::add_release_membership`].
+#[derive(Debug)]
+pub struct ReleaseMembership {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub event_id: Uuid,
+    pub group_id: Uuid,
+    pub fingerprint_version: i16,
+    pub release_id: Option<Uuid>,
+}
+
+/// Input to [`EventGroupRepository::record_release_occurrence`].
+#[derive(Debug)]
+pub struct ReleaseOccurrence {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub release_id: Uuid,
+    pub group_id: Uuid,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
+/// Input to [`EventGroupRepository::summary_page`].
+#[derive(Debug)]
+pub struct GroupSummaryPageQuery {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub event_kind: Option<String>,
+    pub status: Option<String>,
+    pub namespace: Option<String>,
+    pub workload_kind: Option<String>,
+    pub workload_name: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub first_seen_from: Option<DateTime<Utc>>,
+    pub first_seen_to: Option<DateTime<Utc>>,
+    pub last_seen_to: Option<DateTime<Utc>>,
+    pub release_id: Option<Uuid>,
+    pub cursor_last_seen_at: Option<DateTime<Utc>>,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
+/// Input to [`EventGroupRepository::insert_if_absent`].
+#[derive(Debug)]
+pub struct NewEventGroup<'a> {
+    pub candidate_id: Uuid,
+    pub key: GroupKey<'a>,
+    pub event_kind: &'a str,
+    pub semantic_summary: &'a Value,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
+/// Input to [`EventGroupRepository::upsert_derived`].
+#[derive(Debug)]
+pub struct DerivedEventGroup<'a> {
+    pub candidate_id: Uuid,
+    pub key: GroupKey<'a>,
+    pub event_kind: &'a str,
+    pub semantic_summary: &'a Value,
+    pub observed_at: DateTime<Utc>,
+    pub event_id: Uuid,
+}
+
 /// Queries against the `runtime_event_groups` table.
 #[derive(Clone, Copy, Debug)]
 pub struct EventGroupRepository;
@@ -110,58 +177,90 @@ pub struct EventGroupRepository;
 impl EventGroupRepository {
     /// Makes an event a member of a group under a fingerprint version, with
     /// its release, once; `None` when it already was.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_release_membership<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        event_id: Uuid,
-        group_id: Uuid,
-        fingerprint_version: i16,
-        release_id: Option<Uuid>,
+        input: ReleaseMembership,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_event_group_memberships (organization_id, project_id, application_id, event_id, group_id, fingerprint_version, release_id) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (event_id, fingerprint_version) DO NOTHING RETURNING event_id")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(event_id)
-            .bind(group_id)
-            .bind(fingerprint_version)
-            .bind(release_id)
-            .fetch_optional(executor)
-            .await
+        let ReleaseMembership {
+            organization_id,
+            project_id,
+            application_id,
+            event_id,
+            group_id,
+            fingerprint_version,
+            release_id,
+        } = input;
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO runtime_event_group_memberships (
+                 organization_id, project_id, application_id, event_id, group_id,
+                 fingerprint_version, release_id
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (event_id, fingerprint_version)
+             DO NOTHING
+             RETURNING event_id",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(event_id)
+        .bind(group_id)
+        .bind(fingerprint_version)
+        .bind(release_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Counts an occurrence of a group in a release, widening its seen
     /// window and making the event its representative when it is the latest.
-    #[allow(clippy::too_many_arguments)]
     pub async fn record_release_occurrence<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        release_id: Uuid,
-        group_id: Uuid,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: ReleaseOccurrence,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_event_group_releases (organization_id,project_id,application_id,release_id,group_id,occurrence_count,first_seen_at,last_seen_at,representative_event_id) VALUES ($1,$2,$3,$4,$5,1,$6,$6,$7) ON CONFLICT (release_id,group_id) DO UPDATE SET representative_event_id=COALESCE(runtime_event_group_releases.representative_event_id,EXCLUDED.representative_event_id),occurrence_count=runtime_event_group_releases.occurrence_count+1,first_seen_at=LEAST(runtime_event_group_releases.first_seen_at,EXCLUDED.first_seen_at),last_seen_at=GREATEST(runtime_event_group_releases.last_seen_at,EXCLUDED.last_seen_at),updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .bind(group_id)
-            .bind(observed_at)
-            .bind(event_id)
-            .execute(executor)
-            .await
+        let ReleaseOccurrence {
+            organization_id,
+            project_id,
+            application_id,
+            release_id,
+            group_id,
+            observed_at,
+            event_id,
+        } = input;
+        sqlx::query(
+            "INSERT INTO runtime_event_group_releases (
+                 organization_id,project_id,application_id,release_id,group_id,
+                 occurrence_count,first_seen_at,last_seen_at,representative_event_id
+             )
+             VALUES ($1,$2,$3,$4,$5,1,$6,$6,$7)
+             ON CONFLICT (release_id,group_id)
+             DO UPDATE SET representative_event_id=COALESCE(
+                 runtime_event_group_releases.representative_event_id,
+                 EXCLUDED.representative_event_id
+             ),
+                 occurrence_count=runtime_event_group_releases.occurrence_count+1,
+                 first_seen_at=LEAST(
+                     runtime_event_group_releases.first_seen_at,EXCLUDED.first_seen_at
+                 ),
+                 last_seen_at=GREATEST(
+                     runtime_event_group_releases.last_seen_at,EXCLUDED.last_seen_at
+                 ),
+                 updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .bind(group_id)
+        .bind(observed_at)
+        .bind(event_id)
+        .execute(executor)
+        .await
     }
 
     /// The application's group memberships plus snapshot occurrences, and
@@ -176,12 +275,33 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT (SELECT count(*) FROM runtime_event_group_memberships WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)+(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_history_snapshots WHERE organization_id=$1 AND project_id=$2 AND application_id=$3),(SELECT COALESCE(sum(occurrence_count),0)::bigint FROM runtime_event_groups WHERE organization_id=$1 AND project_id=$2 AND application_id=$3)")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "SELECT (
+                 SELECT count(*)
+                 FROM runtime_event_group_memberships
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+             )+(
+                 SELECT COALESCE(sum(occurrence_count),0)::bigint
+                 FROM runtime_history_snapshots
+                 WHERE organization_id=$1
+                     AND project_id=$2
+                     AND application_id=$3
+             ),
+                 (
+                     SELECT COALESCE(sum(occurrence_count),0)::bigint
+                     FROM runtime_event_groups
+                     WHERE organization_id=$1
+                         AND project_id=$2
+                         AND application_id=$3
+                 )",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// How many per-release group rollups exist.
@@ -207,15 +327,23 @@ impl EventGroupRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_event_group_memberships (organization_id,project_id,application_id,event_id,group_id,fingerprint_version) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(event_id)
-            .bind(group_id)
-            .bind(fingerprint_version)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_event_group_memberships (
+                 organization_id,project_id,application_id,event_id,group_id,
+                 fingerprint_version
+             )
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT
+             DO NOTHING",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(event_id)
+        .bind(group_id)
+        .bind(fingerprint_version)
+        .execute(executor)
+        .await
     }
 
     /// Whether a group's first sighting should be notified under its current
@@ -234,12 +362,61 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT CASE WHEN s.id IS NOT NULL THEN 'active_suppression' WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN 'evaluation_pending' WHEN e.verdict='expected' THEN 'expected' ELSE 'eligible' END reason,now() evaluated_at,CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.winning_revision_id END policy_revision_id,s.id policy_suppression_id FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id LEFT JOIN LATERAL (SELECT x.id FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id AND x.project_id=i.project_id AND x.application_id=i.application_id AND x.identity_version=i.identity_version AND x.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND x.cancelled_at IS NULL AND x.expires_at>now() AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids)) AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces)) AND (cardinality(x.workload_kinds)=0 OR g.workload_kind=ANY(x.workload_kinds)) AND (cardinality(x.workload_names)=0 OR g.workload_name=ANY(x.workload_names)) ORDER BY x.expires_at,x.id LIMIT 1) s ON true WHERE g.organization_id=$1 AND g.id=$2")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(evaluator_version)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "SELECT CASE
+                 WHEN s.id IS NOT NULL THEN 'active_suppression'
+                 WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3
+                     THEN 'evaluation_pending'
+                 WHEN e.verdict='expected' THEN 'expected'
+                 ELSE 'eligible'
+             END reason,
+                 now() evaluated_at,
+                 CASE
+                     WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                         AND e.evaluator_version=$3
+                         THEN e.winning_revision_id
+                 END policy_revision_id,
+                 s.id policy_suppression_id
+             FROM runtime_event_groups g
+             LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id
+             LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id
+                 AND ps.project_id=g.project_id
+                 AND ps.application_id=g.application_id
+             LEFT JOIN LATERAL (
+                 SELECT x.id
+                 FROM runtime_inventory_group_links gl
+                 JOIN runtime_inventory_items i ON i.id=gl.item_id
+                 JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id
+                     AND x.project_id=i.project_id
+                     AND x.application_id=i.application_id
+                     AND x.identity_version=i.identity_version
+                     AND x.identity_digest=i.identity_digest
+                 WHERE gl.group_id=g.id
+                     AND x.cancelled_at IS NULL
+                     AND x.expires_at>now()
+                     AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids))
+                     AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces))
+                     AND (
+                         cardinality(x.workload_kinds)=0
+                         OR g.workload_kind=ANY(x.workload_kinds)
+                     )
+                     AND (
+                         cardinality(x.workload_names)=0
+                         OR g.workload_name=ANY(x.workload_names)
+                     )
+                 ORDER BY x.expires_at,x.id
+                 LIMIT 1
+             ) s ON true
+             WHERE g.organization_id=$1
+                 AND g.id=$2",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(evaluator_version)
+        .fetch_one(executor)
+        .await
     }
 
     /// Up to 20 user labels on the inventory items behind a group, as a JSON
@@ -252,11 +429,35 @@ impl EventGroupRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Value>("SELECT COALESCE(jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at'),'[]'::jsonb) FROM (SELECT jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) label FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=$2 ORDER BY l.display_name,l.id LIMIT 20) labels")
-            .bind(organization_id)
-            .bind(group_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, Value>(
+            "SELECT COALESCE(
+                 jsonb_agg(label ORDER BY label->>'display_name',label->>'updated_at'),
+                 '[]'::jsonb
+             )
+             FROM (
+                 SELECT jsonb_build_object(
+                     'display_name',l.display_name,'created_by_user_id',l.created_by_user_id,
+                     'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,
+                     'updated_at',l.updated_at
+                 ) label
+                 FROM runtime_inventory_group_links gl
+                 JOIN runtime_inventory_items i ON i.id=gl.item_id
+                 JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id
+                     AND l.project_id=i.project_id
+                     AND l.application_id=i.application_id
+                     AND l.inventory_kind=i.inventory_kind
+                     AND l.identity_version=i.identity_version
+                     AND l.identity_digest=i.identity_digest
+                 WHERE gl.organization_id=$1
+                     AND gl.group_id=$2
+                 ORDER BY l.display_name,l.id
+                 LIMIT 20
+             ) labels",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// The user-assigned behaviour labels attached to each of the given
@@ -270,11 +471,32 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT gl.group_id,jsonb_agg(jsonb_build_object('display_name',l.display_name,'created_by_user_id',l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,'created_at',l.created_at,'updated_at',l.updated_at) ORDER BY l.display_name,l.id) user_labels FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id AND l.project_id=i.project_id AND l.application_id=i.application_id AND l.inventory_kind=i.inventory_kind AND l.identity_version=i.identity_version AND l.identity_digest=i.identity_digest WHERE gl.organization_id=$1 AND gl.group_id=ANY($2) GROUP BY gl.group_id")
-            .bind(organization_id)
-            .bind(group_ids)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT gl.group_id,
+                 jsonb_agg(
+                     jsonb_build_object(
+                         'display_name',l.display_name,'created_by_user_id',
+                         l.created_by_user_id,'updated_by_user_id',l.updated_by_user_id,
+                         'created_at',l.created_at,'updated_at',l.updated_at
+                     ) ORDER BY l.display_name,
+                     l.id
+                 ) user_labels
+             FROM runtime_inventory_group_links gl
+             JOIN runtime_inventory_items i ON i.id=gl.item_id
+             JOIN runtime_behavior_user_labels l ON l.organization_id=i.organization_id
+                 AND l.project_id=i.project_id
+                 AND l.application_id=i.application_id
+                 AND l.inventory_kind=i.inventory_kind
+                 AND l.identity_version=i.identity_version
+                 AND l.identity_digest=i.identity_digest
+             WHERE gl.organization_id=$1
+                 AND gl.group_id=ANY($2)
+             GROUP BY gl.group_id",
+        )
+        .bind(organization_id)
+        .bind(group_ids)
+        .fetch_all(executor)
+        .await
     }
 
     /// The current policy verdict of each of the given groups, as a JSON
@@ -290,12 +512,96 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT g.id group_id,jsonb_build_object('state',CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN 'evaluation_pending' ELSE 'current' END,'verdict',CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN NULL ELSE e.verdict END,'reason_code',CASE WHEN e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 THEN 'evaluation_pending' ELSE e.reason_code END,'winning_revision_id',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.winning_revision_id END,'explanation',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.explanation ELSE '{}'::jsonb END,'evaluated_at',CASE WHEN e.policy_state_version=COALESCE(ps.state_version,0) AND e.evaluator_version=$3 THEN e.evaluated_at END) policy_evaluation,s.summary active_suppression,(s.summary IS NULL AND (e.group_id IS NULL OR e.policy_state_version<>COALESCE(ps.state_version,0) OR e.evaluator_version<>$3 OR e.verdict<>'expected')) actionable FROM runtime_event_groups g LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id AND ps.project_id=g.project_id AND ps.application_id=g.application_id LEFT JOIN LATERAL (SELECT jsonb_build_object('id',x.id,'reason',x.reason,'expires_at',x.expires_at,'created_at',x.created_at) summary FROM runtime_inventory_group_links gl JOIN runtime_inventory_items i ON i.id=gl.item_id JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id AND x.project_id=i.project_id AND x.application_id=i.application_id AND x.identity_version=i.identity_version AND x.identity_digest=i.identity_digest WHERE gl.group_id=g.id AND x.cancelled_at IS NULL AND x.expires_at>now() AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids)) AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces)) AND (cardinality(x.workload_kinds)=0 OR g.workload_kind=ANY(x.workload_kinds)) AND (cardinality(x.workload_names)=0 OR g.workload_name=ANY(x.workload_names)) ORDER BY (cardinality(x.cluster_ids)>0)::int+(cardinality(x.namespaces)>0)::int+(cardinality(x.workload_kinds)>0)::int+(cardinality(x.workload_names)>0)::int DESC,x.expires_at,x.id LIMIT 1) s ON true WHERE g.organization_id=$1 AND g.id=ANY($2)")
-            .bind(organization_id)
-            .bind(group_ids)
-            .bind(evaluator_version)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT g.id group_id,
+                 jsonb_build_object(
+                     'state',CASE WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3 THEN 'evaluation_pending' ELSE 'current' END,
+                         'verdict',CASE WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3 THEN NULL ELSE e.verdict END,'reason_code',
+                         CASE WHEN e.group_id IS NULL
+                     OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                     OR e.evaluator_version<>$3 THEN 'evaluation_pending' ELSE e.reason_code END,
+                         'winning_revision_id',
+                         CASE
+                             WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                                 AND e.evaluator_version=$3
+                                 THEN e.winning_revision_id
+                         END,
+                         'explanation',
+                         CASE
+                             WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                                 AND e.evaluator_version=$3
+                                 THEN e.explanation
+                             ELSE '{}'::jsonb
+                         END,
+                         'evaluated_at',
+                         CASE
+                             WHEN e.policy_state_version=COALESCE(ps.state_version,0)
+                                 AND e.evaluator_version=$3
+                                 THEN e.evaluated_at
+                         END
+                 ) policy_evaluation,
+                 s.summary active_suppression,
+                 (
+                     s.summary IS NULL
+                     AND (
+                         e.group_id IS NULL
+                         OR e.policy_state_version<>COALESCE(ps.state_version,0)
+                         OR e.evaluator_version<>$3
+                         OR e.verdict<>'expected'
+                     )
+                 ) actionable
+             FROM runtime_event_groups g
+             LEFT JOIN runtime_group_policy_evaluations e ON e.group_id=g.id
+             LEFT JOIN runtime_policy_states ps ON ps.organization_id=g.organization_id
+                 AND ps.project_id=g.project_id
+                 AND ps.application_id=g.application_id
+             LEFT JOIN LATERAL (
+                 SELECT jsonb_build_object(
+                     'id',x.id,'reason',x.reason,'expires_at',x.expires_at,'created_at',
+                     x.created_at
+                 ) summary
+                 FROM runtime_inventory_group_links gl
+                 JOIN runtime_inventory_items i ON i.id=gl.item_id
+                 JOIN runtime_policy_suppressions x ON x.organization_id=i.organization_id
+                     AND x.project_id=i.project_id
+                     AND x.application_id=i.application_id
+                     AND x.identity_version=i.identity_version
+                     AND x.identity_digest=i.identity_digest
+                 WHERE gl.group_id=g.id
+                     AND x.cancelled_at IS NULL
+                     AND x.expires_at>now()
+                     AND (cardinality(x.cluster_ids)=0 OR g.cluster_id=ANY(x.cluster_ids))
+                     AND (cardinality(x.namespaces)=0 OR g.namespace=ANY(x.namespaces))
+                     AND (
+                         cardinality(x.workload_kinds)=0
+                         OR g.workload_kind=ANY(x.workload_kinds)
+                     )
+                     AND (
+                         cardinality(x.workload_names)=0
+                         OR g.workload_name=ANY(x.workload_names)
+                     )
+                 ORDER BY (
+                     cardinality(x.cluster_ids)>0
+                 )::int+(
+                     cardinality(x.namespaces)>0
+                 )::int+(
+                     cardinality(x.workload_kinds)>0
+                 )::int+(cardinality(x.workload_names)>0)::int DESC,
+                     x.expires_at,x.id
+                 LIMIT 1
+             ) s ON true
+             WHERE g.organization_id=$1
+                 AND g.id=ANY($2)",
+        )
+        .bind(organization_id)
+        .bind(group_ids)
+        .bind(evaluator_version)
+        .fetch_all(executor)
+        .await
     }
 
     /// Resolves a group id used as a list cursor into its
@@ -310,61 +616,101 @@ impl EventGroupRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>("SELECT last_seen_at,id FROM runtime_event_groups WHERE id=$1 AND organization_id=$2 AND project_id=$3 AND application_id=$4")
-            .bind(group_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+            "SELECT last_seen_at,id
+             FROM runtime_event_groups
+             WHERE id=$1
+                 AND organization_id=$2
+                 AND project_id=$3
+                 AND application_id=$4",
+        )
+        .bind(group_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of an application's groups, most recently seen first, under
     /// the list filters, after the cursor's `(last_seen_at, id)` when one is
     /// given. Selects the columns of the runtime groups API's group summary.
-    #[allow(clippy::too_many_arguments)]
     pub async fn summary_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        event_kind: Option<String>,
-        status: Option<String>,
-        namespace: Option<String>,
-        workload_kind: Option<String>,
-        workload_name: Option<String>,
-        since: Option<DateTime<Utc>>,
-        first_seen_from: Option<DateTime<Utc>>,
-        first_seen_to: Option<DateTime<Utc>>,
-        last_seen_to: Option<DateTime<Utc>>,
-        release_id: Option<Uuid>,
-        cursor_last_seen_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: GroupSummaryPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by FROM runtime_event_groups g WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND ($4::text IS NULL OR event_kind=$4) AND ($5::text IS NULL OR status=$5) AND ($6::text IS NULL OR namespace=$6) AND ($7::text IS NULL OR workload_kind=$7) AND ($8::text IS NULL OR workload_name=$8) AND ($9::timestamptz IS NULL OR last_seen_at >= $9) AND ($10::timestamptz IS NULL OR first_seen_at >= $10) AND ($11::timestamptz IS NULL OR first_seen_at <= $11) AND ($12::timestamptz IS NULL OR last_seen_at <= $12) AND ($13::uuid IS NULL OR EXISTS (SELECT 1 FROM runtime_event_group_releases gr WHERE gr.group_id=g.id AND gr.release_id=$13)) AND ($14::timestamptz IS NULL OR (last_seen_at,id) < ($14,$15)) ORDER BY last_seen_at DESC,id DESC LIMIT $16")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(event_kind)
-            .bind(status)
-            .bind(namespace)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(since)
-            .bind(first_seen_from)
-            .bind(first_seen_to)
-            .bind(last_seen_to)
-            .bind(release_id)
-            .bind(cursor_last_seen_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        let GroupSummaryPageQuery {
+            organization_id,
+            project_id,
+            application_id,
+            event_kind,
+            status,
+            namespace,
+            workload_kind,
+            workload_name,
+            since,
+            first_seen_from,
+            first_seen_to,
+            last_seen_to,
+            release_id,
+            cursor_last_seen_at,
+            cursor_id,
+            fetch_limit,
+        } = input;
+        sqlx::query_as(
+            "SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,
+                 workload_name,fingerprint_version,event_kind,semantic_summary,status,
+                 first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,
+                 representative_event_id,status_changed_at,
+                 status_changed_by_user_id AS status_changed_by
+             FROM runtime_event_groups g
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND ($4::text IS NULL OR event_kind=$4)
+                 AND ($5::text IS NULL OR status=$5)
+                 AND ($6::text IS NULL OR namespace=$6)
+                 AND ($7::text IS NULL OR workload_kind=$7)
+                 AND ($8::text IS NULL OR workload_name=$8)
+                 AND ($9::timestamptz IS NULL OR last_seen_at >= $9)
+                 AND ($10::timestamptz IS NULL OR first_seen_at >= $10)
+                 AND ($11::timestamptz IS NULL OR first_seen_at <= $11)
+                 AND ($12::timestamptz IS NULL OR last_seen_at <= $12)
+                 AND (
+                     $13::uuid IS NULL
+                     OR EXISTS (
+                         SELECT 1
+                         FROM runtime_event_group_releases gr
+                         WHERE gr.group_id=g.id
+                             AND gr.release_id=$13
+                     )
+                 )
+                 AND ($14::timestamptz IS NULL OR (last_seen_at,id) < ($14,$15))
+             ORDER BY last_seen_at DESC,id DESC
+             LIMIT $16",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(event_kind)
+        .bind(status)
+        .bind(namespace)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(since)
+        .bind(first_seen_from)
+        .bind(first_seen_to)
+        .bind(last_seen_to)
+        .bind(release_id)
+        .bind(cursor_last_seen_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One group with the same columns as [`Self::summary_page`].
@@ -377,11 +723,20 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by FROM runtime_event_groups WHERE organization_id=$1 AND id=$2")
-            .bind(organization_id)
-            .bind(group_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,project_id,application_id,cluster_id,namespace,workload_kind,
+                 workload_name,fingerprint_version,event_kind,semantic_summary,status,
+                 first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,
+                 representative_event_id,status_changed_at,
+                 status_changed_by_user_id AS status_changed_by
+             FROM runtime_event_groups
+             WHERE organization_id=$1
+                 AND id=$2",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Resolves an event id used as an occurrence cursor into its
@@ -395,12 +750,19 @@ impl EventGroupRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (DateTime<Utc>, DateTime<Utc>, Uuid)>("SELECT e.received_at,e.observed_at,e.id FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.organization_id=$1 AND m.group_id=$2 AND e.id=$3")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(event_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as::<_, (DateTime<Utc>, DateTime<Utc>, Uuid)>(
+            "SELECT e.received_at,e.observed_at,e.id
+             FROM runtime_event_group_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.organization_id=$1
+                 AND m.group_id=$2
+                 AND e.id=$3",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(event_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of the raw events grouped into a group, newest first, after
@@ -418,15 +780,74 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.received_at,e.node_name,e.namespace,e.pod_name,e.container_name,e.process_command,CASE WHEN g.event_kind='container.restart_loop' THEN g.event_kind ELSE e.event_kind END event_kind,CASE WHEN g.event_kind='container.restart_loop' THEN jsonb_build_object('type','ContainerRestartLoop','data',g.semantic_summary) ELSE e.payload END payload,COALESCE((SELECT jsonb_build_object('retention_incomplete',o.retention_incomplete,'status',o.status,'candidate_count',o.candidate_count,'tolerance_seconds',o.tolerance_seconds,'related_event_ids',COALESCE((SELECT jsonb_agg(c.kernel_event_id) FROM runtime_event_correlations c WHERE c.lifecycle_event_id=e.id),'[]'::jsonb)) FROM runtime_event_correlation_outcomes o WHERE o.event_id=e.id),jsonb_build_object('status','absent','candidate_count',0,'related_event_ids','[]'::jsonb)) correlation,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_event_group_memberships m JOIN runtime_event_groups g ON g.id=m.group_id AND g.organization_id=m.organization_id JOIN runtime_events e ON e.id=m.event_id AND e.organization_id=m.organization_id LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE m.organization_id=$1 AND m.group_id=$2 AND ($3::timestamptz IS NULL OR (e.received_at,e.observed_at,e.id)<($3,$4,$5)) ORDER BY e.received_at DESC,e.observed_at DESC,e.id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(cursor_received_at)
-            .bind(cursor_observed_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.observed_at,e.received_at,e.node_name,e.namespace,
+                 e.pod_name,e.container_name,e.process_command,
+                 CASE
+                     WHEN g.event_kind='container.restart_loop' THEN g.event_kind
+                     ELSE e.event_kind
+                 END event_kind,
+                 CASE
+                     WHEN g.event_kind='container.restart_loop'
+                         THEN jsonb_build_object(
+                             'type','ContainerRestartLoop','data',g.semantic_summary
+                         )
+                     ELSE e.payload
+                 END payload,
+                 COALESCE(
+                     (
+                         SELECT jsonb_build_object(
+                             'retention_incomplete',o.retention_incomplete,'status',o.status,
+                             'candidate_count',o.candidate_count,'tolerance_seconds',
+                             o.tolerance_seconds,'related_event_ids',
+                             COALESCE(
+                                 (
+                                     SELECT jsonb_agg(c.kernel_event_id)
+                                     FROM runtime_event_correlations c
+                                     WHERE c.lifecycle_event_id=e.id
+                                 ),
+                                 '[]'::jsonb
+                             )
+                         )
+                         FROM runtime_event_correlation_outcomes o
+                         WHERE o.event_id=e.id
+                     ),
+                     jsonb_build_object(
+                         'status','absent','candidate_count',0,'related_event_ids',
+                         '[]'::jsonb
+                     )
+                 ) correlation,
+                 e.release_id,r.version release_version,
+                 CASE
+                     WHEN r.id IS NULL THEN 'Unattributed'
+                     ELSE release_display_name(
+                         a.name,r.source,r.version,r.identity_digest,r.identity_components
+                     )
+                 END release_display_name
+             FROM runtime_event_group_memberships m
+             JOIN runtime_event_groups g ON g.id=m.group_id
+                 AND g.organization_id=m.organization_id
+             JOIN runtime_events e ON e.id=m.event_id
+                 AND e.organization_id=m.organization_id
+             LEFT JOIN releases r ON r.id=e.release_id
+             LEFT JOIN applications a ON a.id=r.application_id
+             WHERE m.organization_id=$1
+                 AND m.group_id=$2
+                 AND (
+                     $3::timestamptz IS NULL
+                     OR (e.received_at,e.observed_at,e.id)<($3,$4,$5)
+                 )
+             ORDER BY e.received_at DESC,e.observed_at DESC,e.id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(cursor_received_at)
+        .bind(cursor_observed_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Moves a group to `status` and records who did it, provided its current
@@ -445,14 +866,35 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE runtime_event_groups SET status=$3,status_changed_at=CASE WHEN status=$3 THEN status_changed_at ELSE now() END,status_changed_by_user_id=CASE WHEN status=$3 THEN status_changed_by_user_id ELSE $4 END,status_changed_by_kind=CASE WHEN status=$3 THEN status_changed_by_kind ELSE 'user' END,updated_at=CASE WHEN status=$3 THEN updated_at ELSE now() END WHERE organization_id=$1 AND id=$2 AND (status=$3 OR status=ANY($5)) RETURNING id,project_id,application_id,cluster_id,namespace,workload_kind,workload_name,fingerprint_version,event_kind,semantic_summary,status,first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,representative_event_id,status_changed_at,status_changed_by_user_id AS status_changed_by")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(status)
-            .bind(actor_user_id)
-            .bind(allowed)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE runtime_event_groups
+             SET status=$3,
+                 status_changed_at=CASE WHEN status=$3 THEN status_changed_at ELSE now() END,
+                 status_changed_by_user_id=CASE
+                     WHEN status=$3 THEN status_changed_by_user_id
+                     ELSE $4
+                 END,
+                 status_changed_by_kind=CASE
+                     WHEN status=$3 THEN status_changed_by_kind
+                     ELSE 'user'
+                 END,
+                 updated_at=CASE WHEN status=$3 THEN updated_at ELSE now() END
+             WHERE organization_id=$1
+                 AND id=$2
+                 AND (status=$3 OR status=ANY($5))
+             RETURNING id,project_id,application_id,cluster_id,namespace,workload_kind,
+                 workload_name,fingerprint_version,event_kind,semantic_summary,status,
+                 first_seen_at,first_seen_event_id,last_seen_at,occurrence_count,
+                 representative_event_id,status_changed_at,
+                 status_changed_by_user_id AS status_changed_by",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(status)
+        .bind(actor_user_id)
+        .bind(allowed)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The group's current status.
@@ -484,11 +926,49 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT CASE WHEN o.completion_reason='expected' THEN 'policy_expected' WHEN o.completion_reason='active_suppression' THEN 'temporary_policy_suppressed' WHEN o.completion_reason='backfill_suppressed' OR o.source='backfill' AND count(d.id) FILTER(WHERE d.status<>'suppressed')=0 THEN 'backfill_suppressed' WHEN count(d.id)=0 AND o.processed_at IS NOT NULL THEN 'not_configured' WHEN count(d.id) FILTER (WHERE d.status IN ('pending','in_flight'))>0 THEN CASE WHEN count(d.id) FILTER (WHERE d.status='in_flight')>0 THEN 'delivering' ELSE 'pending' END WHEN count(d.id) FILTER (WHERE d.status='succeeded')>0 THEN 'delivered' WHEN count(d.id) FILTER (WHERE d.status IN ('failed','cancelled','suppressed'))>0 THEN 'terminally_failed' ELSE 'pending' END state,count(d.id)::bigint delivery_count,count(d.id) FILTER (WHERE d.status='succeeded')::bigint succeeded_count,count(d.id) FILTER (WHERE d.status IN ('failed','cancelled','suppressed'))::bigint failed_count FROM outbox_messages o LEFT JOIN notification_deliveries d ON d.outbox_message_id=o.id WHERE o.organization_id=$1 AND o.aggregate_id=$2 AND o.topic='runtime_group.first_seen' GROUP BY o.id,o.source,o.processed_at,o.completion_reason")
-            .bind(organization_id)
-            .bind(group_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT CASE
+                 WHEN o.completion_reason='expected' THEN 'policy_expected'
+                 WHEN o.completion_reason='active_suppression'
+                     THEN 'temporary_policy_suppressed'
+                 WHEN o.completion_reason='backfill_suppressed'
+                     OR o.source='backfill'
+                         AND count(d.id) FILTER(WHERE d.status<>'suppressed')=0
+                     THEN 'backfill_suppressed'
+                 WHEN count(d.id)=0 AND o.processed_at IS NOT NULL THEN 'not_configured'
+                 WHEN count(d.id) FILTER (WHERE d.status IN ('pending','in_flight'))>0
+                     THEN CASE
+                         WHEN count(d.id) FILTER (WHERE d.status='in_flight')>0
+                             THEN 'delivering'
+                         ELSE 'pending'
+                     END
+                 WHEN count(d.id) FILTER (WHERE d.status='succeeded')>0 THEN 'delivered'
+                 WHEN count(d.id) FILTER (
+                     WHERE d.status IN (
+                         'failed','cancelled','suppressed'
+                     )
+                 )>0
+                     THEN 'terminally_failed'
+                 ELSE 'pending'
+             END state,
+                 count(d.id)::bigint delivery_count,
+                 count(d.id) FILTER (WHERE d.status='succeeded')::bigint succeeded_count,
+                 count(d.id) FILTER (
+                     WHERE d.status IN (
+                         'failed','cancelled','suppressed'
+                     )
+                 )::bigint failed_count
+             FROM outbox_messages o
+             LEFT JOIN notification_deliveries d ON d.outbox_message_id=o.id
+             WHERE o.organization_id=$1
+                 AND o.aggregate_id=$2
+                 AND o.topic='runtime_group.first_seen'
+             GROUP BY o.id,o.source,o.processed_at,o.completion_reason",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Evidence correlated with the group's events — the kernel records and
@@ -503,12 +983,32 @@ impl EventGroupRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.received_at,e.event_kind,COALESCE(e.payload#>>'{data,source}','unknown') source,e.payload FROM runtime_restart_loop_projections p JOIN runtime_restart_projection_memberships m ON m.organization_id=p.organization_id AND m.project_id=p.project_id AND m.projection_version=p.projection_version JOIN runtime_events e ON e.id=m.event_id AND e.organization_id=p.organization_id AND e.project_id=p.project_id AND e.application_id=p.application_id AND e.cluster_id=p.cluster_id AND e.pod_uid=p.pod_uid AND e.container_name=p.container_name AND e.container_id=p.runtime_container_id AND e.observed_at BETWEEN p.window_started_at AND p.window_ended_at WHERE p.organization_id=$1 AND p.group_id=$2 ORDER BY e.observed_at,e.received_at,e.id LIMIT $3")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.observed_at,e.received_at,e.event_kind,
+                 COALESCE(e.payload#>>'{data,source}','unknown') source,e.payload
+             FROM runtime_restart_loop_projections p
+             JOIN runtime_restart_projection_memberships m ON m.organization_id=p.organization_id
+                 AND m.project_id=p.project_id
+                 AND m.projection_version=p.projection_version
+             JOIN runtime_events e ON e.id=m.event_id
+                 AND e.organization_id=p.organization_id
+                 AND e.project_id=p.project_id
+                 AND e.application_id=p.application_id
+                 AND e.cluster_id=p.cluster_id
+                 AND e.pod_uid=p.pod_uid
+                 AND e.container_name=p.container_name
+                 AND e.container_id=p.runtime_container_id
+                 AND e.observed_at BETWEEN p.window_started_at AND p.window_ended_at
+             WHERE p.organization_id=$1
+                 AND p.group_id=$2
+             ORDER BY e.observed_at,e.received_at,e.id
+             LIMIT $3",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Returns the organization and project owning the group, or `None` when
@@ -543,19 +1043,21 @@ impl EventGroupRepository {
     /// both at the observation, and the same event as both representative and
     /// first-seen. A `None` result means another writer won the race; pair this
     /// with [`Self::lock_existing`] to obtain the winner's id.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_if_absent<'e, E>(
         executor: E,
-        candidate_id: Uuid,
-        key: GroupKey<'_>,
-        event_kind: &str,
-        semantic_summary: &Value,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: NewEventGroup<'_>,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewEventGroup {
+            candidate_id,
+            key,
+            event_kind,
+            semantic_summary,
+            observed_at,
+            event_id,
+        } = input;
         sqlx::query_scalar(
             r#"
             INSERT INTO runtime_event_groups (
@@ -691,19 +1193,21 @@ impl EventGroupRepository {
     /// the same table, so that difference is a real inconsistency rather than a
     /// property of derived groups; it is preserved as-is because changing it
     /// moves user-visible timestamps.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_derived<'e, E>(
         executor: E,
-        candidate_id: Uuid,
-        key: GroupKey<'_>,
-        event_kind: &str,
-        semantic_summary: &Value,
-        observed_at: DateTime<Utc>,
-        event_id: Uuid,
+        input: DerivedEventGroup<'_>,
     ) -> Result<Uuid, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let DerivedEventGroup {
+            candidate_id,
+            key,
+            event_kind,
+            semantic_summary,
+            observed_at,
+            event_id,
+        } = input;
         sqlx::query_scalar(
             r#"
             INSERT INTO runtime_event_groups (
@@ -769,6 +1273,7 @@ impl EventGroupRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::{DerivedEventGroup, NewEventGroup};
     use super::{EventGroupRepository, GroupKey};
     use chrono::{DateTime, TimeZone, Utc};
     use serde_json::{Value, json};
@@ -826,7 +1331,8 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO applications(id,organization_id,project_id,slug,name) VALUES($1,$2,$3,'a','A')",
+            "INSERT INTO applications(id,organization_id,project_id,slug,name)
+             VALUES($1,$2,$3,'a','A')",
         )
         .bind(fixture.application)
         .bind(fixture.organization)
@@ -843,7 +1349,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node','0.0.0')",
+            "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+             VALUES($1,$2,$3,'node','0.0.0')",
         )
         .bind(fixture.agent)
         .bind(fixture.organization)
@@ -877,7 +1384,9 @@ mod tests {
 
     async fn window(pool: &PgPool, group: Uuid) -> (DateTime<Utc>, DateTime<Utc>, i64, Value) {
         sqlx::query_as(
-            "SELECT first_seen_at,last_seen_at,occurrence_count,semantic_summary FROM runtime_event_groups WHERE id=$1",
+            "SELECT first_seen_at,last_seen_at,occurrence_count,semantic_summary
+             FROM runtime_event_groups
+             WHERE id=$1",
         )
         .bind(group)
         .fetch_one(pool)
@@ -893,12 +1402,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -932,12 +1443,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                winner,
-                fixture.key(),
-                "process.exec",
-                &json!({}),
-                at(0),
-                first_event,
+                NewEventGroup {
+                    candidate_id: winner,
+                    key: fixture.key(),
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(0),
+                    event_id: first_event
+                }
             )
             .await
             .unwrap(),
@@ -948,12 +1461,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                Uuid::new_v4(),
-                fixture.key(),
-                "process.exec",
-                &json!({}),
-                at(1),
-                second_event,
+                NewEventGroup {
+                    candidate_id: Uuid::new_v4(),
+                    key: fixture.key(),
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(1),
+                    event_id: second_event
+                }
             )
             .await
             .unwrap(),
@@ -983,12 +1498,14 @@ mod tests {
         let first = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            first,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            event,
+            NewEventGroup {
+                candidate_id: first,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -1000,12 +1517,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::insert_if_absent(
                 &pool,
-                second,
-                key,
-                "process.exec",
-                &json!({}),
-                at(1),
-                event,
+                NewEventGroup {
+                    candidate_id: second,
+                    key,
+                    event_kind: "process.exec",
+                    semantic_summary: &json!({}),
+                    observed_at: at(1),
+                    event_id: event
+                }
             )
             .await
             .unwrap(),
@@ -1021,12 +1540,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(10),
-            first_event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(10),
+                event_id: first_event,
+            },
         )
         .await
         .unwrap();
@@ -1061,17 +1582,21 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::insert_if_absent(
             &pool,
-            group,
-            fixture.key(),
-            "process.exec",
-            &json!({}),
-            at(0),
-            old_event,
+            NewEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "process.exec",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: old_event,
+            },
         )
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE runtime_event_groups SET occurrence_count=0, representative_event_id=NULL, first_seen_event_id=NULL WHERE id=$1",
+            "UPDATE runtime_event_groups
+             SET occurrence_count=0, representative_event_id=NULL, first_seen_event_id=NULL
+             WHERE id=$1",
         )
         .bind(group)
         .execute(&pool)
@@ -1115,12 +1640,14 @@ mod tests {
         assert_eq!(
             EventGroupRepository::upsert_derived(
                 &pool,
-                created,
-                fixture.key(),
-                "container.restart_loop",
-                &json!({"observed_restart_count": 3}),
-                at(0),
-                first_event,
+                DerivedEventGroup {
+                    candidate_id: created,
+                    key: fixture.key(),
+                    event_kind: "container.restart_loop",
+                    semantic_summary: &json!({"observed_restart_count": 3}),
+                    observed_at: at(0),
+                    event_id: first_event
+                }
             )
             .await
             .unwrap(),
@@ -1131,12 +1658,14 @@ mod tests {
         let candidate = Uuid::new_v4();
         let refreshed = EventGroupRepository::upsert_derived(
             &pool,
-            candidate,
-            fixture.key(),
-            "container.restart_loop",
-            &json!({"observed_restart_count": 9}),
-            at(15),
-            later_event,
+            DerivedEventGroup {
+                candidate_id: candidate,
+                key: fixture.key(),
+                event_kind: "container.restart_loop",
+                semantic_summary: &json!({"observed_restart_count": 9}),
+                observed_at: at(15),
+                event_id: later_event,
+            },
         )
         .await
         .unwrap();
@@ -1163,12 +1692,14 @@ mod tests {
         let group = Uuid::new_v4();
         EventGroupRepository::upsert_derived(
             &pool,
-            group,
-            fixture.key(),
-            "container.restart_loop",
-            &json!({}),
-            at(0),
-            event,
+            DerivedEventGroup {
+                candidate_id: group,
+                key: fixture.key(),
+                event_kind: "container.restart_loop",
+                semantic_summary: &json!({}),
+                observed_at: at(0),
+                event_id: event,
+            },
         )
         .await
         .unwrap();
@@ -1184,7 +1715,7 @@ mod tests {
 
 #[cfg(test)]
 mod api_statement_tests {
-    use super::EventGroupRepository;
+    use super::{EventGroupRepository, GroupSummaryPageQuery};
     use crate::repository::EventRepository;
     use crate::repository::test_support::{
         correlated_termination, exec, exec_in_release, group_ids, ingest, manual_release, restarts,
@@ -1249,22 +1780,24 @@ mod api_statement_tests {
     ) -> Vec<Summary> {
         EventGroupRepository::summary_page(
             pool,
-            organization_id,
-            project_id,
-            application_id,
-            event_kind,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            release_id,
-            cursor.map(|c| c.0),
-            cursor.map(|c| c.1),
-            fetch_limit,
+            GroupSummaryPageQuery {
+                organization_id,
+                project_id,
+                application_id,
+                event_kind,
+                status: None,
+                namespace: None,
+                workload_kind: None,
+                workload_name: None,
+                since: None,
+                first_seen_from: None,
+                first_seen_to: None,
+                last_seen_to: None,
+                release_id,
+                cursor_last_seen_at: cursor.map(|c| c.0),
+                cursor_id: cursor.map(|c| c.1),
+                fetch_limit,
+            },
         )
         .await
         .unwrap()
@@ -1706,7 +2239,10 @@ mod api_statement_tests {
         ingest(&pool, &own, &restarts(&own, now, 3)).await;
 
         let loop_group: Uuid = sqlx::query_scalar(
-            "SELECT id FROM runtime_event_groups WHERE organization_id=$1 AND event_kind='container.restart_loop'",
+            "SELECT id
+             FROM runtime_event_groups
+             WHERE organization_id=$1
+                 AND event_kind='container.restart_loop'",
         )
         .bind(own.organization_id)
         .fetch_one(&pool)

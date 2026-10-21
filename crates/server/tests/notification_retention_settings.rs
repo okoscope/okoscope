@@ -53,8 +53,17 @@ async fn session(pool: &PgPool, org: Uuid, role: &str) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user).bind(org).bind(token.digest().to_vec()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user)
+    .bind(org)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -106,13 +115,16 @@ async fn inheritance_override_reset_and_authorization(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
-        .bind(org)
-        .bind(project)
-        .bind(member_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+         VALUES($1,$2,$3,'member')",
+    )
+    .bind(org)
+    .bind(project)
+    .bind(member_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = app(pool.clone());
     let org_path = format!("/api/v1/organizations/{org}/notification-retention");
     let path = format!("/api/v1/projects/{project}/notification-retention");
@@ -219,8 +231,16 @@ async fn inheritance_override_reset_and_authorization(pool: PgPool) {
             );
         }
     }
-    let audited: bool = sqlx::query_scalar("SELECT notification_retention_updated_by IS NOT NULL AND notification_retention_updated_at IS NOT NULL FROM projects WHERE id=$1")
-        .bind(project).fetch_one(&pool).await.unwrap();
+    let audited: bool = sqlx::query_scalar(
+        "SELECT notification_retention_updated_by IS NOT NULL
+             AND notification_retention_updated_at IS NOT NULL
+         FROM projects
+         WHERE id=$1",
+    )
+    .bind(project)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(audited);
 }
 
@@ -247,8 +267,15 @@ async fn legacy_import_is_once_and_new_organizations_keep_defaults(pool: PgPool)
         NotificationHistory::organization(&pool, old).await.unwrap(),
         Some(legacy)
     );
-    sqlx::query("UPDATE organizations SET notification_retention_enabled=false,notification_retention_days=7 WHERE id=$1")
-        .bind(old).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE organizations
+         SET notification_retention_enabled=false,notification_retention_days=7
+         WHERE id=$1",
+    )
+    .bind(old)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (new, _) = tenant(&pool).await;
     retention_settings::initialize(&pool, legacy).await.unwrap();
     assert_eq!(

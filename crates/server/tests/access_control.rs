@@ -27,9 +27,16 @@ async fn super_admin(pool: &sqlx::PgPool, suffix: &str) -> (Uuid, String) {
         .await
         .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until)
+         VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     (user_id, token.expose().to_owned())
 }
 
@@ -50,8 +57,16 @@ async fn tenant_user(
     organization_role: &str,
 ) -> (Uuid, String) {
     let user_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,display_name) VALUES($1,$2,$3,now(),$2)")
-        .bind(user_id).bind(email).bind("x".repeat(32)).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,email_verified_at,display_name)
+         VALUES($1,$2,$3,now(),$2)",
+    )
+    .bind(user_id)
+    .bind(email)
+    .bind("x".repeat(32))
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
     )
@@ -62,9 +77,17 @@ async fn tenant_user(
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(organization_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     (user_id, token.expose().to_owned())
 }
 
@@ -145,14 +168,29 @@ async fn project_admin_lists_only_eligible_organization_members(pool: sqlx::PgPo
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,'eligible-project','Eligible Project')")
-        .bind(project_id).bind(organization_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO projects(id,organization_id,slug,name)
+         VALUES($1,$2,'eligible-project','Eligible Project')",
+    )
+    .bind(project_id)
+    .bind(organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (actor_id, actor_token) =
         tenant_user(&pool, organization_id, "actor@example.test", "member").await;
     let (eligible_id, _) =
         tenant_user(&pool, organization_id, "eligible@example.test", "member").await;
-    sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'admin')")
-        .bind(organization_id).bind(project_id).bind(actor_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+         VALUES($1,$2,$3,'admin')",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(actor_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let config = WebApiConfig::new(vec!["https://ui.example.com".into()]).unwrap();
     let app = health::router(pool.clone(), true, None, &config);

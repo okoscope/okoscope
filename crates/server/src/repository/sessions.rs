@@ -24,6 +24,17 @@ use chrono::{DateTime, Utc};
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`SessionRepository::insert`].
+#[derive(Debug)]
+pub struct NewSession<'a> {
+    pub session_id: Uuid,
+    pub user_id: Uuid,
+    pub organization_id: Option<Uuid>,
+    pub token_digest: &'a [u8],
+    pub expires_at: DateTime<Utc>,
+    pub privileged_until: Option<DateTime<Utc>>,
+}
+
 /// Queries against the `user_sessions` table.
 #[derive(Clone, Copy, Debug)]
 pub struct SessionRepository;
@@ -43,29 +54,63 @@ impl SessionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE user_sessions s SET last_used_at=now() FROM users u WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND u.id=s.user_id AND u.disabled_at IS NULL AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id AND o.status='active')) RETURNING s.id session_id,s.user_id,s.organization_id,(SELECT m.role FROM organization_memberships m WHERE m.user_id=s.user_id AND m.organization_id=s.organization_id) role,EXISTS(SELECT 1 FROM platform_role_assignments p WHERE p.user_id=s.user_id AND p.role='super_admin' AND p.revoked_at IS NULL) is_super_admin,s.privileged_until")
-            .bind(token_hash)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE user_sessions s
+             SET last_used_at=now()
+             FROM users u
+             WHERE s.token_hash=$1
+                 AND s.revoked_at IS NULL
+                 AND s.expires_at>now()
+                 AND u.id=s.user_id
+                 AND u.disabled_at IS NULL
+                 AND (
+                     s.organization_id IS NULL
+                     OR EXISTS(
+                         SELECT 1
+                         FROM organization_memberships m
+                         JOIN organizations o ON o.id=m.organization_id
+                         WHERE m.user_id=s.user_id
+                             AND m.organization_id=s.organization_id
+                             AND o.status='active'
+                     )
+                 )
+             RETURNING s.id session_id,s.user_id,s.organization_id,
+                 (
+                     SELECT m.role
+                     FROM organization_memberships m
+                     WHERE m.user_id=s.user_id
+                         AND m.organization_id=s.organization_id
+                 ) role,
+                 EXISTS(
+                     SELECT 1
+                     FROM platform_role_assignments p
+                     WHERE p.user_id=s.user_id
+                         AND p.role='super_admin'
+                         AND p.revoked_at IS NULL
+                 ) is_super_admin,
+                 s.privileged_until",
+        )
+        .bind(token_hash)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Records a new session under the digest of its token.
     ///
     /// Only the digest is stored. The plaintext token goes to the client once
     /// and is never persisted, so a copy of this table does not grant access.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn insert<'e, E>(
-        executor: E,
-        session_id: Uuid,
-        user_id: Uuid,
-        organization_id: Option<Uuid>,
-        token_digest: &[u8],
-        expires_at: DateTime<Utc>,
-        privileged_until: Option<DateTime<Utc>>,
-    ) -> Result<(), sqlx::Error>
+    pub async fn insert<'e, E>(executor: E, input: NewSession<'_>) -> Result<(), sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
+        let NewSession {
+            session_id,
+            user_id,
+            organization_id,
+            token_digest,
+            expires_at,
+            privileged_until,
+        } = input;
         sqlx::query(
             r#"
             INSERT INTO user_sessions(id, user_id, organization_id, token_hash,
@@ -188,6 +233,7 @@ impl SessionRepository {
 
 #[cfg(test)]
 mod tests {
+    use super::NewSession;
     use super::SessionRepository;
     use chrono::{DateTime, Duration, Utc};
     use sqlx::PgPool;
@@ -216,7 +262,8 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,'owner')",
+            "INSERT INTO organization_memberships(organization_id,user_id,role)
+             VALUES($1,$2,'owner')",
         )
         .bind(id)
         .bind(user)
@@ -234,12 +281,14 @@ mod tests {
         full[16..].copy_from_slice(Uuid::new_v4().as_bytes());
         SessionRepository::insert(
             pool,
-            id,
-            user,
-            organization,
-            &full,
-            Utc::now() + Duration::hours(1),
-            None,
+            NewSession {
+                session_id: id,
+                user_id: user,
+                organization_id: organization,
+                token_digest: &full,
+                expires_at: Utc::now() + Duration::hours(1),
+                privileged_until: None,
+            },
         )
         .await
         .unwrap();
@@ -359,7 +408,7 @@ mod authenticate_tests {
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
-    use super::SessionRepository;
+    use super::{NewSession, SessionRepository};
     use crate::repository::MembershipRepository;
     use crate::repository::test_support::{tenant, user};
 
@@ -392,12 +441,14 @@ mod authenticate_tests {
         let session = Uuid::new_v4();
         SessionRepository::insert(
             &pool,
-            session,
-            member,
-            Some(own.organization_id),
-            &[1; 32],
-            Utc::now() + Duration::hours(1),
-            None,
+            NewSession {
+                session_id: session,
+                user_id: member,
+                organization_id: Some(own.organization_id),
+                token_digest: &[1; 32],
+                expires_at: Utc::now() + Duration::hours(1),
+                privileged_until: None,
+            },
         )
         .await
         .unwrap();

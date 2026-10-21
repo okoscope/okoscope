@@ -20,11 +20,17 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE organizations SET notification_retention_enabled=$1,notification_retention_days=$2,notification_retention_initialized=true,notification_retention_updated_at=now() WHERE NOT notification_retention_initialized")
-            .bind(enabled)
-            .bind(history_days)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE organizations
+             SET notification_retention_enabled=$1,notification_retention_days=$2,
+                 notification_retention_initialized=true,
+                 notification_retention_updated_at=now()
+             WHERE NOT notification_retention_initialized",
+        )
+        .bind(enabled)
+        .bind(history_days)
+        .execute(executor)
+        .await
     }
 
     /// The organization's retention policy, once initialized.
@@ -38,10 +44,16 @@ impl NotificationRetentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT notification_retention_enabled enabled,notification_retention_days history_days FROM organizations WHERE id=$1 AND notification_retention_initialized")
-            .bind(organization_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT notification_retention_enabled enabled,
+                 notification_retention_days history_days
+             FROM organizations
+             WHERE id=$1
+                 AND notification_retention_initialized",
+        )
+        .bind(organization_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The project's retention override, its effective policy and the
@@ -58,11 +70,21 @@ impl NotificationRetentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT p.notification_retention_enabled override_enabled,p.notification_retention_days override_days,e.enabled,e.history_days,o.notification_retention_enabled inherited_enabled,o.notification_retention_days inherited_days FROM projects p JOIN organizations o ON o.id=p.organization_id JOIN effective_notification_retention e ON e.project_id=p.id WHERE p.organization_id=$1 AND p.id=$2")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT p.notification_retention_enabled override_enabled,
+                 p.notification_retention_days override_days,e.enabled,e.history_days,
+                 o.notification_retention_enabled inherited_enabled,
+                 o.notification_retention_days inherited_days
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             JOIN effective_notification_retention e ON e.project_id=p.id
+             WHERE p.organization_id=$1
+                 AND p.id=$2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Sets and initializes the organization's retention policy.
@@ -76,13 +98,19 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE organizations SET notification_retention_enabled=$2,notification_retention_days=$3,notification_retention_initialized=true,notification_retention_updated_at=now(),notification_retention_updated_by=$4 WHERE id=$1")
-            .bind(organization_id)
-            .bind(enabled)
-            .bind(history_days)
-            .bind(updated_by)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE organizations
+             SET notification_retention_enabled=$2,notification_retention_days=$3,
+                 notification_retention_initialized=true,
+                 notification_retention_updated_at=now(),notification_retention_updated_by=$4
+             WHERE id=$1",
+        )
+        .bind(organization_id)
+        .bind(enabled)
+        .bind(history_days)
+        .bind(updated_by)
+        .execute(executor)
+        .await
     }
 
     /// Sets the project's retention override, or clears it with `None`s.
@@ -97,14 +125,20 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE projects SET notification_retention_enabled=$3,notification_retention_days=$4,notification_retention_updated_at=now(),notification_retention_updated_by=$5 WHERE organization_id=$1 AND id=$2")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(enabled)
-            .bind(history_days)
-            .bind(updated_by)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE projects
+             SET notification_retention_enabled=$3,notification_retention_days=$4,
+                 notification_retention_updated_at=now(),notification_retention_updated_by=$5
+             WHERE organization_id=$1
+                 AND id=$2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(enabled)
+        .bind(history_days)
+        .bind(updated_by)
+        .execute(executor)
+        .await
     }
 
     /// Tries to take the transaction-scoped advisory lock that lets one
@@ -127,10 +161,21 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM notification_deliveries d JOIN effective_notification_retention e ON e.organization_id=d.organization_id AND e.project_id=d.project_id WHERE e.enabled AND d.status IN ('succeeded','failed','suppressed','cancelled') AND d.terminal_at < now()-make_interval(days=>e.history_days) ORDER BY d.terminal_at,d.id LIMIT $1 FOR UPDATE OF d SKIP LOCKED")
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT d.id
+             FROM notification_deliveries d
+             JOIN effective_notification_retention e ON e.organization_id=d.organization_id
+                 AND e.project_id=d.project_id
+             WHERE e.enabled
+                 AND d.status IN ('succeeded','failed','suppressed','cancelled')
+                 AND d.terminal_at < now()-make_interval(days=>e.history_days)
+             ORDER BY d.terminal_at,d.id
+             LIMIT $1
+             FOR UPDATE OF d SKIP LOCKED",
+        )
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// The recovery operations that touched any of the deliveries.
@@ -141,10 +186,14 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT DISTINCT operation_id FROM notification_recovery_operation_deliveries WHERE delivery_id=ANY($1)")
-            .bind(delivery_ids)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT operation_id
+             FROM notification_recovery_operation_deliveries
+             WHERE delivery_id=ANY($1)",
+        )
+        .bind(delivery_ids)
+        .fetch_all(executor)
+        .await
     }
 
     /// Deletes the single-delivery recovery operations that target any of
@@ -185,10 +234,19 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM notification_recovery_operations o WHERE o.id=ANY($1) AND o.target_delivery_id IS NULL AND NOT EXISTS (SELECT 1 FROM notification_recovery_operation_deliveries l WHERE l.operation_id=o.id)")
-            .bind(operation_ids)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM notification_recovery_operations o
+             WHERE o.id=ANY($1)
+                 AND o.target_delivery_id IS NULL
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM notification_recovery_operation_deliveries l
+                     WHERE l.operation_id=o.id
+                 )",
+        )
+        .bind(operation_ids)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` bulk operations that touch no delivery and
@@ -201,23 +259,47 @@ impl NotificationRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("WITH candidates AS (SELECT o.id FROM notification_recovery_operations o JOIN effective_notification_retention e ON e.organization_id=o.organization_id AND e.project_id=o.project_id WHERE e.enabled AND o.target_delivery_id IS NULL AND o.completed_at < now()-make_interval(days=>e.history_days) AND NOT EXISTS (SELECT 1 FROM notification_recovery_operation_deliveries l WHERE l.operation_id=o.id) ORDER BY o.completed_at,o.id LIMIT $1 FOR UPDATE OF o SKIP LOCKED) DELETE FROM notification_recovery_operations o USING candidates c WHERE o.id=c.id")
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "WITH candidates AS (
+                 SELECT o.id
+                 FROM notification_recovery_operations o
+                 JOIN effective_notification_retention e ON e.organization_id=o.organization_id
+                     AND e.project_id=o.project_id
+                 WHERE e.enabled
+                     AND o.target_delivery_id IS NULL
+                     AND o.completed_at < now()-make_interval(days=>e.history_days)
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM notification_recovery_operation_deliveries l
+                         WHERE l.operation_id=o.id
+                     )
+                 ORDER BY o.completed_at,o.id
+                 LIMIT $1
+                 FOR UPDATE OF o SKIP LOCKED
+             )
+             DELETE FROM notification_recovery_operations o USING candidates c
+             WHERE o.id=c.id",
+        )
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::repository::notification_deliveries::{
+        NewOutboxDelivery, NotificationDeliveryRepository,
+    };
+    use crate::repository::notification_recovery::{
+        NewRecoveryOperation, NotificationRecoveryRepository,
+    };
     use chrono::Utc;
     use serde_json::json;
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
 
     use super::NotificationRetentionRepository;
-    use crate::repository::notification_deliveries::NotificationDeliveryRepository;
-    use crate::repository::notification_recovery::NotificationRecoveryRepository;
     use crate::repository::test_support::{
         Tenant, destination, exec, first_seen_messages, ingest, tenant, user,
     };
@@ -376,29 +458,35 @@ mod tests {
             let id = Uuid::new_v4();
             NotificationDeliveryRepository::insert_for_outbox(
                 &pool,
-                id,
-                own.organization_id,
-                own.project_id,
-                target,
-                message,
-                "live",
-                json!({}),
-                "failed",
-                3,
-                Some(Utc::now()),
-                Some("http_5xx"),
-                Some("server error"),
+                NewOutboxDelivery {
+                    id,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    destination_id: target,
+                    outbox_message_id: message,
+                    source: "live",
+                    payload: json!({}),
+                    status: "failed",
+                    max_attempts: 3,
+                    terminal_at: Some(Utc::now()),
+                    last_error_class: Some("http_5xx"),
+                    last_error: Some("server error"),
+                },
             )
             .await
             .unwrap();
             ids.push(id);
         }
         let (old, recent) = (ids[0], ids[1]);
-        sqlx::query("UPDATE notification_deliveries SET created_at=now()-interval '4 days',terminal_at=now()-interval '3 days' WHERE id=$1")
-            .bind(old)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE notification_deliveries
+             SET created_at=now()-interval '4 days',terminal_at=now()-interval '3 days'
+             WHERE id=$1",
+        )
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let operation = |command: &'static str, target: Option<Uuid>, key: u8| {
             let pool = pool.clone();
@@ -406,23 +494,25 @@ mod tests {
                 let id = Uuid::new_v4();
                 NotificationRecoveryRepository::insert(
                     &pool,
-                    id,
-                    own.organization_id,
-                    own.project_id,
-                    command,
-                    target,
-                    actor,
-                    "request",
-                    &[key; 32],
-                    &[0; 32],
-                    json!({}),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    json!({}),
-                    Utc::now(),
+                    NewRecoveryOperation {
+                        id,
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        command_type: command,
+                        target_delivery_id: target,
+                        actor_id: actor,
+                        request_id: "request",
+                        idempotency_key_hash: &[key; 32],
+                        request_fingerprint: &[0; 32],
+                        safe_filters: json!({}),
+                        selected_count: 0,
+                        retried_count: 0,
+                        cancelled_count: 0,
+                        skipped_count: 0,
+                        remaining_count: 0,
+                        result: json!({}),
+                        completed_at: Utc::now(),
+                    },
                 )
                 .await
                 .unwrap();
@@ -433,11 +523,15 @@ mod tests {
         let bulk = operation("bulk_retry", None, 2).await;
         let empty_old = operation("bulk_retry", None, 3).await;
         let empty_recent = operation("bulk_retry", None, 4).await;
-        sqlx::query("UPDATE notification_recovery_operations SET created_at=now()-interval '3 days',completed_at=now()-interval '3 days' WHERE id=$1")
-            .bind(empty_old)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE notification_recovery_operations
+             SET created_at=now()-interval '3 days',completed_at=now()-interval '3 days'
+             WHERE id=$1",
+        )
+        .bind(empty_old)
+        .execute(&pool)
+        .await
+        .unwrap();
         for (op, delivery) in [(targeted, old), (bulk, old), (bulk, recent)] {
             NotificationRecoveryRepository::link_delivery(
                 &pool,

@@ -51,8 +51,16 @@ async fn application_stream_scope_overrides_wire_destination_and_honors_revocati
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'scoped-node','test')")
-        .bind(agent_id).bind(owned.organization_id).bind(owned.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'scoped-node','test')",
+    )
+    .bind(agent_id)
+    .bind(owned.organization_id)
+    .bind(owned.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let issued = issue(
         &mut tx,
@@ -129,8 +137,16 @@ async fn thread_windows_are_replay_safe_epoch_separated_and_tenant_scoped(pool: 
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'thread-node','test')")
-        .bind(agent_id).bind(owned.organization_id).bind(owned.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'thread-node','test')",
+    )
+    .bind(agent_id)
+    .bind(owned.organization_id)
+    .bind(owned.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let scope = SessionScope {
         organization_id: owned.organization_id,
         cluster_id: owned.cluster_id,
@@ -216,8 +232,14 @@ async fn thread_windows_are_replay_safe_epoch_separated_and_tenant_scoped(pool: 
         .unwrap(),
         1
     );
-    let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as("SELECT organization_id,application_id,observation_epoch FROM thread_activity_windows ORDER BY observation_epoch")
-        .fetch_all(&pool).await.unwrap();
+    let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT organization_id,application_id,observation_epoch
+         FROM thread_activity_windows
+         ORDER BY observation_epoch",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     assert_eq!(rows.len(), 2);
     assert!(
         rows.iter()
@@ -225,7 +247,9 @@ async fn thread_windows_are_replay_safe_epoch_separated_and_tenant_scoped(pool: 
     );
     assert_ne!(rows[0].2, rows[1].2);
     let derived_rows: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_events),(SELECT count(*) FROM runtime_event_groups),(SELECT count(*) FROM outbox_messages)",
+        "SELECT (SELECT count(*) FROM runtime_events),
+             (SELECT count(*) FROM runtime_event_groups),
+             (SELECT count(*) FROM outbox_messages)",
     )
     .fetch_one(&pool)
     .await
@@ -303,17 +327,66 @@ async fn thread_window_storage_and_scoped_query_benchmark(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'benchmark-node','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'benchmark-node','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let epoch = Uuid::new_v4();
     let started = std::time::Instant::now();
-    sqlx::query("INSERT INTO thread_activity_windows(id,organization_id,project_id,application_id,cluster_id,agent_id,observed_at,process_cgroup_id,process_pid,process_tgid,process_command,process_generation,observation_epoch,start_observed,window_started_at,window_ended_at,created_count,exited_count,active_at_start,active_at_end,peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps) SELECT md5(g::text)::uuid,$1,$2,$3,$4,$5,now(),7,10,10,'app',1,$6,true,now()-((10001-g)*interval '1 minute'),now()-((10000-g)*interval '1 minute'),64,64,64,64,128,'observed',true,0,(SELECT jsonb_agg(jsonb_build_object('name','worker-'||n,'created',1,'exited',1,'active',1)) FROM generate_series(1,64) n),'[]'::jsonb FROM generate_series(1,10000) g")
-        .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
-        .bind(ids.cluster_id).bind(agent_id).bind(epoch).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO thread_activity_windows(
+             id,organization_id,project_id,application_id,cluster_id,agent_id,
+             observed_at,process_cgroup_id,process_pid,process_tgid,process_command,
+             process_generation,observation_epoch,start_observed,window_started_at,
+             window_ended_at,created_count,exited_count,active_at_start,active_at_end,
+             peak_active,baseline_provenance,baseline_complete,name_overflow,names,gaps
+         )
+         SELECT md5(g::text)::uuid,$1,$2,$3,$4,$5,now(),7,10,10,'app',1,$6,true,
+             now()-((10001-g)*interval '1 minute'),now()-((10000-g)*interval '1 minute'),
+             64,64,64,64,128,'observed',true,0,
+             (
+                 SELECT jsonb_agg(
+                     jsonb_build_object(
+                         'name','worker-'||n,'created',1,'exited',1,'active',1
+                     )
+                 )
+                 FROM generate_series(1,64) n
+             ),
+             '[]'::jsonb
+         FROM generate_series(1,10000) g",
+    )
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(ids.cluster_id)
+    .bind(agent_id)
+    .bind(epoch)
+    .execute(&pool)
+    .await
+    .unwrap();
     let insert_elapsed = started.elapsed();
     let query_started = std::time::Instant::now();
-    let queries = (0..8).map(|_| sqlx::query_scalar::<_, Uuid>("SELECT id FROM thread_activity_windows WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 ORDER BY window_started_at DESC,id DESC LIMIT 200")
-        .bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).fetch_all(&pool));
+    let queries = (0..8).map(|_| {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM thread_activity_windows
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+             ORDER BY window_started_at DESC,id DESC
+             LIMIT 200",
+        )
+        .bind(ids.organization_id)
+        .bind(ids.project_id)
+        .bind(ids.application_id)
+        .fetch_all(&pool)
+    });
     let results = futures::future::join_all(queries).await;
     let query_elapsed = query_started.elapsed();
     let bytes: i64 = sqlx::query_scalar("SELECT pg_total_relation_size('thread_activity_windows')")
@@ -374,8 +447,16 @@ async fn observed_release_is_created_attributed_and_replay_safe(pool: sqlx::PgPo
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'automatic-node','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'automatic-node','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -401,8 +482,15 @@ async fn observed_release_is_created_attributed_and_replay_safe(pool: sqlx::PgPo
         1
     );
     assert_eq!(persist_batch(&pool, context, &[observed]).await.unwrap(), 0);
-    let result: (i64, String, i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM releases),(SELECT source FROM releases),(SELECT count(*) FROM runtime_events WHERE release_id IS NOT NULL),(SELECT count(*) FROM runtime_event_group_releases),(SELECT count(*) FROM runtime_inventory_releases)")
-        .fetch_one(&pool).await.unwrap();
+    let result: (i64, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM releases),(SELECT source FROM releases),
+             (SELECT count(*) FROM runtime_events WHERE release_id IS NOT NULL),
+             (SELECT count(*) FROM runtime_event_group_releases),
+             (SELECT count(*) FROM runtime_inventory_releases)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(result, (1, "observed".into(), 1, 1, 1));
 }
 
@@ -415,9 +503,17 @@ async fn observed_release_concurrency_scope_and_invalid_evidence_are_safe(pool: 
     let first_agent = Uuid::new_v4();
     let second_agent = Uuid::new_v4();
     for (agent_id, node) in [(first_agent, "node-a"), (second_agent, "node-b")] {
-        sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,$4,'test')")
-            .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).bind(node)
-            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+             VALUES($1,$2,$3,$4,'test')",
+        )
+        .bind(agent_id)
+        .bind(ids.organization_id)
+        .bind(ids.cluster_id)
+        .bind(node)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     let scope = SessionScope {
         organization_id: ids.organization_id,
@@ -451,7 +547,8 @@ async fn observed_release_concurrency_scope_and_invalid_evidence_are_safe(pool: 
     assert_eq!(first_result.unwrap(), 1);
     assert_eq!(second_result.unwrap(), 1);
     let counts: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM runtime_events WHERE release_id IS NOT NULL)",
+        "SELECT (SELECT count(*) FROM releases),
+             (SELECT count(*) FROM runtime_events WHERE release_id IS NOT NULL)",
     )
     .fetch_one(&pool)
     .await
@@ -483,9 +580,16 @@ async fn observed_release_concurrency_scope_and_invalid_evidence_are_safe(pool: 
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-c','test')")
-        .bind(other_agent).bind(ids.organization_id).bind(other_cluster)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-c','test')",
+    )
+    .bind(other_agent)
+    .bind(ids.organization_id)
+    .bind(other_cluster)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut other_cluster_event = event(ids.project_id, ids.application_id);
     other_cluster_event.attribution.release_identity = Some(identity);
     assert_eq!(
@@ -510,7 +614,8 @@ async fn observed_release_concurrency_scope_and_invalid_evidence_are_safe(pool: 
         Err(IngestionError::InvalidOwnership)
     ));
     let final_counts: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM runtime_events),(SELECT count(*) FROM runtime_events WHERE release_id IS NULL)",
+        "SELECT (SELECT count(*) FROM releases),(SELECT count(*) FROM runtime_events),
+             (SELECT count(*) FROM runtime_events WHERE release_id IS NULL)",
     )
     .fetch_one(&pool)
     .await
@@ -532,8 +637,16 @@ async fn termination_correlation_and_restart_projection_are_durable_and_replay_s
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-termination','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-termination','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -566,8 +679,13 @@ async fn termination_correlation_and_restart_projection_are_durable_and_replay_s
         .await
         .unwrap();
     let outcome: (String, i32, i64) = sqlx::query_as(
-        "SELECT o.status,o.candidate_count,(SELECT count(*) FROM runtime_event_correlations) FROM runtime_event_correlation_outcomes o",
-    ).fetch_one(&pool).await.unwrap();
+        "SELECT o.status,o.candidate_count,
+             (SELECT count(*) FROM runtime_event_correlations)
+         FROM runtime_event_correlation_outcomes o",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(outcome, ("qualified".into(), 1, 1));
 
     let mut restarts = Vec::new();
@@ -601,18 +719,45 @@ async fn termination_correlation_and_restart_projection_are_durable_and_replay_s
     assert_eq!(second_result.unwrap() + third_result.unwrap(), 2);
     assert_eq!(persist_batch(&pool, context, &restarts).await.unwrap(), 0);
     let projected: (i64, i64, i32, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_restart_projection_memberships),(SELECT count(*) FROM runtime_event_groups WHERE event_kind='container.restart_loop'),(SELECT observed_restart_count FROM runtime_restart_loop_projections),(SELECT count(*) FROM outbox_messages o JOIN runtime_event_groups g ON g.id=o.aggregate_id WHERE g.event_kind='container.restart_loop' AND o.topic='runtime_group.first_seen')",
-    ).fetch_one(&pool).await.unwrap();
+        "SELECT (SELECT count(*) FROM runtime_restart_projection_memberships),
+             (
+                 SELECT count(*)
+                 FROM runtime_event_groups
+                 WHERE event_kind='container.restart_loop'
+             ),
+             (SELECT observed_restart_count FROM runtime_restart_loop_projections),
+             (
+                 SELECT count(*)
+                 FROM outbox_messages o
+                 JOIN runtime_event_groups g ON g.id=o.aggregate_id
+                 WHERE g.event_kind='container.restart_loop'
+                     AND o.topic='runtime_group.first_seen'
+             )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(projected, (3, 1, 3, 1));
     let first_raw_id: Uuid = sqlx::query_scalar("SELECT id FROM runtime_events WHERE event_id=$1")
         .bind(restarts[0].id)
         .fetch_one(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO runtime_restart_projection_memberships (organization_id,project_id,projection_version,event_id,window_started_at,window_ended_at,restart_delta) VALUES($1,$2,2,$3,$4,$5,1)")
-        .bind(ids.organization_id).bind(ids.project_id).bind(first_raw_id)
-        .bind(restarts[0].observed_at-Duration::minutes(10)).bind(restarts[0].observed_at)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_restart_projection_memberships (
+             organization_id,project_id,projection_version,event_id,window_started_at,
+             window_ended_at,restart_delta
+         )
+         VALUES($1,$2,2,$3,$4,$5,1)",
+    )
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(first_raw_id)
+    .bind(restarts[0].observed_at - Duration::minutes(10))
+    .bind(restarts[0].observed_at)
+    .execute(&pool)
+    .await
+    .unwrap();
     let versions: i64 = sqlx::query_scalar(
         "SELECT count(DISTINCT projection_version) FROM runtime_restart_projection_memberships",
     )
@@ -627,13 +772,16 @@ async fn termination_correlation_and_restart_projection_are_durable_and_replay_s
 async fn file_activity_is_persisted_grouped_inventoried_and_replay_safe(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config("file-activity")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-file','test')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-file','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -652,13 +800,22 @@ async fn file_activity_is_persisted_grouped_inventoried_and_replay_safe(pool: sq
         1
     );
     assert_eq!(persist_batch(&pool, context, &[file]).await.unwrap(), 0);
-    let (event_kind, inventory_kind, event_count, group_count, occurrence_count):
-        (String, String, i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT event_kind FROM runtime_events),(SELECT inventory_kind FROM runtime_inventory_items),(SELECT count(*) FROM runtime_events),(SELECT count(*) FROM runtime_event_groups),(SELECT occurrence_count FROM runtime_inventory_items)",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let (event_kind, inventory_kind, event_count, group_count, occurrence_count): (
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT (SELECT event_kind FROM runtime_events),
+             (SELECT inventory_kind FROM runtime_inventory_items),
+             (SELECT count(*) FROM runtime_events),
+             (SELECT count(*) FROM runtime_event_groups),
+             (SELECT occurrence_count FROM runtime_inventory_items)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(event_kind, "file.modify");
     assert_eq!(inventory_kind, "file_activity");
     assert_eq!((event_count, group_count, occurrence_count), (1, 1, 1));
@@ -673,13 +830,16 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
         .await
         .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-inventory','test')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-inventory','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -689,15 +849,20 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
     };
     let now = now();
     let release_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'inventory-v1',$5)")
-        .bind(release_id)
-        .bind(ids.organization_id)
-        .bind(ids.project_id)
-        .bind(ids.application_id)
-        .bind(now - Duration::days(1))
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,'inventory-v1',$5)",
+    )
+    .bind(release_id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(now - Duration::days(1))
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut first = event(ids.project_id, ids.application_id);
     first.observed_at = now;
     first.attribution.release = Some("inventory-v1".into());
@@ -717,8 +882,20 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
     assert_eq!(first_result.unwrap(), 1);
     assert_eq!(second_result.unwrap(), 1);
 
-    let (item_count, membership_count, group_count, group_link_count, sighting_count, occurrence_count): (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_inventory_items),(SELECT count(*) FROM runtime_inventory_event_memberships),(SELECT count(*) FROM runtime_event_groups),(SELECT count(*) FROM runtime_inventory_group_links),(SELECT count(*) FROM runtime_inventory_sightings),(SELECT occurrence_count FROM runtime_inventory_items)",
+    let (
+        item_count,
+        membership_count,
+        group_count,
+        group_link_count,
+        sighting_count,
+        occurrence_count,
+    ): (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM runtime_inventory_items),
+             (SELECT count(*) FROM runtime_inventory_event_memberships),
+             (SELECT count(*) FROM runtime_event_groups),
+             (SELECT count(*) FROM runtime_inventory_group_links),
+             (SELECT count(*) FROM runtime_inventory_sightings),
+             (SELECT occurrence_count FROM runtime_inventory_items)",
     )
     .fetch_one(&pool)
     .await
@@ -788,7 +965,8 @@ async fn inventory_projection_is_concurrent_idempotent_scoped_and_transactional(
             .is_err()
     );
     let (after_events, after_inventory): (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_events),(SELECT occurrence_count FROM runtime_inventory_items)",
+        "SELECT (SELECT count(*) FROM runtime_events),
+             (SELECT occurrence_count FROM runtime_inventory_items)",
     )
     .fetch_one(&pool)
     .await
@@ -834,13 +1012,16 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
     let first = bootstrap(&pool, &config("first")).await.unwrap();
     let second = bootstrap(&pool, &config("second")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id)
-        .bind(first.organization_id)
-        .bind(first.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: first.organization_id,
@@ -861,7 +1042,14 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
             .unwrap(),
         0
     );
-    let (group_id, representative_event_id, first_seen_event_id, occurrence_count, first_seen_at, last_seen_at): (
+    let (
+        group_id,
+        representative_event_id,
+        first_seen_event_id,
+        occurrence_count,
+        first_seen_at,
+        last_seen_at,
+    ): (
         Uuid,
         Uuid,
         Uuid,
@@ -869,7 +1057,10 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
         chrono::DateTime<Utc>,
         chrono::DateTime<Utc>,
     ) = sqlx::query_as(
-        "SELECT id, representative_event_id, first_seen_event_id, occurrence_count, first_seen_at, last_seen_at FROM runtime_event_groups WHERE organization_id=$1",
+        "SELECT id, representative_event_id, first_seen_event_id, occurrence_count,
+             first_seen_at, last_seen_at
+         FROM runtime_event_groups
+         WHERE organization_id=$1",
     )
     .bind(first.organization_id)
     .fetch_one(&pool)
@@ -895,7 +1086,10 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
     .unwrap();
     assert_eq!(membership_count, 1);
     let outbox_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM outbox_messages WHERE aggregate_id=$1 AND topic='runtime_group.first_seen'",
+        "SELECT count(*)
+         FROM outbox_messages
+         WHERE aggregate_id=$1
+             AND topic='runtime_group.first_seen'",
     )
     .bind(group_id)
     .fetch_one(&pool)
@@ -919,7 +1113,10 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
         chrono::DateTime<Utc>,
         chrono::DateTime<Utc>,
     ) = sqlx::query_as(
-        "SELECT representative_event_id, first_seen_event_id, occurrence_count, first_seen_at, last_seen_at FROM runtime_event_groups WHERE id=$1",
+        "SELECT representative_event_id, first_seen_event_id, occurrence_count,
+             first_seen_at, last_seen_at
+         FROM runtime_event_groups
+         WHERE id=$1",
     )
     .bind(group_id)
     .fetch_one(&pool)
@@ -961,7 +1158,11 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
     ));
 
     let constraint_error = sqlx::query(
-        "INSERT INTO runtime_event_group_memberships (organization_id, project_id, application_id, event_id, group_id, fingerprint_version) VALUES ($1,$2,$3,$4,$5,1)",
+        "INSERT INTO runtime_event_group_memberships (
+             organization_id, project_id, application_id, event_id, group_id,
+             fingerprint_version
+         )
+         VALUES ($1,$2,$3,$4,$5,1)",
     )
     .bind(first.organization_id)
     .bind(first.project_id)
@@ -978,13 +1179,16 @@ async fn batch_is_tenant_safe_idempotent_and_preserves_timestamps(pool: sqlx::Pg
 async fn concurrent_first_occurrences_share_one_group(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config("concurrent")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -1004,7 +1208,13 @@ async fn concurrent_first_occurrences_share_one_group(pool: sqlx::PgPool) {
     assert_eq!(first_result.unwrap(), 1);
     assert_eq!(second_result.unwrap(), 1);
     let (groups, occurrences, memberships, outbox): (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_event_groups), (SELECT coalesce(sum(occurrence_count),0)::bigint FROM runtime_event_groups), (SELECT count(*) FROM runtime_event_group_memberships), (SELECT count(*) FROM outbox_messages)",
+        "SELECT (SELECT count(*) FROM runtime_event_groups),
+             (
+                 SELECT coalesce(sum(occurrence_count),0)::bigint
+                 FROM runtime_event_groups
+             ),
+             (SELECT count(*) FROM runtime_event_group_memberships),
+             (SELECT count(*) FROM outbox_messages)",
     )
     .fetch_one(&pool)
     .await
@@ -1017,7 +1227,13 @@ async fn concurrent_first_occurrences_share_one_group(pool: sqlx::PgPool) {
     });
     assert_eq!(persist_batch(&pool, context, &[distinct]).await.unwrap(), 1);
     let totals: (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_event_groups), (SELECT coalesce(sum(occurrence_count),0)::bigint FROM runtime_event_groups), (SELECT count(*) FROM runtime_event_group_memberships), (SELECT count(*) FROM outbox_messages)",
+        "SELECT (SELECT count(*) FROM runtime_event_groups),
+             (
+                 SELECT coalesce(sum(occurrence_count),0)::bigint
+                 FROM runtime_event_groups
+             ),
+             (SELECT count(*) FROM runtime_event_group_memberships),
+             (SELECT count(*) FROM outbox_messages)",
     )
     .fetch_one(&pool)
     .await
@@ -1030,13 +1246,16 @@ async fn concurrent_first_occurrences_share_one_group(pool: sqlx::PgPool) {
 async fn network_events_persist_canonically_replay_and_share_safe_group(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config("network-storage")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id)
-        .bind(ids.organization_id)
-        .bind(ids.cluster_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id, organization_id, cluster_id, node_name, agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -1099,7 +1318,9 @@ async fn network_events_persist_canonically_replay_and_share_safe_group(pool: sq
     assert_eq!(event_kind, "network.connect");
     assert_eq!(payload["data"]["destination_address"], "2001:db8::7");
     let (groups, occurrences, outbox): (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_event_groups), (SELECT occurrence_count FROM runtime_event_groups), (SELECT count(*) FROM outbox_messages)",
+        "SELECT (SELECT count(*) FROM runtime_event_groups),
+             (SELECT occurrence_count FROM runtime_event_groups),
+             (SELECT count(*) FROM outbox_messages)",
     )
     .fetch_one(&pool)
     .await
@@ -1135,13 +1356,30 @@ async fn inbound_events_are_transactional_replay_safe_and_group_only_by_local_en
         .await
         .unwrap();
     let release_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,'v1',now())")
-        .bind(release_id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,'v1',now())",
+    )
+    .bind(release_id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id)
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -1210,7 +1448,9 @@ async fn inbound_events_are_transactional_replay_safe_and_group_only_by_local_en
     assert_eq!(persist_batch(&pool, context, &[listener]).await.unwrap(), 0);
 
     let groups: Vec<(String, i64, serde_json::Value)> = sqlx::query_as(
-        "SELECT event_kind,occurrence_count,semantic_summary FROM runtime_event_groups ORDER BY event_kind,occurrence_count DESC",
+        "SELECT event_kind,occurrence_count,semantic_summary
+         FROM runtime_event_groups
+         ORDER BY event_kind,occurrence_count DESC",
     )
     .fetch_all(&pool)
     .await
@@ -1225,7 +1465,11 @@ async fn inbound_events_are_transactional_replay_safe_and_group_only_by_local_en
     assert!(shared_accept.2.get("remote_address").is_none());
     assert!(shared_accept.2.get("remote_port").is_none());
     let raw_remotes: Vec<String> = sqlx::query_scalar(
-        "SELECT payload->'data'->>'remote_address' FROM runtime_events WHERE event_kind='network.accept' AND payload->'data'->>'local_port'='8080' ORDER BY payload->'data'->>'remote_address'",
+        "SELECT payload->'data'->>'remote_address'
+         FROM runtime_events
+         WHERE event_kind='network.accept'
+             AND payload->'data'->>'local_port'='8080'
+         ORDER BY payload->'data'->>'remote_address'",
     )
     .fetch_all(&pool)
     .await
@@ -1275,8 +1519,16 @@ async fn inbound_events_are_transactional_replay_safe_and_group_only_by_local_en
 async fn dns_events_persist_replay_and_group_without_answer_identity(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config("dns-storage")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -1323,8 +1575,14 @@ async fn dns_events_persist_replay_and_group_without_answer_identity(pool: sqlx:
     assert_eq!(persist_batch(&pool, context, &[varied]).await.unwrap(), 1);
 
     let (events, groups, occurrences, outbox): (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM runtime_events), (SELECT count(*) FROM runtime_event_groups), (SELECT occurrence_count FROM runtime_event_groups), (SELECT count(*) FROM outbox_messages)",
-    ).fetch_one(&pool).await.unwrap();
+        "SELECT (SELECT count(*) FROM runtime_events),
+             (SELECT count(*) FROM runtime_event_groups),
+             (SELECT occurrence_count FROM runtime_event_groups),
+             (SELECT count(*) FROM outbox_messages)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!((events, groups, occurrences, outbox), (2, 1, 2, 1));
     let payload: serde_json::Value =
         sqlx::query_scalar("SELECT payload FROM runtime_events WHERE event_id=$1")
@@ -1350,8 +1608,16 @@ async fn dns_events_persist_replay_and_group_without_answer_identity(pool: sqlx:
 async fn backfill_is_restartable_and_marks_historical_outbox(pool: sqlx::PgPool) {
     let ids = bootstrap(&pool, &config("backfill")).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -1391,8 +1657,23 @@ async fn backfill_is_restartable_and_marks_historical_outbox(pool: sqlx::PgPool)
     assert_eq!(first_run.groups_created, 1);
     assert_eq!(run_backfill(&pool, options).await.unwrap().scanned, 0);
     let (groups, occurrences, memberships, historical_outbox): (i64, i64, i64, i64) =
-        sqlx::query_as("SELECT (SELECT count(*) FROM runtime_event_groups), (SELECT coalesce(sum(occurrence_count),0)::bigint FROM runtime_event_groups), (SELECT count(*) FROM runtime_event_group_memberships), (SELECT count(*) FROM outbox_messages WHERE source='backfill' AND processed_at IS NULL)")
-            .fetch_one(&pool).await.unwrap();
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runtime_event_groups),
+                 (
+                     SELECT coalesce(sum(occurrence_count),0)::bigint
+                     FROM runtime_event_groups
+                 ),
+                 (SELECT count(*) FROM runtime_event_group_memberships),
+                 (
+                     SELECT count(*)
+                     FROM outbox_messages
+                     WHERE source='backfill'
+                         AND processed_at IS NULL
+                 )",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         (groups, occurrences, memberships, historical_outbox),
         (1, 2, 2, 1)

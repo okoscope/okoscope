@@ -4,6 +4,32 @@
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`WebhookDestinationRepository::insert`].
+#[derive(Debug)]
+pub struct NewWebhookDestination<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub name: &'a str,
+    pub url: &'a str,
+    pub encrypted_secret: Vec<u8>,
+    pub secret_nonce: &'a [u8],
+    pub deliver_backfill: bool,
+}
+
+/// Input to [`WebhookDestinationRepository::update`].
+#[derive(Debug)]
+pub struct WebhookDestinationUpdate<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub destination_id: Uuid,
+    pub name: Option<&'a str>,
+    pub url: Option<&'a str>,
+    pub deliver_backfill: Option<bool>,
+    pub enabled: Option<bool>,
+    pub expected_revision: i64,
+}
+
 /// Webhook destinations of projects.
 #[derive(Clone, Copy, Debug)]
 pub struct WebhookDestinationRepository;
@@ -31,11 +57,18 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,deliver_backfill FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND enabled=true ORDER BY id")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,deliver_backfill
+             FROM webhook_destinations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND enabled=true
+             ORDER BY id",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// The project's destinations, newest first.
@@ -52,11 +85,18 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 ORDER BY created_at DESC,id DESC")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at
+             FROM webhook_destinations
+             WHERE organization_id=$1
+                 AND project_id=$2
+             ORDER BY created_at DESC,id DESC",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// One destination of the project with the columns of [`Self::list`].
@@ -70,12 +110,19 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at
+             FROM webhook_destinations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Where and how to deliver to a destination.
@@ -91,76 +138,110 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,url,enabled,encrypted_secret,secret_nonce FROM webhook_destinations WHERE organization_id=$1 AND project_id=$2 AND id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT id,url,enabled,encrypted_secret,secret_nonce
+             FROM webhook_destinations
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Inserts an enabled destination with its encrypted secret and returns
     /// it with the columns of [`Self::list`].
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E, T>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        name: &str,
-        url: &str,
-        encrypted_secret: Vec<u8>,
-        secret_nonce: &[u8],
-        deliver_backfill: bool,
+        input: NewWebhookDestination<'_>,
     ) -> Result<T, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("INSERT INTO webhook_destinations (id,organization_id,project_id,name,url,encrypted_secret,secret_nonce,deliver_backfill) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(name)
-            .bind(url)
-            .bind(encrypted_secret)
-            .bind(secret_nonce)
-            .bind(deliver_backfill)
-            .fetch_one(executor)
-            .await
+        let NewWebhookDestination {
+            id,
+            organization_id,
+            project_id,
+            name,
+            url,
+            encrypted_secret,
+            secret_nonce,
+            deliver_backfill,
+        } = input;
+        sqlx::query_as(
+            "INSERT INTO webhook_destinations (
+                 id,organization_id,project_id,name,url,encrypted_secret,secret_nonce,
+                 deliver_backfill
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+             RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(name)
+        .bind(url)
+        .bind(encrypted_secret)
+        .bind(secret_nonce)
+        .bind(deliver_backfill)
+        .fetch_one(executor)
+        .await
     }
 
     /// Updates the given fields of a destination at `expected_revision`,
     /// bumping the revision; disabling keeps an earlier disable time and
     /// enabling clears it. `None` when there is no such destination at that
     /// revision.
-    #[allow(clippy::too_many_arguments)]
     pub async fn update<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        destination_id: Uuid,
-        name: Option<&str>,
-        url: Option<&str>,
-        deliver_backfill: Option<bool>,
-        enabled: Option<bool>,
-        expected_revision: i64,
+        input: WebhookDestinationUpdate<'_>,
     ) -> Result<Option<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE webhook_destinations SET name=COALESCE($4,name),url=COALESCE($5,url),deliver_backfill=COALESCE($6,deliver_backfill),enabled=COALESCE($7,enabled),disabled_at=CASE WHEN $7=true THEN NULL WHEN $7=false THEN COALESCE(disabled_at,now()) ELSE disabled_at END,revision=revision+1,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND revision=$8 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(name)
-            .bind(url)
-            .bind(deliver_backfill)
-            .bind(enabled)
-            .bind(expected_revision)
-            .fetch_optional(executor)
-            .await
+        let WebhookDestinationUpdate {
+            organization_id,
+            project_id,
+            destination_id,
+            name,
+            url,
+            deliver_backfill,
+            enabled,
+            expected_revision,
+        } = input;
+        sqlx::query_as(
+            "UPDATE webhook_destinations
+             SET name=COALESCE($4,name),url=COALESCE($5,url),
+                 deliver_backfill=COALESCE($6,deliver_backfill),enabled=COALESCE($7,enabled),
+                 disabled_at=CASE
+                     WHEN $7=true THEN NULL
+                     WHEN $7=false THEN COALESCE(disabled_at,now())
+                     ELSE disabled_at
+                 END,
+                 revision=revision+1,updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3
+                 AND revision=$8
+             RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(name)
+        .bind(url)
+        .bind(deliver_backfill)
+        .bind(enabled)
+        .bind(expected_revision)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Disables a destination, keeping an earlier disable time, and bumps its
@@ -175,12 +256,21 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE webhook_destinations SET enabled=false,disabled_at=COALESCE(disabled_at,now()),updated_at=now(),revision=revision+1 WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE webhook_destinations
+             SET enabled=false,disabled_at=COALESCE(disabled_at,now()),updated_at=now(),
+                 revision=revision+1
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3
+             RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Replaces a destination's encrypted secret and bumps its revision.
@@ -196,19 +286,28 @@ impl WebhookDestinationRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("UPDATE webhook_destinations SET encrypted_secret=$4,secret_nonce=$5,revision=revision+1,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,updated_at,disabled_at")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(destination_id)
-            .bind(encrypted_secret)
-            .bind(secret_nonce)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "UPDATE webhook_destinations
+             SET encrypted_secret=$4,secret_nonce=$5,revision=revision+1,updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND id=$3
+             RETURNING id,project_id,name,url,enabled,deliver_backfill,revision,created_at,
+                 updated_at,disabled_at",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(destination_id)
+        .bind(encrypted_secret)
+        .bind(secret_nonce)
+        .fetch_optional(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{NewWebhookDestination, WebhookDestinationUpdate};
     use chrono::{DateTime, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
@@ -264,14 +363,16 @@ mod tests {
             async move {
                 WebhookDestinationRepository::update::<_, Destination>(
                     &pool,
-                    own.organization_id,
-                    own.project_id,
-                    first,
-                    name,
-                    None,
-                    Some(true),
-                    enabled,
-                    revision,
+                    WebhookDestinationUpdate {
+                        organization_id: own.organization_id,
+                        project_id: own.project_id,
+                        destination_id: first,
+                        name,
+                        url: None,
+                        deliver_backfill: Some(true),
+                        enabled,
+                        expected_revision: revision,
+                    },
                 )
                 .await
                 .unwrap()
@@ -387,14 +488,16 @@ mod tests {
         );
         let duplicate = WebhookDestinationRepository::insert::<_, Destination>(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            "newer",
-            "https://example.test",
-            vec![1; 48],
-            &[2; 24],
-            false,
+            NewWebhookDestination {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                name: "newer",
+                url: "https://example.test",
+                encrypted_secret: vec![1; 48],
+                secret_nonce: &[2; 24],
+                deliver_backfill: false,
+            },
         )
         .await
         .unwrap_err();

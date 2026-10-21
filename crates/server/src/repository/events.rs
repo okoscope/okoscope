@@ -21,6 +21,36 @@ pub struct StoredEvent {
     pub payload: Value,
 }
 
+/// Input to [`EventRepository::insert`].
+#[derive(Debug)]
+pub struct NewEvent<'a> {
+    pub id: Uuid,
+    pub event_id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub cluster_id: Uuid,
+    pub application_id: Uuid,
+    pub agent_id: Uuid,
+    pub release_id: Option<Uuid>,
+    pub observed_at: DateTime<Utc>,
+    pub node_name: &'a str,
+    pub namespace: &'a str,
+    pub pod_uid: &'a str,
+    pub pod_name: &'a str,
+    pub container_id: &'a str,
+    pub container_name: &'a str,
+    pub workload_uid: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: &'a str,
+    pub cgroup_id: i64,
+    pub pid: i64,
+    pub tgid: i64,
+    pub process_command: &'a str,
+    pub event_kind: &'a str,
+    pub schema_version: i32,
+    pub payload: serde_json::Value,
+}
+
 /// Queries against the `runtime_events` table.
 #[derive(Clone, Copy, Debug)]
 pub struct EventRepository;
@@ -35,11 +65,18 @@ impl EventRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 ORDER BY id DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM runtime_events
+             WHERE organization_id=$1
+                 AND project_id=$2
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Raw events of the project after `cursor` up to `upper_bound` by id
@@ -60,79 +97,111 @@ impl EventRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.event_id,e.project_id,e.cluster_id,e.application_id,e.release_id,e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload FROM runtime_events e LEFT JOIN runtime_event_group_memberships m ON m.event_id=e.id AND m.fingerprint_version=$3 WHERE e.organization_id=$1 AND e.project_id=$2 AND m.event_id IS NULL AND ($4::uuid IS NULL OR e.id>$4) AND e.id<=$5 ORDER BY e.id LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(fingerprint_version)
-            .bind(cursor)
-            .bind(upper_bound)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.project_id,e.cluster_id,e.application_id,e.release_id,
+                 e.observed_at,e.node_name,e.namespace,e.pod_uid,e.pod_name,e.container_id,
+                 e.container_name,e.workload_uid,e.workload_kind,e.workload_name,e.cgroup_id,
+                 e.pid,e.tgid,e.process_command,e.event_schema_version,e.payload
+             FROM runtime_events e
+             LEFT JOIN runtime_event_group_memberships m ON m.event_id=e.id
+                 AND m.fingerprint_version=$3
+             WHERE e.organization_id=$1
+                 AND e.project_id=$2
+                 AND m.event_id IS NULL
+                 AND ($4::uuid IS NULL OR e.id>$4)
+                 AND e.id<=$5
+             ORDER BY e.id
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(fingerprint_version)
+        .bind(cursor)
+        .bind(upper_bound)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Stores a raw event once per agent-assigned event id, returning its id;
     /// `None` when it was already stored.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert<'e, E>(
         executor: E,
-        id: Uuid,
-        event_id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        cluster_id: Uuid,
-        application_id: Uuid,
-        agent_id: Uuid,
-        release_id: Option<Uuid>,
-        observed_at: DateTime<Utc>,
-        node_name: &str,
-        namespace: &str,
-        pod_uid: &str,
-        pod_name: &str,
-        container_id: &str,
-        container_name: &str,
-        workload_uid: &str,
-        workload_kind: &str,
-        workload_name: &str,
-        cgroup_id: i64,
-        pid: i64,
-        tgid: i64,
-        process_command: &str,
-        event_kind: &str,
-        schema_version: i32,
-        payload: serde_json::Value,
+        input: NewEvent<'_>,
     ) -> Result<Option<Uuid>, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO runtime_events (id, event_id, organization_id, project_id, cluster_id, application_id, agent_id, release_id, observed_at, node_name, namespace, pod_uid, pod_name, container_id, container_name, workload_uid, workload_kind, workload_name, cgroup_id, pid, tgid, process_command, event_kind, event_schema_version, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) ON CONFLICT (agent_id, event_id) DO NOTHING RETURNING id")
-            .bind(id)
-            .bind(event_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(cluster_id)
-            .bind(application_id)
-            .bind(agent_id)
-            .bind(release_id)
-            .bind(observed_at)
-            .bind(node_name)
-            .bind(namespace)
-            .bind(pod_uid)
-            .bind(pod_name)
-            .bind(container_id)
-            .bind(container_name)
-            .bind(workload_uid)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(cgroup_id)
-            .bind(pid)
-            .bind(tgid)
-            .bind(process_command)
-            .bind(event_kind)
-            .bind(schema_version)
-            .bind(payload)
-            .fetch_optional(executor)
-            .await
+        let NewEvent {
+            id,
+            event_id,
+            organization_id,
+            project_id,
+            cluster_id,
+            application_id,
+            agent_id,
+            release_id,
+            observed_at,
+            node_name,
+            namespace,
+            pod_uid,
+            pod_name,
+            container_id,
+            container_name,
+            workload_uid,
+            workload_kind,
+            workload_name,
+            cgroup_id,
+            pid,
+            tgid,
+            process_command,
+            event_kind,
+            schema_version,
+            payload,
+        } = input;
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO runtime_events (
+                 id, event_id, organization_id, project_id, cluster_id, application_id,
+                 agent_id, release_id, observed_at, node_name, namespace, pod_uid, pod_name,
+                 container_id, container_name, workload_uid, workload_kind, workload_name,
+                 cgroup_id, pid, tgid, process_command, event_kind, event_schema_version,
+                 payload
+             )
+             VALUES (
+                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+                 $22,$23,$24,$25
+             )
+             ON CONFLICT (agent_id, event_id)
+             DO NOTHING
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(event_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(cluster_id)
+        .bind(application_id)
+        .bind(agent_id)
+        .bind(release_id)
+        .bind(observed_at)
+        .bind(node_name)
+        .bind(namespace)
+        .bind(pod_uid)
+        .bind(pod_name)
+        .bind(container_id)
+        .bind(container_name)
+        .bind(workload_uid)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(cgroup_id)
+        .bind(pid)
+        .bind(tgid)
+        .bind(process_command)
+        .bind(event_kind)
+        .bind(schema_version)
+        .bind(payload)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The highest raw event id of the project, or of one application.
@@ -145,12 +214,20 @@ impl EventRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND ($3::uuid IS NULL OR application_id=$3) ORDER BY id DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM runtime_events
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND ($3::uuid IS NULL OR application_id=$3)
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// When the application's earliest and latest retained events were
@@ -164,12 +241,18 @@ impl EventRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>("SELECT min(received_at),max(received_at) FROM runtime_events WHERE organization_id=$1 AND project_id=$2 AND application_id=$3")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
+            "SELECT min(received_at),max(received_at)
+             FROM runtime_events
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// One raw event as an occurrence, within the organization.
@@ -182,11 +265,49 @@ impl EventRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.received_at,e.node_name,e.namespace,e.pod_name,e.container_name,e.process_command,e.event_kind,e.payload,COALESCE((SELECT jsonb_build_object('retention_incomplete',o.retention_incomplete,'status',o.status,'candidate_count',o.candidate_count,'tolerance_seconds',o.tolerance_seconds,'related_event_ids',COALESCE((SELECT jsonb_agg(c.kernel_event_id) FROM runtime_event_correlations c WHERE c.lifecycle_event_id=e.id),'[]'::jsonb)) FROM runtime_event_correlation_outcomes o WHERE o.event_id=e.id),jsonb_build_object('status','absent','candidate_count',0,'related_event_ids','[]'::jsonb)) correlation,e.release_id,r.version release_version,CASE WHEN r.id IS NULL THEN 'Unattributed' ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name FROM runtime_events e LEFT JOIN releases r ON r.id=e.release_id LEFT JOIN applications a ON a.id=r.application_id WHERE e.organization_id=$1 AND e.id=$2")
-            .bind(organization_id)
-            .bind(event_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.observed_at,e.received_at,e.node_name,e.namespace,
+                 e.pod_name,e.container_name,e.process_command,e.event_kind,e.payload,
+                 COALESCE(
+                     (
+                         SELECT jsonb_build_object(
+                             'retention_incomplete',o.retention_incomplete,'status',o.status,
+                             'candidate_count',o.candidate_count,'tolerance_seconds',
+                             o.tolerance_seconds,'related_event_ids',
+                             COALESCE(
+                                 (
+                                     SELECT jsonb_agg(c.kernel_event_id)
+                                     FROM runtime_event_correlations c
+                                     WHERE c.lifecycle_event_id=e.id
+                                 ),
+                                 '[]'::jsonb
+                             )
+                         )
+                         FROM runtime_event_correlation_outcomes o
+                         WHERE o.event_id=e.id
+                     ),
+                     jsonb_build_object(
+                         'status','absent','candidate_count',0,'related_event_ids',
+                         '[]'::jsonb
+                     )
+                 ) correlation,
+                 e.release_id,r.version release_version,
+                 CASE
+                     WHEN r.id IS NULL THEN 'Unattributed'
+                     ELSE release_display_name(
+                         a.name,r.source,r.version,r.identity_digest,r.identity_components
+                     )
+                 END release_display_name
+             FROM runtime_events e
+             LEFT JOIN releases r ON r.id=e.release_id
+             LEFT JOIN applications a ON a.id=r.application_id
+             WHERE e.organization_id=$1
+                 AND e.id=$2",
+        )
+        .bind(organization_id)
+        .bind(event_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Evidence correlated with one raw event, up to `limit`.
@@ -200,12 +321,24 @@ impl EventRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.event_id,e.observed_at,e.received_at,e.event_kind,COALESCE(e.payload#>>'{data,source}','unknown') source,e.payload FROM runtime_event_correlations c JOIN runtime_events e ON e.id=CASE WHEN c.lifecycle_event_id=$2 THEN c.kernel_event_id ELSE c.lifecycle_event_id END WHERE c.organization_id=$1 AND (c.lifecycle_event_id=$2 OR c.kernel_event_id=$2) ORDER BY e.observed_at,e.received_at,e.id LIMIT $3")
-            .bind(organization_id)
-            .bind(event_id)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.event_id,e.observed_at,e.received_at,e.event_kind,
+                 COALESCE(e.payload#>>'{data,source}','unknown') source,e.payload
+             FROM runtime_event_correlations c
+             JOIN runtime_events e ON e.id=CASE
+                 WHEN c.lifecycle_event_id=$2 THEN c.kernel_event_id
+                 ELSE c.lifecycle_event_id
+             END
+             WHERE c.organization_id=$1
+                 AND (c.lifecycle_event_id=$2 OR c.kernel_event_id=$2)
+             ORDER BY e.observed_at,e.received_at,e.id
+             LIMIT $3",
+        )
+        .bind(organization_id)
+        .bind(event_id)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Returns the most recent events of one kind for an application, newest
@@ -252,6 +385,11 @@ impl EventRepository {
 
 #[cfg(test)]
 mod ingestion_statement_tests {
+    use super::NewEvent;
+    use crate::repository::event_groups::{ReleaseMembership, ReleaseOccurrence};
+    use crate::repository::inventory::{
+        InventoryRepository, NewInventoryItem, NewSighting, ProjectionBackfillPageQuery,
+    };
     use chrono::{DateTime, Duration, SubsecRound, Utc};
     use serde_json::json;
     use sqlx::PgPool;
@@ -271,7 +409,6 @@ mod ingestion_statement_tests {
     use super::EventRepository;
     use crate::inventory::CURRENT_INVENTORY_IDENTITY_VERSION;
     use crate::repository::EventGroupRepository;
-    use crate::repository::inventory::InventoryRepository;
     use crate::repository::outbox::OutboxRepository;
     use crate::repository::runtime_retention::RuntimeRetentionRepository;
     use crate::repository::test_support::{
@@ -282,31 +419,33 @@ mod ingestion_statement_tests {
     async fn raw(pool: &PgPool, own: &Tenant, event_id: Uuid, at: DateTime<Utc>) -> Option<Uuid> {
         EventRepository::insert(
             pool,
-            Uuid::new_v4(),
-            event_id,
-            own.organization_id,
-            own.project_id,
-            own.cluster_id,
-            own.application_id,
-            own.agent_id,
-            None,
-            at,
-            "node-a",
-            "production",
-            "pod-1",
-            "app-1",
-            "container-1",
-            "app",
-            "workload-a",
-            "Deployment",
-            "app",
-            1,
-            10,
-            10,
-            "app",
-            "process.exec",
-            1,
-            json!({"executable": "/bin/raw"}),
+            NewEvent {
+                id: Uuid::new_v4(),
+                event_id,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                cluster_id: own.cluster_id,
+                application_id: own.application_id,
+                agent_id: own.agent_id,
+                release_id: None,
+                observed_at: at,
+                node_name: "node-a",
+                namespace: "production",
+                pod_uid: "pod-1",
+                pod_name: "app-1",
+                container_id: "container-1",
+                container_name: "app",
+                workload_uid: "workload-a",
+                workload_kind: "Deployment",
+                workload_name: "app",
+                cgroup_id: 1,
+                pid: 10,
+                tgid: 10,
+                process_command: "app",
+                event_kind: "process.exec",
+                schema_version: 1,
+                payload: json!({"executable": "/bin/raw"}),
+            },
         )
         .await
         .unwrap()
@@ -385,13 +524,15 @@ mod ingestion_statement_tests {
         );
         let unprojected: Vec<Row> = InventoryRepository::projection_backfill_page(
             &pool,
-            own.organization_id,
-            own.project_id,
-            None,
-            CURRENT_INVENTORY_IDENTITY_VERSION.get() + 1,
-            None,
-            latest,
-            10,
+            ProjectionBackfillPageQuery {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: None,
+                identity_version: CURRENT_INVENTORY_IDENTITY_VERSION.get() + 1,
+                cursor: None,
+                upper_bound: latest,
+                limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -403,13 +544,15 @@ mod ingestion_statement_tests {
         assert!(
             InventoryRepository::projection_backfill_page::<_, Row>(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                None,
-                CURRENT_INVENTORY_IDENTITY_VERSION.get(),
-                None,
-                latest,
-                10,
+                ProjectionBackfillPageQuery {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: None,
+                    identity_version: CURRENT_INVENTORY_IDENTITY_VERSION.get(),
+                    cursor: None,
+                    upper_bound: latest,
+                    limit: 10
+                }
             )
             .await
             .unwrap()
@@ -447,13 +590,15 @@ mod ingestion_statement_tests {
         let add = || {
             EventGroupRepository::add_release_membership(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                stored,
-                group,
-                1,
-                Some(release),
+                ReleaseMembership {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    event_id: stored,
+                    group_id: group,
+                    fingerprint_version: 1,
+                    release_id: Some(release),
+                },
             )
         };
         assert_eq!(add().await.unwrap(), Some(stored));
@@ -469,13 +614,15 @@ mod ingestion_statement_tests {
         for _ in 0..2 {
             EventGroupRepository::record_release_occurrence(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                release,
-                group,
-                Utc::now(),
-                stored,
+                ReleaseOccurrence {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    release_id: release,
+                    group_id: group,
+                    observed_at: Utc::now(),
+                    event_id: stored,
+                },
             )
             .await
             .unwrap();
@@ -573,15 +720,17 @@ mod ingestion_statement_tests {
         let insert = || {
             InventoryRepository::insert_item(
                 &pool,
-                item,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                "inbound_endpoint",
-                1,
-                &[3; 32],
-                &summary,
-                at,
+                NewInventoryItem {
+                    id: item,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    inventory_kind: "inbound_endpoint",
+                    identity_version: 1,
+                    identity_digest: &[3; 32],
+                    semantic_summary: &summary,
+                    observed_at: at,
+                },
             )
         };
         assert_eq!(insert().await.unwrap(), Some(item));
@@ -639,13 +788,17 @@ mod ingestion_statement_tests {
         )
         .await
         .unwrap();
-        let (occurrences, first, last, listener): (i64, DateTime<Utc>, DateTime<Utc>, bool) = sqlx::query_as(
-            "SELECT occurrence_count,first_seen_at,last_seen_at,(semantic_summary->>'listener_observed')::boolean FROM runtime_inventory_items WHERE id=$1",
-        )
-        .bind(item)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let (occurrences, first, last, listener): (i64, DateTime<Utc>, DateTime<Utc>, bool) =
+            sqlx::query_as(
+                "SELECT occurrence_count,first_seen_at,last_seen_at,
+                     (semantic_summary->>'listener_observed')::boolean
+                 FROM runtime_inventory_items
+                 WHERE id=$1",
+            )
+            .bind(item)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             (occurrences, first, last, listener),
             (
@@ -679,18 +832,20 @@ mod ingestion_statement_tests {
             .unwrap();
             InventoryRepository::record_sighting(
                 &pool,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                item,
-                own.cluster_id,
-                "production",
-                "Deployment",
-                "app",
-                "pod-1",
-                "app-1",
-                "app",
-                at,
+                NewSighting {
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    item_id: item,
+                    cluster_id: own.cluster_id,
+                    namespace: "production",
+                    workload_kind: "Deployment",
+                    workload_name: "app",
+                    pod_uid: "pod-1",
+                    pod_name: "app-1",
+                    container_name: "app",
+                    observed_at: at,
+                },
             )
             .await
             .unwrap();

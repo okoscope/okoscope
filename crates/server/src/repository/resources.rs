@@ -10,6 +10,87 @@ use serde_json::Value;
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
+/// Input to [`ResourceRepository::insert_contribution`].
+#[derive(Debug)]
+pub struct NewResourceContribution<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cluster_id: Uuid,
+    pub agent_id: Uuid,
+    pub release_id: Option<Uuid>,
+    pub schema_version: i16,
+    pub interval_start: DateTime<Utc>,
+    pub interval_end: DateTime<Utc>,
+    pub covered_usec: i64,
+    pub sample_count: i32,
+    pub contributing_containers: i32,
+    pub namespace: &'a str,
+    pub workload_uid: &'a str,
+    pub workload_kind: &'a str,
+    pub workload_name: &'a str,
+    pub container_name: &'a str,
+    pub node_name: &'a str,
+    pub unavailable_sources: i64,
+    pub values: Value,
+}
+
+/// Input to [`ResourceRepository::add_rollup_point`].
+#[derive(Debug)]
+pub struct RollupPoint<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub release_key: Uuid,
+    pub release_id: Option<Uuid>,
+    pub container_name: &'a str,
+    pub interval_start: DateTime<Utc>,
+    pub step_seconds: i32,
+    pub metric: &'a str,
+    pub unit: &'a str,
+    pub value: f64,
+    pub value_weight: f64,
+    pub limit_value: Option<f64>,
+    pub covered_usec: i64,
+    pub expected_usec: i64,
+    pub sample_count: i64,
+    pub observed_replicas: i32,
+    pub ready_replicas: i32,
+    pub unavailable_sources: i64,
+}
+
+/// Input to [`ResourceRepository::history`].
+#[derive(Debug)]
+pub struct ResourceHistoryQuery<'a> {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub metric: &'a str,
+    pub step_seconds: i32,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub release_id: Option<Uuid>,
+    pub container_name: Option<&'a str>,
+}
+
+/// Input to [`ResourceRepository::upsert_finding`].
+#[derive(Debug)]
+pub struct ResourceFinding<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub target_release_id: Uuid,
+    pub baseline_release_id: Uuid,
+    pub reason_code: &'a str,
+    pub priority: &'a str,
+    pub metric: &'a str,
+    pub rule_version: i16,
+    pub facts: Value,
+    pub opened_at: DateTime<Utc>,
+}
+
 /// Resource contributions, rollups and regression findings.
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceRepository;
@@ -25,12 +106,19 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM release_resource_findings WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND closed_at IS NULL")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM release_resource_findings
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND closed_at IS NULL",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Locks the project and returns its effective detail and rollup
@@ -42,10 +130,19 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (i32, i32)>("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days),COALESCE(p.resource_rollup_retention_days,o.resource_rollup_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1 FOR UPDATE OF p")
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (i32, i32)>(
+            "SELECT COALESCE(
+                 p.resource_detail_retention_days,o.resource_detail_retention_days
+             ),
+                 COALESCE(p.resource_rollup_retention_days,o.resource_rollup_retention_days)
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             WHERE p.id=$1
+             FOR UPDATE OF p",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Moves the project's detail and rollup horizons forward, never back.
@@ -58,12 +155,17 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE projects SET resource_closed_before=GREATEST(resource_closed_before,$2),resource_rollup_expired_before=GREATEST(resource_rollup_expired_before,$3) WHERE id=$1")
-            .bind(project_id)
-            .bind(detail_before)
-            .bind(rollup_before)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE projects
+             SET resource_closed_before=GREATEST(resource_closed_before,$2),
+                 resource_rollup_expired_before=GREATEST(resource_rollup_expired_before,$3)
+             WHERE id=$1",
+        )
+        .bind(project_id)
+        .bind(detail_before)
+        .bind(rollup_before)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` of the project's contributions that ended
@@ -77,12 +179,25 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM resource_contributions WHERE (organization_id,application_id,id) IN (SELECT organization_id,application_id,id FROM resource_contributions WHERE project_id=$1 AND interval_end<$2 ORDER BY interval_end,id LIMIT $3 FOR UPDATE SKIP LOCKED)")
-            .bind(project_id)
-            .bind(detail_before)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM resource_contributions
+             WHERE (
+                 organization_id,application_id,id
+             ) IN (
+                 SELECT organization_id,application_id,id
+                 FROM resource_contributions
+                 WHERE project_id=$1
+                     AND interval_end<$2
+                 ORDER BY interval_end,id
+                 LIMIT $3
+                 FOR UPDATE SKIP LOCKED
+             )",
+        )
+        .bind(project_id)
+        .bind(detail_before)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` of the project's expired rollup points, oldest
@@ -98,13 +213,27 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM resource_rollup_points WHERE (application_id,release_key,container_name,bucket_start,step_seconds,metric) IN (SELECT application_id,release_key,container_name,bucket_start,step_seconds,metric FROM resource_rollup_points WHERE project_id=$1 AND ((step_seconds=60 AND bucket_start<$2) OR bucket_start<$3) ORDER BY bucket_start,application_id LIMIT $4 FOR UPDATE SKIP LOCKED)")
-            .bind(project_id)
-            .bind(detail_before)
-            .bind(rollup_before)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM resource_rollup_points
+             WHERE (
+                 application_id,release_key,container_name,bucket_start,step_seconds,metric
+             ) IN (
+                 SELECT application_id,release_key,container_name,bucket_start,step_seconds,
+                     metric
+                 FROM resource_rollup_points
+                 WHERE project_id=$1
+                     AND ((step_seconds=60 AND bucket_start<$2) OR bucket_start<$3)
+                 ORDER BY bucket_start,application_id
+                 LIMIT $4
+                 FOR UPDATE SKIP LOCKED
+             )",
+        )
+        .bind(project_id)
+        .bind(detail_before)
+        .bind(rollup_before)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 
     /// The project's effective detail retention in days, falling back to the
@@ -116,118 +245,175 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, i32>("SELECT COALESCE(p.resource_detail_retention_days,o.resource_detail_retention_days) FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1")
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, i32>(
+            "SELECT COALESCE(
+                 p.resource_detail_retention_days,o.resource_detail_retention_days
+             )
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             WHERE p.id=$1",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Stores one reported contribution, once: a repeated id affects no row.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_contribution<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cluster_id: Uuid,
-        agent_id: Uuid,
-        release_id: Option<Uuid>,
-        schema_version: i16,
-        interval_start: DateTime<Utc>,
-        interval_end: DateTime<Utc>,
-        covered_usec: i64,
-        sample_count: i32,
-        contributing_containers: i32,
-        namespace: &str,
-        workload_uid: &str,
-        workload_kind: &str,
-        workload_name: &str,
-        container_name: &str,
-        node_name: &str,
-        unavailable_sources: i64,
-        values: Value,
+        input: NewResourceContribution<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO resource_contributions(id,organization_id,project_id,application_id,cluster_id,agent_id,release_id,schema_version,interval_start,interval_end,covered_usec,sample_count,contributing_containers,namespace,workload_uid,workload_kind,workload_name,container_name,node_name,unavailable_sources,values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) ON CONFLICT(organization_id,application_id,id) DO NOTHING")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cluster_id)
-            .bind(agent_id)
-            .bind(release_id)
-            .bind(schema_version)
-            .bind(interval_start)
-            .bind(interval_end)
-            .bind(covered_usec)
-            .bind(sample_count)
-            .bind(contributing_containers)
-            .bind(namespace)
-            .bind(workload_uid)
-            .bind(workload_kind)
-            .bind(workload_name)
-            .bind(container_name)
-            .bind(node_name)
-            .bind(unavailable_sources)
-            .bind(values)
-            .execute(executor)
-            .await
+        let NewResourceContribution {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            cluster_id,
+            agent_id,
+            release_id,
+            schema_version,
+            interval_start,
+            interval_end,
+            covered_usec,
+            sample_count,
+            contributing_containers,
+            namespace,
+            workload_uid,
+            workload_kind,
+            workload_name,
+            container_name,
+            node_name,
+            unavailable_sources,
+            values,
+        } = input;
+        sqlx::query(
+            "INSERT INTO resource_contributions(
+                 id,organization_id,project_id,application_id,cluster_id,agent_id,release_id,
+                 schema_version,interval_start,interval_end,covered_usec,sample_count,
+                 contributing_containers,namespace,workload_uid,workload_kind,workload_name,
+                 container_name,node_name,unavailable_sources,values
+             )
+             VALUES(
+                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21
+             )
+             ON CONFLICT(organization_id,application_id,id)
+             DO NOTHING",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cluster_id)
+        .bind(agent_id)
+        .bind(release_id)
+        .bind(schema_version)
+        .bind(interval_start)
+        .bind(interval_end)
+        .bind(covered_usec)
+        .bind(sample_count)
+        .bind(contributing_containers)
+        .bind(namespace)
+        .bind(workload_uid)
+        .bind(workload_kind)
+        .bind(workload_name)
+        .bind(container_name)
+        .bind(node_name)
+        .bind(unavailable_sources)
+        .bind(values)
+        .execute(executor)
+        .await
     }
 
     /// Folds one contribution's metric into its rollup bucket of `step`
     /// seconds: sums and weights add, minimum and maximum widen, the limit
     /// keeps its latest value, and replica counts keep their maximum.
-    #[allow(clippy::too_many_arguments)]
     pub async fn add_rollup_point<'e, E>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        release_key: Uuid,
-        release_id: Option<Uuid>,
-        container_name: &str,
-        interval_start: DateTime<Utc>,
-        step_seconds: i32,
-        metric: &str,
-        unit: &str,
-        value: f64,
-        value_weight: f64,
-        limit_value: Option<f64>,
-        covered_usec: i64,
-        expected_usec: i64,
-        sample_count: i64,
-        observed_replicas: i32,
-        ready_replicas: i32,
-        unavailable_sources: i64,
+        input: RollupPoint<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO resource_rollup_points(organization_id,project_id,application_id,release_key,release_id,container_name,bucket_start,step_seconds,metric,unit,value_sum,value_min,value_max,value_weight,limit_value,covered_usec,expected_usec,sample_count,contributor_count,observed_replicas,ready_replicas,unavailable_sources) VALUES($1,$2,$3,$4,$5,$6,to_timestamp(floor(extract(epoch from $7::timestamptz)/$8)*$8),$8,$9,$10,$11*$12,$11,$11,$12,$13,$14,$15,$16,1,$17,$18,$19) ON CONFLICT(application_id,release_key,container_name,bucket_start,step_seconds,metric) DO UPDATE SET value_sum=resource_rollup_points.value_sum+EXCLUDED.value_sum,value_min=LEAST(resource_rollup_points.value_min,EXCLUDED.value_min),value_max=GREATEST(resource_rollup_points.value_max,EXCLUDED.value_max),value_weight=resource_rollup_points.value_weight+EXCLUDED.value_weight,limit_value=COALESCE(EXCLUDED.limit_value,resource_rollup_points.limit_value),covered_usec=resource_rollup_points.covered_usec+EXCLUDED.covered_usec,expected_usec=resource_rollup_points.expected_usec+EXCLUDED.expected_usec,sample_count=resource_rollup_points.sample_count+EXCLUDED.sample_count,contributor_count=resource_rollup_points.contributor_count+1,observed_replicas=GREATEST(resource_rollup_points.observed_replicas,EXCLUDED.observed_replicas),ready_replicas=GREATEST(resource_rollup_points.ready_replicas,EXCLUDED.ready_replicas),unavailable_sources=resource_rollup_points.unavailable_sources|EXCLUDED.unavailable_sources,updated_at=now()")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_key)
-            .bind(release_id)
-            .bind(container_name)
-            .bind(interval_start)
-            .bind(step_seconds)
-            .bind(metric)
-            .bind(unit)
-            .bind(value)
-            .bind(value_weight)
-            .bind(limit_value)
-            .bind(covered_usec)
-            .bind(expected_usec)
-            .bind(sample_count)
-            .bind(observed_replicas)
-            .bind(ready_replicas)
-            .bind(unavailable_sources)
-            .execute(executor)
-            .await
+        let RollupPoint {
+            organization_id,
+            project_id,
+            application_id,
+            release_key,
+            release_id,
+            container_name,
+            interval_start,
+            step_seconds,
+            metric,
+            unit,
+            value,
+            value_weight,
+            limit_value,
+            covered_usec,
+            expected_usec,
+            sample_count,
+            observed_replicas,
+            ready_replicas,
+            unavailable_sources,
+        } = input;
+        sqlx::query(
+            "INSERT INTO resource_rollup_points(
+                 organization_id,project_id,application_id,release_key,release_id,
+                 container_name,bucket_start,step_seconds,metric,unit,value_sum,value_min,
+                 value_max,value_weight,limit_value,covered_usec,expected_usec,sample_count,
+                 contributor_count,observed_replicas,ready_replicas,unavailable_sources
+             )
+             VALUES(
+                 $1,$2,$3,$4,$5,$6,
+                 to_timestamp(floor(extract(epoch from $7::timestamptz)/$8)*$8),$8,$9,$10,
+                 $11*$12,$11,$11,$12,$13,$14,$15,$16,1,$17,$18,$19
+             )
+             ON CONFLICT(
+                 application_id,release_key,container_name,bucket_start,step_seconds,metric
+             )
+             DO UPDATE SET value_sum=resource_rollup_points.value_sum+EXCLUDED.value_sum,
+                 value_min=LEAST(resource_rollup_points.value_min,EXCLUDED.value_min),
+                 value_max=GREATEST(resource_rollup_points.value_max,EXCLUDED.value_max),
+                 value_weight=resource_rollup_points.value_weight+EXCLUDED.value_weight,
+                 limit_value=COALESCE(
+                     EXCLUDED.limit_value,resource_rollup_points.limit_value
+                 ),
+                 covered_usec=resource_rollup_points.covered_usec+EXCLUDED.covered_usec,
+                 expected_usec=resource_rollup_points.expected_usec+EXCLUDED.expected_usec,
+                 sample_count=resource_rollup_points.sample_count+EXCLUDED.sample_count,
+                 contributor_count=resource_rollup_points.contributor_count+1,
+                 observed_replicas=GREATEST(
+                     resource_rollup_points.observed_replicas,EXCLUDED.observed_replicas
+                 ),
+                 ready_replicas=GREATEST(
+                     resource_rollup_points.ready_replicas,EXCLUDED.ready_replicas
+                 ),
+                 unavailable_sources=resource_rollup_points.unavailable_sources|EXCLUDED.unavailable_sources,
+                 updated_at=now()",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_key)
+        .bind(release_id)
+        .bind(container_name)
+        .bind(interval_start)
+        .bind(step_seconds)
+        .bind(metric)
+        .bind(unit)
+        .bind(value)
+        .bind(value_weight)
+        .bind(limit_value)
+        .bind(covered_usec)
+        .bind(expected_usec)
+        .bind(sample_count)
+        .bind(observed_replicas)
+        .bind(ready_replicas)
+        .bind(unavailable_sources)
+        .execute(executor)
+        .await
     }
 
     /// The application's rollup points of one metric and step over
@@ -237,35 +423,64 @@ impl ResourceRepository {
     /// `covered_usec`, `expected_usec`, `sample_count`, `contributor_count`,
     /// `observed_replicas`, `ready_replicas`, `unavailable_sources`,
     /// `release_id`, `release_display_name` and `container_name`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn history<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        metric: &str,
-        step_seconds: i32,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-        release_id: Option<Uuid>,
-        container_name: Option<&str>,
+        input: ResourceHistoryQuery<'_>,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT p.bucket_start,p.unit,p.value_sum/p.value_weight value,p.limit_value,p.covered_usec,p.expected_usec,p.sample_count,p.contributor_count,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int observed_replicas,ceil(p.covered_usec::numeric/($5::bigint*1000000))::int ready_replicas,p.unavailable_sources,p.release_id,CASE WHEN r.id IS NULL THEN NULL ELSE release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) END release_display_name,p.container_name FROM resource_rollup_points p JOIN applications a ON a.id=p.application_id LEFT JOIN releases r ON r.id=p.release_id WHERE p.organization_id=$1 AND p.project_id=$2 AND p.application_id=$3 AND p.metric=$4 AND p.step_seconds=$5 AND p.bucket_start >= $6 AND p.bucket_start < $7 AND ($8::uuid IS NULL OR p.release_id=$8) AND ($9::text IS NULL OR p.container_name=$9) ORDER BY p.bucket_start,p.container_name,p.release_key LIMIT 45360")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(metric)
-            .bind(step_seconds)
-            .bind(from)
-            .bind(to)
-            .bind(release_id)
-            .bind(container_name)
-            .fetch_all(executor)
-            .await
+        let ResourceHistoryQuery {
+            organization_id,
+            project_id,
+            application_id,
+            metric,
+            step_seconds,
+            from,
+            to,
+            release_id,
+            container_name,
+        } = input;
+        sqlx::query_as(
+            "SELECT p.bucket_start,p.unit,p.value_sum/p.value_weight value,p.limit_value,
+                 p.covered_usec,p.expected_usec,p.sample_count,p.contributor_count,
+                 ceil(p.covered_usec::numeric/($5::bigint*1000000))::int observed_replicas,
+                 ceil(p.covered_usec::numeric/($5::bigint*1000000))::int ready_replicas,
+                 p.unavailable_sources,p.release_id,
+                 CASE
+                     WHEN r.id IS NULL THEN NULL
+                     ELSE release_display_name(
+                         a.name,r.source,r.version,r.identity_digest,r.identity_components
+                     )
+                 END release_display_name,
+                 p.container_name
+             FROM resource_rollup_points p
+             JOIN applications a ON a.id=p.application_id
+             LEFT JOIN releases r ON r.id=p.release_id
+             WHERE p.organization_id=$1
+                 AND p.project_id=$2
+                 AND p.application_id=$3
+                 AND p.metric=$4
+                 AND p.step_seconds=$5
+                 AND p.bucket_start >= $6
+                 AND p.bucket_start < $7
+                 AND ($8::uuid IS NULL OR p.release_id=$8)
+                 AND ($9::text IS NULL OR p.container_name=$9)
+             ORDER BY p.bucket_start,p.container_name,p.release_key
+             LIMIT 45360",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(metric)
+        .bind(step_seconds)
+        .bind(from)
+        .bind(to)
+        .bind(release_id)
+        .bind(container_name)
+        .fetch_all(executor)
+        .await
     }
 
     /// The release's latest deployment episode in the application.
@@ -283,13 +498,28 @@ impl ResourceRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id episode_id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.first_observed_at,e.first_ready_at FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 ORDER BY e.first_observed_at DESC,e.id DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id episode_id,e.release_id,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) release_display_name,
+                 e.first_observed_at,e.first_ready_at
+             FROM deployment_episodes e
+             JOIN releases r ON r.id=e.release_id
+             JOIN applications a ON a.id=e.application_id
+             WHERE e.organization_id=$1
+                 AND e.project_id=$2
+                 AND e.application_id=$3
+                 AND e.release_id=$4
+             ORDER BY e.first_observed_at DESC,e.id DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Up to two episodes an episode replaced, latest transition first, with
@@ -305,13 +535,29 @@ impl ResourceRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT p.id episode_id,p.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,p.first_observed_at,p.first_ready_at FROM deployment_episode_predecessors x JOIN deployment_episodes p ON p.id=x.predecessor_episode_id JOIN releases r ON r.id=p.release_id JOIN applications a ON a.id=p.application_id WHERE x.episode_id=$1 AND p.organization_id=$2 AND p.project_id=$3 AND p.application_id=$4 ORDER BY x.observed_at DESC,p.id DESC LIMIT 2")
-            .bind(episode_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT p.id episode_id,p.release_id,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) release_display_name,
+                 p.first_observed_at,p.first_ready_at
+             FROM deployment_episode_predecessors x
+             JOIN deployment_episodes p ON p.id=x.predecessor_episode_id
+             JOIN releases r ON r.id=p.release_id
+             JOIN applications a ON a.id=p.application_id
+             WHERE x.episode_id=$1
+                 AND p.organization_id=$2
+                 AND p.project_id=$3
+                 AND p.application_id=$4
+             ORDER BY x.observed_at DESC,p.id DESC
+             LIMIT 2",
+        )
+        .bind(episode_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// The latest ready deployment episode of each of the project's
@@ -328,11 +574,26 @@ impl ResourceRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT DISTINCT ON(e.application_id) e.organization_id,e.application_id,e.id episode_id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.first_observed_at,e.first_ready_at FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.first_ready_at IS NOT NULL ORDER BY e.application_id,e.first_observed_at DESC,e.id DESC LIMIT 64")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT DISTINCT ON(e.application_id) e.organization_id,e.application_id,
+                 e.id episode_id,e.release_id,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) release_display_name,
+                 e.first_observed_at,e.first_ready_at
+             FROM deployment_episodes e
+             JOIN releases r ON r.id=e.release_id
+             JOIN applications a ON a.id=e.application_id
+             WHERE e.organization_id=$1
+                 AND e.project_id=$2
+                 AND e.first_ready_at IS NOT NULL
+             ORDER BY e.application_id,e.first_observed_at DESC,e.id DESC
+             LIMIT 64",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// Counts a clean evaluation against the target release's open findings
@@ -348,52 +609,74 @@ impl ResourceRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE release_resource_findings SET clean_evaluations=LEAST(clean_evaluations+1,2),closed_at=CASE WHEN clean_evaluations+1>=2 THEN now() ELSE NULL END,updated_at=now() WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND target_release_id=$4 AND closed_at IS NULL AND NOT(id=ANY($5))")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(target_release_id)
-            .bind(active_ids)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE release_resource_findings
+             SET clean_evaluations=LEAST(clean_evaluations+1,2),
+                 closed_at=CASE WHEN clean_evaluations+1>=2 THEN now() ELSE NULL END,
+                 updated_at=now()
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND target_release_id=$4
+                 AND closed_at IS NULL
+                 AND NOT(id=ANY($5))",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(target_release_id)
+        .bind(active_ids)
+        .execute(executor)
+        .await
     }
 
     /// Opens a finding, or refreshes and reopens the existing one for the same
     /// release, reason, metric and rule version.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_finding<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        target_release_id: Uuid,
-        baseline_release_id: Uuid,
-        reason_code: &str,
-        priority: &str,
-        metric: &str,
-        rule_version: i16,
-        facts: Value,
-        opened_at: DateTime<Utc>,
+        input: ResourceFinding<'_>,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO release_resource_findings(id,organization_id,project_id,application_id,target_release_id,baseline_release_id,reason_code,priority,metric,rule_version,facts,opened_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(application_id,target_release_id,reason_code,metric,rule_version) DO UPDATE SET facts=EXCLUDED.facts,priority=EXCLUDED.priority,clean_evaluations=0,closed_at=NULL,updated_at=now()")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(target_release_id)
-            .bind(baseline_release_id)
-            .bind(reason_code)
-            .bind(priority)
-            .bind(metric)
-            .bind(rule_version)
-            .bind(facts)
-            .bind(opened_at)
-            .execute(executor)
-            .await
+        let ResourceFinding {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            target_release_id,
+            baseline_release_id,
+            reason_code,
+            priority,
+            metric,
+            rule_version,
+            facts,
+            opened_at,
+        } = input;
+        sqlx::query(
+            "INSERT INTO release_resource_findings(
+                 id,organization_id,project_id,application_id,target_release_id,
+                 baseline_release_id,reason_code,priority,metric,rule_version,facts,opened_at
+             )
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             ON CONFLICT(application_id,target_release_id,reason_code,metric,rule_version)
+             DO UPDATE SET facts=EXCLUDED.facts,priority=EXCLUDED.priority,
+                 clean_evaluations=0,closed_at=NULL,updated_at=now()",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(target_release_id)
+        .bind(baseline_release_id)
+        .bind(reason_code)
+        .bind(priority)
+        .bind(metric)
+        .bind(rule_version)
+        .bind(facts)
+        .bind(opened_at)
+        .execute(executor)
+        .await
     }
 
     /// Per-metric summary of a release's minute rollups over `[from, to)`.
@@ -414,15 +697,34 @@ impl ResourceRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT metric,min(unit) unit,sum(value_sum)/sum(value_weight) value,max(limit_value) limit_value,sum(covered_usec)::bigint covered_usec,sum(expected_usec)::bigint expected_usec,sum(sample_count)::bigint sample_count,sum(contributor_count)::bigint contributor_count,ceil(sum(covered_usec)::numeric/1800000000)::int observed_replicas,ceil(sum(covered_usec)::numeric/1800000000)::int ready_replicas,count(DISTINCT bucket_start)::bigint bucket_count FROM resource_rollup_points WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND release_id=$4 AND step_seconds=60 AND bucket_start >= $5 AND bucket_start < $6 GROUP BY metric ORDER BY metric")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .bind(from)
-            .bind(to)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT metric,min(unit) unit,sum(value_sum)/sum(value_weight) value,
+                 max(limit_value) limit_value,sum(covered_usec)::bigint covered_usec,
+                 sum(expected_usec)::bigint expected_usec,
+                 sum(sample_count)::bigint sample_count,
+                 sum(contributor_count)::bigint contributor_count,
+                 ceil(sum(covered_usec)::numeric/1800000000)::int observed_replicas,
+                 ceil(sum(covered_usec)::numeric/1800000000)::int ready_replicas,
+                 count(DISTINCT bucket_start)::bigint bucket_count
+             FROM resource_rollup_points
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND release_id=$4
+                 AND step_seconds=60
+                 AND bucket_start >= $5
+                 AND bucket_start < $6
+             GROUP BY metric
+             ORDER BY metric",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .bind(from)
+        .bind(to)
+        .fetch_all(executor)
+        .await
     }
 
     /// A release's minute buckets over `[from, to)` with at least 80%
@@ -442,20 +744,34 @@ impl ResourceRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT metric,bucket_start,sum(value_sum)/sum(value_weight) value FROM resource_rollup_points WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND release_id=$4 AND step_seconds=60 AND bucket_start >= $5 AND bucket_start < $6 GROUP BY metric,bucket_start HAVING sum(covered_usec)::double precision/sum(expected_usec)>=0.8 ORDER BY metric,bucket_start")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .bind(from)
-            .bind(to)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT metric,bucket_start,sum(value_sum)/sum(value_weight) value
+             FROM resource_rollup_points
+             WHERE organization_id=$1
+                 AND project_id=$2
+                 AND application_id=$3
+                 AND release_id=$4
+                 AND step_seconds=60
+                 AND bucket_start >= $5
+                 AND bucket_start < $6
+             GROUP BY metric,bucket_start
+             HAVING sum(covered_usec)::double precision/sum(expected_usec)>=0.8
+             ORDER BY metric,bucket_start",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .bind(from)
+        .bind(to)
+        .fetch_all(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{NewResourceContribution, ResourceFinding, ResourceHistoryQuery, RollupPoint};
     use chrono::{DateTime, Duration, DurationRound, Utc};
     use serde_json::json;
     use sqlx::{FromRow, PgPool};
@@ -522,25 +838,27 @@ mod tests {
     ) {
         ResourceRepository::add_rollup_point(
             pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            release_id.unwrap_or(Uuid::nil()),
-            release_id,
-            "app",
-            at,
-            step,
-            metric,
-            "cores",
-            value,
-            60_000_000.0,
-            None,
-            covered_seconds * 1_000_000,
-            60_000_000,
-            6,
-            1,
-            1,
-            0,
+            RollupPoint {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                release_key: release_id.unwrap_or(Uuid::nil()),
+                release_id,
+                container_name: "app",
+                interval_start: at,
+                step_seconds: step,
+                metric,
+                unit: "cores",
+                value,
+                value_weight: 60_000_000.0,
+                limit_value: None,
+                covered_usec: covered_seconds * 1_000_000,
+                expected_usec: 60_000_000,
+                sample_count: 6,
+                observed_replicas: 1,
+                ready_replicas: 1,
+                unavailable_sources: 0,
+            },
         )
         .await
         .unwrap();
@@ -555,15 +873,17 @@ mod tests {
     ) -> Vec<HistoryPoint> {
         ResourceRepository::history(
             pool,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            "cpu",
-            step,
-            minute() - Duration::days(30),
-            Utc::now(),
-            release_id,
-            container,
+            ResourceHistoryQuery {
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                metric: "cpu",
+                step_seconds: step,
+                from: minute() - Duration::days(30),
+                to: Utc::now(),
+                release_id,
+                container_name: container,
+            },
         )
         .await
         .unwrap()
@@ -581,27 +901,29 @@ mod tests {
         let insert = || {
             ResourceRepository::insert_contribution(
                 &pool,
-                contribution,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                own.cluster_id,
-                own.agent_id,
-                None,
-                1,
-                start,
-                start + Duration::minutes(1),
-                60_000_000,
-                6,
-                1,
-                "production",
-                "workload-a",
-                "Deployment",
-                "app",
-                "app",
-                "node-a",
-                0,
-                json!({}),
+                NewResourceContribution {
+                    id: contribution,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    cluster_id: own.cluster_id,
+                    agent_id: own.agent_id,
+                    release_id: None,
+                    schema_version: 1,
+                    interval_start: start,
+                    interval_end: start + Duration::minutes(1),
+                    covered_usec: 60_000_000,
+                    sample_count: 6,
+                    contributing_containers: 1,
+                    namespace: "production",
+                    workload_uid: "workload-a",
+                    workload_kind: "Deployment",
+                    workload_name: "app",
+                    container_name: "app",
+                    node_name: "node-a",
+                    unavailable_sources: 0,
+                    values: json!({}),
+                },
             )
         };
         assert_eq!(insert().await.unwrap().rows_affected(), 1);
@@ -671,7 +993,9 @@ mod tests {
         );
         let horizon = || async {
             sqlx::query_as::<_, (Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
-                "SELECT resource_closed_before,resource_rollup_expired_before FROM projects WHERE id=$1",
+                "SELECT resource_closed_before,resource_rollup_expired_before
+                 FROM projects
+                 WHERE id=$1",
             )
             .bind(own.project_id)
             .fetch_one(&pool)
@@ -887,18 +1211,20 @@ mod tests {
         let upsert = || {
             ResourceRepository::upsert_finding(
                 &pool,
-                finding,
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                target,
-                baseline,
-                "memory_limit_pressure",
-                "high",
-                "memory",
-                1,
-                json!({"finding_id": finding}),
-                now,
+                ResourceFinding {
+                    id: finding,
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    target_release_id: target,
+                    baseline_release_id: baseline,
+                    reason_code: "memory_limit_pressure",
+                    priority: "high",
+                    metric: "memory",
+                    rule_version: 1,
+                    facts: json!({"finding_id": finding}),
+                    opened_at: now,
+                },
             )
         };
         let open = || {

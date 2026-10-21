@@ -75,14 +75,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(ids.organization_id)
-        .bind(token.digest().as_slice())
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 async fn json(response: axum::response::Response) -> serde_json::Value {
@@ -95,12 +98,35 @@ async fn release(
     deployed_at: chrono::DateTime<Utc>,
 ) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at) VALUES($1,$2,$3,$4,$5,$6)").bind(id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(version).bind(deployed_at).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO releases(
+             id,organization_id,project_id,application_id,version,deployed_at
+         )
+         VALUES($1,$2,$3,$4,$5,$6)",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(version)
+    .bind(deployed_at)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 async fn agent(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node','test')").bind(id).bind(ids.organization_id).bind(ids.cluster_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node','test')",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 fn event(
@@ -377,8 +403,25 @@ async fn organization_response_and_query_plan_remain_bounded(pool: sqlx::PgPool)
             .await
             .unwrap();
     }
-    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT p.id,(SELECT count(*) FROM webhook_destinations w WHERE w.organization_id=p.organization_id AND w.project_id=p.id AND w.enabled) FROM projects p WHERE p.organization_id=$1 ORDER BY p.id LIMIT 5")
-        .bind(ids.organization_id).fetch_one(&pool).await.unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         SELECT p.id,
+             (
+                 SELECT count(*)
+                 FROM webhook_destinations w
+                 WHERE w.organization_id=p.organization_id
+                     AND w.project_id=p.id
+                     AND w.enabled
+             )
+         FROM projects p
+         WHERE p.organization_id=$1
+         ORDER BY p.id
+         LIMIT 5",
+    )
+    .bind(ids.organization_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let plan_text = plan.to_string();
     assert!(plan_text.contains("Execution Time"));
     assert!(plan_text.contains("Plan"));

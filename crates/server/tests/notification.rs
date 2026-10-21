@@ -161,8 +161,16 @@ async fn tenant(
 ) -> (server::bootstrap::BootstrapIds, IngestionContext) {
     let ids = bootstrap(pool, &config(name)).await.unwrap();
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(pool)
+    .await
+    .unwrap();
     let context = IngestionContext {
         scope: SessionScope {
             organization_id: ids.organization_id,
@@ -191,14 +199,17 @@ async fn user_session(pool: &sqlx::PgPool, organization_id: Uuid, email: &str) -
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4())
-        .bind(user_id)
-        .bind(organization_id)
-        .bind(token.digest().to_vec())
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -284,8 +295,20 @@ async fn destination_schema_lifecycle_and_tenant_ownership(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert_eq!(materialize_once(&service).await.unwrap().no_destinations, 1);
-    let ownership_error = sqlx::query("INSERT INTO webhook_destinations (id,organization_id,project_id,name,url,encrypted_secret,secret_nonce) VALUES ($1,$2,$3,'bad','https://example.com',decode('00','hex'),decode(repeat('00',24),'hex'))")
-        .bind(Uuid::new_v4()).bind(first.organization_id).bind(second.project_id).execute(&pool).await;
+    let ownership_error = sqlx::query(
+        "INSERT INTO webhook_destinations (
+             id,organization_id,project_id,name,url,encrypted_secret,secret_nonce
+         )
+         VALUES (
+             $1,$2,$3,'bad','https://example.com',decode('00','hex'),
+             decode(repeat('00',24),'hex')
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(first.organization_id)
+    .bind(second.project_id)
+    .execute(&pool)
+    .await;
     assert!(ownership_error.is_err());
 }
 
@@ -373,8 +396,23 @@ async fn project_health_snapshot_covers_durable_states(pool: sqlx::PgPool) {
     );
 
     let delivery_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO notification_deliveries(id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,available_at,attempt_count,max_attempts) VALUES($1,$2,$3,$4,'test','test','okoscope.test','{}','pending',now()+interval '1 minute',0,3)")
-        .bind(delivery_id).bind(ids.organization_id).bind(ids.project_id).bind(destination.id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO notification_deliveries(
+             id,organization_id,project_id,destination_id,origin,source,event_name,
+             payload,status,available_at,attempt_count,max_attempts
+         )
+         VALUES(
+             $1,$2,$3,$4,'test','test','okoscope.test','{}','pending',
+             now()+interval '1 minute',0,3
+         )",
+    )
+    .bind(delivery_id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(destination.id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let future = load_project_snapshot(&pool, ids.organization_id, ids.project_id)
         .await
         .unwrap();
@@ -385,8 +423,15 @@ async fn project_health_snapshot_covers_durable_states(pool: sqlx::PgPool) {
         NotificationHealthResponse::from_snapshot(true, false, &future).state,
         NotificationHealthState::Backlogged
     );
-    sqlx::query("UPDATE notification_deliveries SET available_at=now()-interval '5 seconds',attempt_count=1 WHERE id=$1")
-        .bind(delivery_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE notification_deliveries
+         SET available_at=now()-interval '5 seconds',attempt_count=1
+         WHERE id=$1",
+    )
+    .bind(delivery_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let retrying = load_project_snapshot(&pool, ids.organization_id, ids.project_id)
         .await
         .unwrap();
@@ -399,8 +444,16 @@ async fn project_health_snapshot_covers_durable_states(pool: sqlx::PgPool) {
         NotificationHealthState::Retrying
     );
 
-    sqlx::query("UPDATE notification_deliveries SET status='in_flight',lease_owner=$2,lease_expires_at=now()-interval '1 second' WHERE id=$1")
-        .bind(delivery_id).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE notification_deliveries
+         SET status='in_flight',lease_owner=$2,lease_expires_at=now()-interval '1 second'
+         WHERE id=$1",
+    )
+    .bind(delivery_id)
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
     let draining = load_project_snapshot(&pool, ids.organization_id, ids.project_id)
         .await
         .unwrap();
@@ -410,8 +463,15 @@ async fn project_health_snapshot_covers_durable_states(pool: sqlx::PgPool) {
         NotificationHealthState::Draining
     );
 
-    sqlx::query("UPDATE notification_deliveries SET status='failed',lease_owner=NULL,lease_expires_at=NULL,terminal_at=now() WHERE id=$1")
-        .bind(delivery_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE notification_deliveries
+         SET status='failed',lease_owner=NULL,lease_expires_at=NULL,terminal_at=now()
+         WHERE id=$1",
+    )
+    .bind(delivery_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let failed = load_project_snapshot(&pool, ids.organization_id, ids.project_id)
         .await
         .unwrap();
@@ -954,9 +1014,30 @@ async fn failed_delivery(
     let id = Uuid::new_v4();
     let terminal = matches!(status, "failed" | "succeeded" | "cancelled");
     let in_flight = status == "in_flight";
-    sqlx::query("INSERT INTO notification_deliveries(id,organization_id,project_id,destination_id,origin,source,event_name,payload,status,lease_owner,lease_expires_at,attempt_count,max_attempts,terminal_at,last_error_class,last_error) VALUES($1,$2,$3,$4,'test','test','okoscope.test','{}',$5,$6,CASE WHEN $6::uuid IS NULL THEN NULL ELSE now()+interval '1 minute' END,1,3,CASE WHEN $7 THEN now() ELSE NULL END,CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END,CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END)")
-        .bind(id).bind(ids.organization_id).bind(ids.project_id).bind(destination_id).bind(status)
-        .bind(in_flight.then(Uuid::new_v4)).bind(terminal).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO notification_deliveries(
+             id,organization_id,project_id,destination_id,origin,source,event_name,
+             payload,status,lease_owner,lease_expires_at,attempt_count,max_attempts,
+             terminal_at,last_error_class,last_error
+         )
+         VALUES(
+             $1,$2,$3,$4,'test','test','okoscope.test','{}',$5,$6,
+             CASE WHEN $6::uuid IS NULL THEN NULL ELSE now()+interval '1 minute' END,1,3,
+             CASE WHEN $7 THEN now() ELSE NULL END,
+             CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END,
+             CASE WHEN $5='failed' THEN 'timeout' ELSE NULL END
+         )",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(destination_id)
+    .bind(status)
+    .bind(in_flight.then(Uuid::new_v4))
+    .bind(terminal)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 

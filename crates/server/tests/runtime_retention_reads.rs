@@ -125,8 +125,16 @@ fn event(
 
 async fn agent(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'node','test')")
-        .bind(id).bind(ids.organization_id).bind(ids.cluster_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version)
+         VALUES($1,$2,$3,'node','test')",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -148,9 +156,17 @@ async fn owner_session(pool: &sqlx::PgPool, ids: &BootstrapIds) -> String {
     .await
     .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(ids.organization_id)
-        .bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -186,7 +202,16 @@ async fn fixture(pool: &sqlx::PgPool) -> Fixture {
         event(&ids, Some("target"), "/new", now - Duration::days(8)),
     ];
     assert_eq!(persist_batch(pool, context, &events).await.unwrap(), 4);
-    sqlx::query("UPDATE organizations SET runtime_retention_enabled=true,runtime_retention_raw_days=1,runtime_retention_history_days=365 WHERE id=$1").bind(ids.organization_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE organizations
+         SET runtime_retention_enabled=true,runtime_retention_raw_days=1,
+             runtime_retention_history_days=365
+         WHERE id=$1",
+    )
+    .bind(ids.organization_id)
+    .execute(pool)
+    .await
+    .unwrap();
     Fixture {
         ids,
         token,
@@ -270,7 +295,17 @@ async fn compaction_preserves_release_evidence_and_expiry_marks_unknown(pool: sq
 #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
 async fn inventory_detail_is_raw_only_after_compaction(pool: sqlx::PgPool) {
     let f = fixture(&pool).await;
-    let item:Uuid=sqlx::query_scalar("SELECT id FROM runtime_inventory_items WHERE project_id=$1 AND semantic_summary::text LIKE '%shared%' LIMIT 1").bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
+    let item: Uuid = sqlx::query_scalar(
+        "SELECT id
+         FROM runtime_inventory_items
+         WHERE project_id=$1
+             AND semantic_summary::text LIKE '%shared%'
+         LIMIT 1",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let fresh = event(&f.ids, Some("target"), "/shared", f.now);
     assert_eq!(persist_batch(&pool, f.context, &[fresh]).await.unwrap(), 1);
     assert_eq!(compact(&pool, &f).await, 4);
@@ -333,7 +368,16 @@ async fn failed_delete_rolls_back_snapshots_then_retry_is_exact(pool: sqlx::PgPo
             .await
             .unwrap();
     assert_eq!((raw, snapshots), (4, 0));
-    let refs:i64=sqlx::query_scalar("SELECT count(*) FROM runtime_event_groups WHERE project_id=$1 AND representative_event_id IS NOT NULL").bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM runtime_event_groups
+         WHERE project_id=$1
+             AND representative_event_id IS NOT NULL",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(refs, 3);
     sqlx::query("DROP TRIGGER fail_retention_delete ON runtime_events")
         .execute(&pool)
@@ -430,7 +474,13 @@ async fn equal_horizons_and_exact_boundary(pool: sqlx::PgPool) {
     ];
     persist_batch(&pool, f.context, &events).await.unwrap();
     assert_eq!(compact(&pool, &f).await, 5);
-    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM runtime_events),(SELECT count(*) FROM runtime_history_snapshots)").fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM runtime_events),
+             (SELECT count(*) FROM runtime_history_snapshots)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (1, 0));
     let closed: chrono::DateTime<Utc> =
         sqlx::query_scalar("SELECT runtime_closed_before FROM projects WHERE id=$1")
@@ -439,7 +489,16 @@ async fn equal_horizons_and_exact_boundary(pool: sqlx::PgPool) {
             .await
             .unwrap();
     assert_eq!(closed, boundary);
-    sqlx::query("UPDATE organizations SET runtime_retention_enabled=false,runtime_retention_raw_days=365,runtime_retention_history_days=NULL WHERE id=$1").bind(f.ids.organization_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE organizations
+         SET runtime_retention_enabled=false,runtime_retention_raw_days=365,
+             runtime_retention_history_days=NULL
+         WHERE id=$1",
+    )
+    .bind(f.ids.organization_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(compact(&pool, &f).await, 0);
     assert_eq!(
         persist_batch(&pool, f.context, &events[1..]).await.unwrap(),
@@ -463,7 +522,14 @@ async fn null_release_buckets_and_ingestion_serialization(pool: sqlx::PgPool) {
     );
     assert_eq!(worker_result, 6);
     assert_eq!(ingestion_result.unwrap(), 1);
-    let counts:(i64,i64)=sqlx::query_as("SELECT count(*),sum(occurrence_count)::bigint FROM runtime_history_snapshots WHERE release_id IS NULL").fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),sum(occurrence_count)::bigint
+         FROM runtime_history_snapshots
+         WHERE release_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (1, 2));
     let mut tx = pool.begin().await.unwrap();
     let credential = server::application_credentials::issue(
@@ -531,7 +597,20 @@ async fn measured_bounded_compaction_workload(pool: sqlx::PgPool) {
         "retention workload: {deleted} events, {batches} bounded batches, {:?}, {buckets} bulk bucket",
         started.elapsed()
     );
-    let plan:Vec<(String,)>=sqlx::query_as("EXPLAIN SELECT id FROM runtime_events WHERE project_id=$1 AND observed_at<now() ORDER BY observed_at,id LIMIT 100 FOR UPDATE").bind(f.ids.project_id).fetch_all(&pool).await.unwrap();
+    let plan: Vec<(String,)> = sqlx::query_as(
+        "EXPLAIN
+         SELECT id
+         FROM runtime_events
+         WHERE project_id=$1
+             AND observed_at<now()
+         ORDER BY observed_at,id
+         LIMIT 100
+         FOR UPDATE",
+    )
+    .bind(f.ids.project_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
     eprintln!("retention selection plan: {plan:?}");
 }
 
@@ -540,20 +619,92 @@ async fn measured_bounded_compaction_workload(pool: sqlx::PgPool) {
 async fn measured_single_group_retention_workload(pool: sqlx::PgPool) {
     let f = fixture(&pool).await;
     let copies = 20_000_i64;
-    let source: (Uuid, Uuid, Uuid) = sqlx::query_as("SELECT e.id,g.group_id,i.item_id FROM runtime_events e JOIN runtime_event_group_memberships g ON g.event_id=e.id JOIN runtime_inventory_event_memberships i ON i.event_id=e.id WHERE e.project_id=$1 LIMIT 1")
-        .bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
-    sqlx::query("INSERT INTO runtime_events SELECT (jsonb_populate_record(NULL::runtime_events,to_jsonb(e)||jsonb_build_object('id',gen_random_uuid(),'event_id',gen_random_uuid()))).* FROM runtime_events e CROSS JOIN generate_series(1,$2) WHERE e.id=$1")
-        .bind(source.0).bind(copies).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO runtime_event_group_memberships(organization_id,project_id,application_id,event_id,group_id,fingerprint_version,release_id) SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,1,e.release_id FROM runtime_events e WHERE e.project_id=$1 AND NOT EXISTS(SELECT 1 FROM runtime_event_group_memberships m WHERE m.event_id=e.id)")
-        .bind(f.ids.project_id).bind(source.1).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO runtime_inventory_event_memberships(organization_id,project_id,application_id,event_id,item_id,identity_version) SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,2 FROM runtime_events e WHERE e.project_id=$1 AND NOT EXISTS(SELECT 1 FROM runtime_inventory_event_memberships m WHERE m.event_id=e.id)")
-        .bind(f.ids.project_id).bind(source.2).execute(&pool).await.unwrap();
+    let source: (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT e.id,g.group_id,i.item_id
+         FROM runtime_events e
+         JOIN runtime_event_group_memberships g ON g.event_id=e.id
+         JOIN runtime_inventory_event_memberships i ON i.event_id=e.id
+         WHERE e.project_id=$1
+         LIMIT 1",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_events
+         SELECT (
+             jsonb_populate_record(
+                 NULL::runtime_events,
+                 to_jsonb(e)||jsonb_build_object(
+                     'id',gen_random_uuid(),'event_id',gen_random_uuid()
+                 )
+             )
+         ).*
+         FROM runtime_events e
+         CROSS JOIN generate_series(1,$2)
+         WHERE e.id=$1",
+    )
+    .bind(source.0)
+    .bind(copies)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_event_group_memberships(
+             organization_id,project_id,application_id,event_id,group_id,
+             fingerprint_version,release_id
+         )
+         SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,1,e.release_id
+         FROM runtime_events e
+         WHERE e.project_id=$1
+             AND NOT EXISTS(
+                 SELECT 1
+                 FROM runtime_event_group_memberships m
+                 WHERE m.event_id=e.id
+             )",
+    )
+    .bind(f.ids.project_id)
+    .bind(source.1)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_inventory_event_memberships(
+             organization_id,project_id,application_id,event_id,item_id,identity_version
+         )
+         SELECT e.organization_id,e.project_id,e.application_id,e.id,$2,2
+         FROM runtime_events e
+         WHERE e.project_id=$1
+             AND NOT EXISTS(
+                 SELECT 1
+                 FROM runtime_inventory_event_memberships m
+                 WHERE m.event_id=e.id
+             )",
+    )
+    .bind(f.ids.project_id)
+    .bind(source.2)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("ANALYZE runtime_events")
         .execute(&pool)
         .await
         .unwrap();
-    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT id FROM runtime_events WHERE project_id=$1 AND observed_at<$2 ORDER BY observed_at,id LIMIT 500")
-        .bind(f.ids.project_id).bind(f.now-Duration::days(1)).fetch_one(&pool).await.unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         SELECT id
+         FROM runtime_events
+         WHERE project_id=$1
+             AND observed_at<$2
+         ORDER BY observed_at,id
+         LIMIT 500",
+    )
+    .bind(f.ids.project_id)
+    .bind(f.now - Duration::days(1))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let mut durations = Vec::new();
     let mut total = 0;
     loop {
@@ -570,8 +721,15 @@ async fn measured_single_group_retention_workload(pool: sqlx::PgPool) {
         total += count;
     }
     assert_eq!(total, u64::try_from(copies).unwrap() + 4);
-    let stats: (i64,i64) = sqlx::query_as("SELECT count(*),sum(occurrence_count)::bigint FROM runtime_history_snapshots WHERE project_id=$1")
-        .bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
+    let stats: (i64, i64) = sqlx::query_as(
+        "SELECT count(*),sum(occurrence_count)::bigint
+         FROM runtime_history_snapshots
+         WHERE project_id=$1",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert!(stats.0 <= 4);
     assert_eq!(stats.1, copies + 4);
     durations.sort_unstable();
@@ -592,14 +750,44 @@ async fn policy_shells_pending_notifications_and_orphan_cleanup(pool: sqlx::PgPo
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO runtime_policy_suppressions(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,behavior_matcher,reason,expires_at,source_inventory_item_id,source_runtime_group_id,created_by_user_id) SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,i.inventory_kind,i.identity_version,i.identity_digest,'{}'::jsonb,'test',now()+interval '1 day',i.id,$2,(SELECT user_id FROM organization_memberships WHERE organization_id=i.organization_id LIMIT 1) FROM runtime_inventory_items i WHERE i.id=$1").bind(item).bind(group).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_policy_suppressions(
+             id,organization_id,project_id,application_id,inventory_kind,
+             identity_version,identity_digest,behavior_matcher,reason,expires_at,
+             source_inventory_item_id,source_runtime_group_id,created_by_user_id
+         )
+         SELECT gen_random_uuid(),i.organization_id,i.project_id,i.application_id,
+             i.inventory_kind,i.identity_version,i.identity_digest,'{}'::jsonb,'test',
+             now()+interval '1 day',i.id,$2,
+             (
+                 SELECT user_id
+                 FROM organization_memberships
+                 WHERE organization_id=i.organization_id
+                 LIMIT 1
+             )
+         FROM runtime_inventory_items i
+         WHERE i.id=$1",
+    )
+    .bind(item)
+    .bind(group)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE organizations SET runtime_retention_history_days=1 WHERE id=$1")
         .bind(f.ids.organization_id)
         .execute(&pool)
         .await
         .unwrap();
     compact(&pool, &f).await;
-    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT occurrence_count FROM runtime_inventory_items WHERE id=$1),(SELECT occurrence_count FROM runtime_event_groups WHERE id=$2)").bind(item).bind(group).fetch_one(&pool).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT occurrence_count FROM runtime_inventory_items WHERE id=$1),
+             (SELECT occurrence_count FROM runtime_event_groups WHERE id=$2)",
+    )
+    .bind(item)
+    .bind(group)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(counts, (0, 0));
     let pending: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox_messages WHERE project_id=$1 AND processed_at IS NULL",
@@ -659,9 +847,26 @@ async fn derived_restart_counts_survive_without_payload_archive(pool: sqlx::PgPo
         })
         .collect();
     persist_batch(&pool, f.context, &events).await.unwrap();
-    let group:Uuid=sqlx::query_scalar("SELECT id FROM runtime_event_groups WHERE project_id=$1 AND event_kind='container.restart_loop'").bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
+    let group: Uuid = sqlx::query_scalar(
+        "SELECT id
+         FROM runtime_event_groups
+         WHERE project_id=$1
+             AND event_kind='container.restart_loop'",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(compact(&pool, &f).await, 7);
-    let row:(i64,Option<Uuid>,serde_json::Value)=sqlx::query_as("SELECT occurrence_count,representative_event_id,semantic_summary FROM runtime_event_groups WHERE id=$1").bind(group).fetch_one(&pool).await.unwrap();
+    let row: (i64, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+        "SELECT occurrence_count,representative_event_id,semantic_summary
+         FROM runtime_event_groups
+         WHERE id=$1",
+    )
+    .bind(group)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0, 1);
     assert!(row.1.is_none());
     assert!(row.2.get("latest_termination").is_none());
@@ -694,7 +899,20 @@ async fn counterpart_expiry_marks_incomplete_instead_of_absent(pool: sqlx::PgPoo
     .fetch_all(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO runtime_event_correlations(organization_id,project_id,lifecycle_event_id,kernel_event_id,correlation_kind) VALUES($1,$2,$3,$4,'qualified')").bind(f.ids.organization_id).bind(f.ids.project_id).bind(ids[0]).bind(ids[1]).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_event_correlations(
+             organization_id,project_id,lifecycle_event_id,kernel_event_id,
+             correlation_kind
+         )
+         VALUES($1,$2,$3,$4,'qualified')",
+    )
+    .bind(f.ids.organization_id)
+    .bind(f.ids.project_id)
+    .bind(ids[0])
+    .bind(ids[1])
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         worker::process_project(&pool, f.ids.organization_id, f.ids.project_id, f.now, 1)
             .await
@@ -739,6 +957,15 @@ async fn ungrouped_history_waits_for_serialized_backfill(pool: sqlx::PgPool) {
         tokio::join!(server::backfill::run(&pool, options), compact(&pool, &f));
     assert_eq!(backfill.unwrap().grouped, 4);
     assert_eq!(worker + compact(&pool, &f).await, 4);
-    let total:i64=sqlx::query_scalar("SELECT sum(occurrence_count)::bigint FROM runtime_history_snapshots WHERE project_id=$1 AND release_id IS NOT NULL").bind(f.ids.project_id).fetch_one(&pool).await.unwrap();
+    let total: i64 = sqlx::query_scalar(
+        "SELECT sum(occurrence_count)::bigint
+         FROM runtime_history_snapshots
+         WHERE project_id=$1
+             AND release_id IS NOT NULL",
+    )
+    .bind(f.ids.project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(total, 4);
 }

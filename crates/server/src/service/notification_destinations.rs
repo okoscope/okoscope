@@ -5,7 +5,9 @@
 //! [`super::notifications`].
 
 use crate::repository::notification_deliveries::NotificationDeliveryRepository;
-use crate::repository::webhook_destinations::WebhookDestinationRepository;
+use crate::repository::webhook_destinations::{
+    NewWebhookDestination, WebhookDestinationRepository, WebhookDestinationUpdate,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{FromRow, PgPool};
@@ -126,14 +128,16 @@ impl DestinationService {
         let encrypted = self.vault.encrypt(secret.as_bytes())?;
         let destination = WebhookDestinationRepository::insert(
             &self.pool,
-            Uuid::new_v4(),
-            organization_id,
-            project_id,
-            name.trim(),
-            url,
-            encrypted.ciphertext,
-            encrypted.nonce.as_slice(),
-            deliver_backfill,
+            NewWebhookDestination {
+                id: Uuid::new_v4(),
+                organization_id,
+                project_id,
+                name: name.trim(),
+                url,
+                encrypted_secret: encrypted.ciphertext,
+                secret_nonce: encrypted.nonce.as_slice(),
+                deliver_backfill,
+            },
         )
         .await
         .map_err(name_conflict)?;
@@ -152,14 +156,16 @@ impl DestinationService {
         }
         let destination = WebhookDestinationRepository::update(
             &self.pool,
-            organization_id,
-            project_id,
-            id,
-            update.name.map(str::trim),
-            update.url,
-            update.deliver_backfill,
-            update.enabled,
-            update.expected_revision,
+            WebhookDestinationUpdate {
+                organization_id,
+                project_id,
+                destination_id: id,
+                name: update.name.map(str::trim),
+                url: update.url,
+                deliver_backfill: update.deliver_backfill,
+                enabled: update.enabled,
+                expected_revision: update.expected_revision,
+            },
         )
         .await
         .map_err(name_conflict)?;

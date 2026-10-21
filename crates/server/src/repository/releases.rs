@@ -40,6 +40,44 @@ pub mod aggregates {
            AND r.application_id=a.id)";
 }
 
+/// Input to [`ReleaseRepository::insert_observed`].
+#[derive(Debug)]
+pub struct ObservedRelease<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub version: String,
+    pub deployed_at: DateTime<Utc>,
+    pub identity_version: i16,
+    pub identity_digest: &'a [u8],
+    pub identity_components: serde_json::Value,
+}
+
+/// Input to [`ReleaseRepository::create_manual`].
+#[derive(Debug)]
+pub struct ManualRelease<'a> {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub version: &'a str,
+    pub description: Option<String>,
+    pub deployed_at: DateTime<Utc>,
+}
+
+/// Input to [`ReleaseRepository::diff_page`].
+#[derive(Debug)]
+pub struct DiffPageQuery {
+    pub baseline_id: Option<Uuid>,
+    pub target_id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub application_id: Uuid,
+    pub cursor_id: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
 /// Queries against the `releases` table.
 #[derive(Clone, Copy, Debug)]
 pub struct ReleaseRepository;
@@ -47,34 +85,50 @@ pub struct ReleaseRepository;
 impl ReleaseRepository {
     /// Records a release discovered from a workload revision, or returns the
     /// application's release with the same identity.
-    #[allow(clippy::too_many_arguments)]
     pub async fn insert_observed<'e, E>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        version: String,
-        deployed_at: DateTime<Utc>,
-        identity_version: i16,
-        identity_digest: &[u8],
-        identity_components: serde_json::Value,
+        input: ObservedRelease<'_>,
     ) -> Result<Uuid, sqlx::Error>
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("INSERT INTO releases(id,organization_id,project_id,application_id,version,deployed_at,source,identity_version,identity_digest,identity_components) VALUES($1,$2,$3,$4,$5,$6,'observed',$7,$8,$9) ON CONFLICT(application_id,version) DO UPDATE SET identity_components=EXCLUDED.identity_components WHERE releases.organization_id=EXCLUDED.organization_id AND releases.project_id=EXCLUDED.project_id AND releases.source='observed' AND releases.identity_version=EXCLUDED.identity_version AND releases.identity_digest=EXCLUDED.identity_digest RETURNING id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(version)
-            .bind(deployed_at)
-            .bind(identity_version)
-            .bind(identity_digest)
-            .bind(identity_components)
-            .fetch_one(executor)
-            .await
+        let ObservedRelease {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            version,
+            deployed_at,
+            identity_version,
+            identity_digest,
+            identity_components,
+        } = input;
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO releases(
+                 id,organization_id,project_id,application_id,version,deployed_at,source,
+                 identity_version,identity_digest,identity_components
+             )
+             VALUES($1,$2,$3,$4,$5,$6,'observed',$7,$8,$9)
+             ON CONFLICT(application_id,version)
+             DO UPDATE SET identity_components=EXCLUDED.identity_components
+             WHERE releases.organization_id=EXCLUDED.organization_id
+                 AND releases.project_id=EXCLUDED.project_id
+                 AND releases.source='observed'
+                 AND releases.identity_version=EXCLUDED.identity_version
+                 AND releases.identity_digest=EXCLUDED.identity_digest
+             RETURNING id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(version)
+        .bind(deployed_at)
+        .bind(identity_version)
+        .bind(identity_digest)
+        .bind(identity_components)
+        .fetch_one(executor)
+        .await
     }
 
     /// Creates a manual release and returns it with its display name.
@@ -82,31 +136,51 @@ impl ReleaseRepository {
     /// A version already used by the application violates
     /// `UNIQUE (application_id, version)`; the caller reports that as a
     /// conflict. Selects the columns of the releases API's release view.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_manual<'e, E, T>(
         executor: E,
-        id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        version: &str,
-        description: Option<String>,
-        deployed_at: DateTime<Utc>,
+        input: ManualRelease<'_>,
     ) -> Result<T, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH inserted AS (INSERT INTO releases (id,organization_id,project_id,application_id,version,description,deployed_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *) SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,0::bigint revision_count,0::bigint active_episode_count FROM inserted r JOIN applications a ON a.id=r.application_id")
-            .bind(id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(version)
-            .bind(description)
-            .bind(deployed_at)
-            .fetch_one(executor)
-            .await
+        let ManualRelease {
+            id,
+            organization_id,
+            project_id,
+            application_id,
+            version,
+            description,
+            deployed_at,
+        } = input;
+        sqlx::query_as(
+            "WITH inserted AS (
+                 INSERT INTO releases (
+                     id,organization_id,project_id,application_id,version,description,
+                     deployed_at
+                 )
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)
+                 RETURNING *
+             )
+             SELECT r.id,r.project_id,r.application_id,r.version,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) display_name,
+                 r.description,r.deployed_at,r.created_at,r.source,r.identity_version,
+                 encode(r.identity_digest,'hex') identity_digest,r.identity_components,
+                 0::bigint revision_count,0::bigint active_episode_count
+             FROM inserted r
+             JOIN applications a ON a.id=r.application_id",
+        )
+        .bind(id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(version)
+        .bind(description)
+        .bind(deployed_at)
+        .fetch_one(executor)
+        .await
     }
 
     /// A page of an application's releases, newest deployment first, after
@@ -125,15 +199,41 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND ($4::timestamptz IS NULL OR (r.deployed_at,r.id)<($4,$5)) ORDER BY r.deployed_at DESC,r.id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cursor_deployed_at)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT r.id,r.project_id,r.application_id,r.version,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) display_name,
+                 r.description,r.deployed_at,r.created_at,r.source,r.identity_version,
+                 encode(r.identity_digest,'hex') identity_digest,r.identity_components,
+                 (
+                     SELECT count(*)
+                     FROM kubernetes_workload_revisions v
+                     WHERE v.release_id=r.id
+                 )::bigint revision_count,
+                 (
+                     SELECT count(*)
+                     FROM deployment_episodes e
+                     WHERE e.release_id=r.id
+                         AND e.state<>'inactive'
+                 )::bigint active_episode_count
+             FROM releases r
+             JOIN applications a ON a.id=r.application_id
+             WHERE r.organization_id=$1
+                 AND r.project_id=$2
+                 AND r.application_id=$3
+                 AND ($4::timestamptz IS NULL OR (r.deployed_at,r.id)<($4,$5))
+             ORDER BY r.deployed_at DESC,r.id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cursor_deployed_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// A page of the deployment episodes of one release, after the cursor
@@ -151,15 +251,52 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT e.id,e.release_id,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) release_display_name,e.revision_id,e.cluster_id,e.occurrence_number,e.state,e.transition_kind,e.first_observed_at,e.first_ready_at,e.last_observed_at,e.ended_at,e.pod_count,e.ready_pod_count,e.workload_ready_pod_count,CASE WHEN e.workload_ready_pod_count>0 THEN e.ready_pod_count::double precision/e.workload_ready_pod_count::double precision END ready_pod_share,e.snapshot_observed_at,COALESCE((SELECT jsonb_agg(jsonb_build_object('episode_id',p.predecessor_episode_id,'observed_at',p.observed_at,'concurrent',p.concurrent) ORDER BY p.observed_at DESC,p.predecessor_episode_id DESC) FROM deployment_episode_predecessors p WHERE p.episode_id=e.id),'[]'::jsonb) predecessors FROM deployment_episodes e JOIN releases r ON r.id=e.release_id JOIN applications a ON a.id=e.application_id WHERE e.organization_id=$1 AND e.project_id=$2 AND e.application_id=$3 AND e.release_id=$4 AND ($5::uuid IS NULL OR e.id<$5) ORDER BY e.first_observed_at DESC,e.id DESC LIMIT $6")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT e.id,e.release_id,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) release_display_name,
+                 e.revision_id,e.cluster_id,e.occurrence_number,e.state,e.transition_kind,
+                 e.first_observed_at,e.first_ready_at,e.last_observed_at,e.ended_at,
+                 e.pod_count,e.ready_pod_count,e.workload_ready_pod_count,
+                 CASE
+                     WHEN e.workload_ready_pod_count>0
+                         THEN e.ready_pod_count::double precision/e.workload_ready_pod_count::double precision
+                 END ready_pod_share,
+                 e.snapshot_observed_at,
+                 COALESCE(
+                     (
+                         SELECT jsonb_agg(
+                             jsonb_build_object(
+                                 'episode_id',p.predecessor_episode_id,'observed_at',
+                                 p.observed_at,'concurrent',p.concurrent
+                             ) ORDER BY p.observed_at DESC,
+                             p.predecessor_episode_id DESC
+                         )
+                         FROM deployment_episode_predecessors p
+                         WHERE p.episode_id=e.id
+                     ),
+                     '[]'::jsonb
+                 ) predecessors
+             FROM deployment_episodes e
+             JOIN releases r ON r.id=e.release_id
+             JOIN applications a ON a.id=e.application_id
+             WHERE e.organization_id=$1
+                 AND e.project_id=$2
+                 AND e.application_id=$3
+                 AND e.release_id=$4
+                 AND ($5::uuid IS NULL OR e.id<$5)
+             ORDER BY e.first_observed_at DESC,e.id DESC
+             LIMIT $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One release of the application, with the same columns as
@@ -175,13 +312,37 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND r.id=$4")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT r.id,r.project_id,r.application_id,r.version,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) display_name,
+                 r.description,r.deployed_at,r.created_at,r.source,r.identity_version,
+                 encode(r.identity_digest,'hex') identity_digest,r.identity_components,
+                 (
+                     SELECT count(*)
+                     FROM kubernetes_workload_revisions v
+                     WHERE v.release_id=r.id
+                 )::bigint revision_count,
+                 (
+                     SELECT count(*)
+                     FROM deployment_episodes e
+                     WHERE e.release_id=r.id
+                         AND e.state<>'inactive'
+                 )::bigint active_episode_count
+             FROM releases r
+             JOIN applications a ON a.id=r.application_id
+             WHERE r.organization_id=$1
+                 AND r.project_id=$2
+                 AND r.application_id=$3
+                 AND r.id=$4",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The releases a deployment of `release_id` replaced, from the recorded
@@ -197,13 +358,24 @@ impl ReleaseRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT p.release_id FROM deployment_episodes t JOIN deployment_episode_predecessors x ON x.episode_id=t.id JOIN deployment_episodes p ON p.id=x.predecessor_episode_id WHERE t.organization_id=$1 AND t.project_id=$2 AND t.application_id=$3 AND t.release_id=$4 ORDER BY t.first_observed_at DESC,t.id DESC,x.observed_at DESC,p.id DESC LIMIT 2")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(release_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT p.release_id
+             FROM deployment_episodes t
+             JOIN deployment_episode_predecessors x ON x.episode_id=t.id
+             JOIN deployment_episodes p ON p.id=x.predecessor_episode_id
+             WHERE t.organization_id=$1
+                 AND t.project_id=$2
+                 AND t.application_id=$3
+                 AND t.release_id=$4
+             ORDER BY t.first_observed_at DESC,t.id DESC,x.observed_at DESC,p.id DESC
+             LIMIT 2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(release_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// The release deployed immediately before the given one by deployment
@@ -221,45 +393,137 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT r.id,r.project_id,r.application_id,r.version,release_display_name(a.name,r.source,r.version,r.identity_digest,r.identity_components) display_name,r.description,r.deployed_at,r.created_at,r.source,r.identity_version,encode(r.identity_digest,'hex') identity_digest,r.identity_components,(SELECT count(*) FROM kubernetes_workload_revisions v WHERE v.release_id=r.id)::bigint revision_count,(SELECT count(*) FROM deployment_episodes e WHERE e.release_id=r.id AND e.state<>'inactive')::bigint active_episode_count FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.organization_id=$1 AND r.project_id=$2 AND r.application_id=$3 AND (r.deployed_at,r.id)<($4,$5) ORDER BY r.deployed_at DESC,r.id DESC LIMIT 1")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(deployed_at)
-            .bind(release_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT r.id,r.project_id,r.application_id,r.version,
+                 release_display_name(
+                     a.name,r.source,r.version,r.identity_digest,r.identity_components
+                 ) display_name,
+                 r.description,r.deployed_at,r.created_at,r.source,r.identity_version,
+                 encode(r.identity_digest,'hex') identity_digest,r.identity_components,
+                 (
+                     SELECT count(*)
+                     FROM kubernetes_workload_revisions v
+                     WHERE v.release_id=r.id
+                 )::bigint revision_count,
+                 (
+                     SELECT count(*)
+                     FROM deployment_episodes e
+                     WHERE e.release_id=r.id
+                         AND e.state<>'inactive'
+                 )::bigint active_episode_count
+             FROM releases r
+             JOIN applications a ON a.id=r.application_id
+             WHERE r.organization_id=$1
+                 AND r.project_id=$2
+                 AND r.application_id=$3
+                 AND (r.deployed_at,r.id)<($4,$5)
+             ORDER BY r.deployed_at DESC,r.id DESC
+             LIMIT 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(deployed_at)
+        .bind(release_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of the runtime-group differences between a baseline and a
     /// target release, after the cursor group when one is given. With no
     /// baseline the baseline side is empty, so every group observed in the
     /// target is classified `new`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn diff_page<'e, E, T>(
         executor: E,
-        baseline_id: Option<Uuid>,
-        target_id: Uuid,
-        organization_id: Uuid,
-        project_id: Uuid,
-        application_id: Uuid,
-        cursor_id: Option<Uuid>,
-        fetch_limit: i64,
+        input: DiffPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH b AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT * FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,b.occurrence_count baseline_occurrence_count,b.first_seen_at baseline_first_seen_at,b.last_seen_at baseline_last_seen_at,t.occurrence_count target_occurrence_count,t.first_seen_at target_first_seen_at,t.last_seen_at target_last_seen_at FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' AND ($6::uuid IS NULL OR g.id>$6) ORDER BY g.id LIMIT $7")
-            .bind(baseline_id)
-            .bind(target_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(cursor_id)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        let DiffPageQuery {
+            baseline_id,
+            target_id,
+            organization_id,
+            project_id,
+            application_id,
+            cursor_id,
+            fetch_limit,
+        } = input;
+        sqlx::query_as(
+            "WITH b AS (
+                 SELECT *
+                 FROM runtime_event_group_releases
+                 WHERE release_id=$1
+                     AND occurrence_count>0
+             ),
+                 t AS (
+                     SELECT *
+                     FROM runtime_event_group_releases
+                     WHERE release_id=$2
+                         AND occurrence_count>0
+                 ),
+                 evidence AS (
+                     SELECT (
+                         EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2)
+                         OR EXISTS(
+                             SELECT 1
+                             FROM runtime_event_group_releases
+                             WHERE release_id=$2
+                                 AND occurrence_count>0
+                         )
+                     ) target_observed,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$1
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) baseline_expired,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$2
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) target_expired
+                 )
+             SELECT COALESCE(t.group_id,b.group_id) group_id,
+                 CASE
+                     WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown'
+                     WHEN b.group_id IS NULL THEN 'new'
+                     WHEN t.group_id IS NULL
+                         AND (NOT evidence.target_observed OR evidence.target_expired)
+                         THEN 'unknown'
+                     WHEN t.group_id IS NULL THEN 'disappeared'
+                     ELSE 'unchanged'
+                 END classification,
+                 g.event_kind,g.semantic_summary,
+                 b.occurrence_count baseline_occurrence_count,
+                 b.first_seen_at baseline_first_seen_at,b.last_seen_at baseline_last_seen_at,
+                 t.occurrence_count target_occurrence_count,
+                 t.first_seen_at target_first_seen_at,t.last_seen_at target_last_seen_at
+             FROM b FULL OUTER
+             JOIN t ON t.group_id=b.group_id
+             JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id)
+             CROSS JOIN evidence
+             WHERE g.organization_id=$3
+                 AND g.project_id=$4
+                 AND g.application_id=$5
+                 AND g.event_kind <> 'network.accept'
+                 AND ($6::uuid IS NULL OR g.id>$6)
+             ORDER BY g.id
+             LIMIT $7",
+        )
+        .bind(baseline_id)
+        .bind(target_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Counts of differences between two releases by classification.
@@ -275,14 +539,85 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired), compared AS (SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept') SELECT classification,count(*)::bigint item_count FROM compared GROUP BY classification ORDER BY CASE classification WHEN 'new' THEN 1 WHEN 'disappeared' THEN 2 WHEN 'unchanged' THEN 3 ELSE 4 END")
-            .bind(baseline_id)
-            .bind(target_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH b AS (
+                 SELECT group_id,occurrence_count
+                 FROM runtime_event_group_releases
+                 WHERE release_id=$1
+                     AND occurrence_count>0
+             ),
+                 t AS (
+                     SELECT group_id,occurrence_count
+                     FROM runtime_event_group_releases
+                     WHERE release_id=$2
+                         AND occurrence_count>0
+                 ),
+                 evidence AS (
+                     SELECT (
+                         EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2)
+                         OR EXISTS(
+                             SELECT 1
+                             FROM runtime_event_group_releases
+                             WHERE release_id=$2
+                                 AND occurrence_count>0
+                         )
+                     ) target_observed,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$1
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) baseline_expired,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$2
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) target_expired
+                 ),
+                 compared AS (
+                     SELECT COALESCE(t.group_id,b.group_id) group_id,
+                         CASE
+                             WHEN b.group_id IS NULL AND evidence.baseline_expired
+                                 THEN 'unknown'
+                             WHEN b.group_id IS NULL THEN 'new'
+                             WHEN t.group_id IS NULL
+                                 AND (
+                                     NOT evidence.target_observed
+                                     OR evidence.target_expired
+                                 )
+                                 THEN 'unknown'
+                             WHEN t.group_id IS NULL THEN 'disappeared'
+                             ELSE 'unchanged'
+                         END classification
+                     FROM b FULL OUTER
+                     JOIN t ON t.group_id=b.group_id
+                     JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id)
+                     CROSS JOIN evidence
+                     WHERE g.organization_id=$3
+                         AND g.project_id=$4
+                         AND g.application_id=$5
+                         AND g.event_kind <> 'network.accept'
+                 )
+             SELECT classification,count(*)::bigint item_count
+             FROM compared
+             GROUP BY classification
+             ORDER BY CASE classification
+                 WHEN 'new' THEN 1
+                 WHEN 'disappeared' THEN 2
+                 WHEN 'unchanged' THEN 3
+                 ELSE 4
+             END",
+        )
+        .bind(baseline_id)
+        .bind(target_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// The differences between two releases with the largest change in
@@ -300,15 +635,82 @@ impl ReleaseRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("WITH b AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$1 AND occurrence_count>0), t AS (SELECT group_id,occurrence_count FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0), evidence AS (SELECT (EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2) OR EXISTS(SELECT 1 FROM runtime_event_group_releases WHERE release_id=$2 AND occurrence_count>0)) target_observed,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$1 AND r.deployed_at<p.runtime_history_expired_before) baseline_expired,EXISTS(SELECT 1 FROM releases r JOIN projects p ON p.id=r.project_id WHERE r.id=$2 AND r.deployed_at<p.runtime_history_expired_before) target_expired) SELECT COALESCE(t.group_id,b.group_id) group_id,CASE WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown' WHEN b.group_id IS NULL THEN 'new' WHEN t.group_id IS NULL AND (NOT evidence.target_observed OR evidence.target_expired) THEN 'unknown' WHEN t.group_id IS NULL THEN 'disappeared' ELSE 'unchanged' END classification,g.event_kind,g.semantic_summary,COALESCE(b.occurrence_count,0)::bigint baseline_occurrence_count,COALESCE(t.occurrence_count,0)::bigint target_occurrence_count,(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0))::bigint occurrence_delta FROM b FULL OUTER JOIN t ON t.group_id=b.group_id JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id) CROSS JOIN evidence WHERE g.organization_id=$3 AND g.project_id=$4 AND g.application_id=$5 AND g.event_kind <> 'network.accept' ORDER BY ABS(COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)) DESC,g.id ASC LIMIT $6")
-            .bind(baseline_id)
-            .bind(target_id)
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(application_id)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "WITH b AS (
+                 SELECT group_id,occurrence_count
+                 FROM runtime_event_group_releases
+                 WHERE release_id=$1
+                     AND occurrence_count>0
+             ),
+                 t AS (
+                     SELECT group_id,occurrence_count
+                     FROM runtime_event_group_releases
+                     WHERE release_id=$2
+                         AND occurrence_count>0
+                 ),
+                 evidence AS (
+                     SELECT (
+                         EXISTS(SELECT 1 FROM runtime_events WHERE release_id=$2)
+                         OR EXISTS(
+                             SELECT 1
+                             FROM runtime_event_group_releases
+                             WHERE release_id=$2
+                                 AND occurrence_count>0
+                         )
+                     ) target_observed,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$1
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) baseline_expired,
+                         EXISTS(
+                             SELECT 1
+                             FROM releases r
+                             JOIN projects p ON p.id=r.project_id
+                             WHERE r.id=$2
+                                 AND r.deployed_at<p.runtime_history_expired_before
+                         ) target_expired
+                 )
+             SELECT COALESCE(t.group_id,b.group_id) group_id,
+                 CASE
+                     WHEN b.group_id IS NULL AND evidence.baseline_expired THEN 'unknown'
+                     WHEN b.group_id IS NULL THEN 'new'
+                     WHEN t.group_id IS NULL
+                         AND (NOT evidence.target_observed OR evidence.target_expired)
+                         THEN 'unknown'
+                     WHEN t.group_id IS NULL THEN 'disappeared'
+                     ELSE 'unchanged'
+                 END classification,
+                 g.event_kind,g.semantic_summary,
+                 COALESCE(b.occurrence_count,0)::bigint baseline_occurrence_count,
+                 COALESCE(t.occurrence_count,0)::bigint target_occurrence_count,
+                 (
+                     COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)
+                 )::bigint occurrence_delta
+             FROM b FULL OUTER
+             JOIN t ON t.group_id=b.group_id
+             JOIN runtime_event_groups g ON g.id=COALESCE(t.group_id,b.group_id)
+             CROSS JOIN evidence
+             WHERE g.organization_id=$3
+                 AND g.project_id=$4
+                 AND g.application_id=$5
+                 AND g.event_kind <> 'network.accept'
+             ORDER BY ABS(
+                 COALESCE(t.occurrence_count,0)-COALESCE(b.occurrence_count,0)
+             ) DESC,
+                 g.id ASC
+             LIMIT $6",
+        )
+        .bind(baseline_id)
+        .bind(target_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(application_id)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Reports whether the release belongs to the application.
@@ -612,7 +1014,7 @@ mod tests {
 
 #[cfg(test)]
 mod api_statement_tests {
-    use super::ReleaseRepository;
+    use super::{DiffPageQuery, ManualRelease, ReleaseRepository};
     use crate::repository::test_support::{
         exec_in_release, group_ids, ingest, manual_release, observe_revision, tenant,
     };
@@ -663,13 +1065,15 @@ mod api_statement_tests {
         let own = tenant(&pool, "rel-create").await;
         let created: Release = ReleaseRepository::create_manual(
             &pool,
-            Uuid::new_v4(),
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            "1.2.3",
-            Some("notes".into()),
-            Utc::now(),
+            ManualRelease {
+                id: Uuid::new_v4(),
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                version: "1.2.3",
+                description: Some("notes".into()),
+                deployed_at: Utc::now(),
+            },
         )
         .await
         .unwrap();
@@ -686,13 +1090,15 @@ mod api_statement_tests {
         assert!(
             ReleaseRepository::create_manual::<_, Release>(
                 &pool,
-                Uuid::new_v4(),
-                own.organization_id,
-                own.project_id,
-                own.application_id,
-                "1.2.3",
-                None,
-                Utc::now(),
+                ManualRelease {
+                    id: Uuid::new_v4(),
+                    organization_id: own.organization_id,
+                    project_id: own.project_id,
+                    application_id: own.application_id,
+                    version: "1.2.3",
+                    description: None,
+                    deployed_at: Utc::now()
+                }
             )
             .await
             .is_err(),
@@ -886,13 +1292,15 @@ mod api_statement_tests {
 
         let page: Vec<DiffEntry> = ReleaseRepository::diff_page(
             &pool,
-            Some(baseline),
-            target,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            None,
-            10,
+            DiffPageQuery {
+                baseline_id: Some(baseline),
+                target_id: target,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cursor_id: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -906,13 +1314,15 @@ mod api_statement_tests {
 
         let without_baseline: Vec<DiffEntry> = ReleaseRepository::diff_page(
             &pool,
-            None,
-            target,
-            own.organization_id,
-            own.project_id,
-            own.application_id,
-            None,
-            10,
+            DiffPageQuery {
+                baseline_id: None,
+                target_id: target,
+                organization_id: own.organization_id,
+                project_id: own.project_id,
+                application_id: own.application_id,
+                cursor_id: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();

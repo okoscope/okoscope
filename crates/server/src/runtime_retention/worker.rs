@@ -247,8 +247,14 @@ mod scheduling_tests {
         let org = Uuid::from_u128(3);
         let failed = Uuid::from_u128(1);
         let healthy = Uuid::from_u128(2);
-        sqlx::query("INSERT INTO organizations(id,slug,name,runtime_retention_enabled) VALUES($1,'fairness','Fairness',true)")
-            .bind(org).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO organizations(id,slug,name,runtime_retention_enabled)
+             VALUES($1,'fairness','Fairness',true)",
+        )
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
         for (id, slug) in [(failed, "failed"), (healthy, "healthy")] {
             sqlx::query("INSERT INTO projects(id,organization_id,slug,name) VALUES($1,$2,$3,$3)")
                 .bind(id)

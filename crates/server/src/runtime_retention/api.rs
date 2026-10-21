@@ -210,8 +210,17 @@ mod tests {
         .await
         .unwrap();
         let token = SessionToken::generate();
-        sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user).bind(org).bind(token.digest().to_vec()).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+             VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user)
+        .bind(org)
+        .bind(token.digest().to_vec())
+        .execute(pool)
+        .await
+        .unwrap();
         (user, token.expose().to_owned())
     }
 
@@ -223,7 +232,8 @@ mod tests {
     /// inherit project access, so a test acting as one needs this row.
     async fn project_membership(pool: &PgPool, org: Uuid, project: Uuid, user: Uuid, role: &str) {
         sqlx::query(
-            "INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,$4)",
+            "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+             VALUES($1,$2,$3,$4)",
         )
         .bind(org)
         .bind(project)

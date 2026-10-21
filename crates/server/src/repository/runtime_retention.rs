@@ -11,6 +11,18 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 
+/// Input to [`RuntimeRetentionRepository::snapshot_page`].
+#[derive(Debug)]
+pub struct SnapshotPageQuery {
+    pub organization_id: Uuid,
+    pub group_id: Uuid,
+    pub day_from: Option<NaiveDate>,
+    pub day_to: Option<NaiveDate>,
+    pub release_id: Option<Uuid>,
+    pub cursor: Option<Uuid>,
+    pub fetch_limit: i64,
+}
+
 /// Runtime retention policy and compaction.
 #[derive(Clone, Copy, Debug)]
 pub struct RuntimeRetentionRepository;
@@ -44,11 +56,17 @@ impl RuntimeRetentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT runtime_closed_before closed_before,runtime_history_expired_before history_expired_before FROM projects WHERE organization_id=$1 AND id=$2")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as(
+            "SELECT runtime_closed_before closed_before,
+                 runtime_history_expired_before history_expired_before
+             FROM projects
+             WHERE organization_id=$1
+                 AND id=$2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// A page of a group's daily history snapshots, newest day first,
@@ -57,31 +75,54 @@ impl RuntimeRetentionRepository {
     ///
     /// Selects `id`, `group_id`, `release_id`, `day`, `format_version`,
     /// `occurrence_count`, `first_observed_at` and `last_observed_at`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn snapshot_page<'e, E, T>(
         executor: E,
-        organization_id: Uuid,
-        group_id: Uuid,
-        day_from: Option<NaiveDate>,
-        day_to: Option<NaiveDate>,
-        release_id: Option<Uuid>,
-        cursor: Option<Uuid>,
-        fetch_limit: i64,
+        input: SnapshotPageQuery,
     ) -> Result<Vec<T>, sqlx::Error>
     where
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT id,group_id,release_id,day,format_version,occurrence_count,first_observed_at,last_observed_at FROM runtime_history_snapshots WHERE organization_id=$1 AND group_id=$2 AND ($3::date IS NULL OR day >= $3) AND ($4::date IS NULL OR day < $4) AND ($5::uuid IS NULL OR release_id=$5) AND ($6::uuid IS NULL OR (day,id)<(SELECT day,id FROM runtime_history_snapshots WHERE id=$6 AND organization_id=$1 AND group_id=$2)) ORDER BY day DESC,id DESC LIMIT $7")
-            .bind(organization_id)
-            .bind(group_id)
-            .bind(day_from)
-            .bind(day_to)
-            .bind(release_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        let SnapshotPageQuery {
+            organization_id,
+            group_id,
+            day_from,
+            day_to,
+            release_id,
+            cursor,
+            fetch_limit,
+        } = input;
+        sqlx::query_as(
+            "SELECT id,group_id,release_id,day,format_version,occurrence_count,
+                 first_observed_at,last_observed_at
+             FROM runtime_history_snapshots
+             WHERE organization_id=$1
+                 AND group_id=$2
+                 AND ($3::date IS NULL OR day >= $3)
+                 AND ($4::date IS NULL OR day < $4)
+                 AND ($5::uuid IS NULL OR release_id=$5)
+                 AND (
+                     $6::uuid IS NULL
+                     OR (day,id)<(
+                         SELECT day,id
+                         FROM runtime_history_snapshots
+                         WHERE id=$6
+                             AND organization_id=$1
+                             AND group_id=$2
+                     )
+                 )
+             ORDER BY day DESC,id DESC
+             LIMIT $7",
+        )
+        .bind(organization_id)
+        .bind(group_id)
+        .bind(day_from)
+        .bind(day_to)
+        .bind(release_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// The organization's retention policy.
@@ -95,10 +136,15 @@ impl RuntimeRetentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT runtime_retention_enabled enabled,runtime_retention_raw_days raw_days,runtime_retention_history_days history_days FROM organizations WHERE id=$1")
-            .bind(organization_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT runtime_retention_enabled enabled,runtime_retention_raw_days raw_days,
+                 runtime_retention_history_days history_days
+             FROM organizations
+             WHERE id=$1",
+        )
+        .bind(organization_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// The project's retention override and the organization's policy it
@@ -116,11 +162,21 @@ impl RuntimeRetentionRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT p.runtime_retention_enabled override_enabled,p.runtime_retention_raw_days override_raw_days,p.runtime_retention_history_days override_history_days,o.runtime_retention_enabled enabled,o.runtime_retention_raw_days raw_days,o.runtime_retention_history_days history_days FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.organization_id=$1 AND p.id=$2")
-            .bind(organization_id)
-            .bind(project_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT p.runtime_retention_enabled override_enabled,
+                 p.runtime_retention_raw_days override_raw_days,
+                 p.runtime_retention_history_days override_history_days,
+                 o.runtime_retention_enabled enabled,o.runtime_retention_raw_days raw_days,
+                 o.runtime_retention_history_days history_days
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             WHERE p.organization_id=$1
+                 AND p.id=$2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Sets the organization's retention policy.
@@ -135,14 +191,20 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE organizations SET runtime_retention_enabled=$2,runtime_retention_raw_days=$3,runtime_retention_history_days=$4,runtime_retention_updated_at=now(),runtime_retention_updated_by=$5 WHERE id=$1")
-            .bind(organization_id)
-            .bind(enabled)
-            .bind(raw_days)
-            .bind(history_days)
-            .bind(updated_by)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE organizations
+             SET runtime_retention_enabled=$2,runtime_retention_raw_days=$3,
+                 runtime_retention_history_days=$4,runtime_retention_updated_at=now(),
+                 runtime_retention_updated_by=$5
+             WHERE id=$1",
+        )
+        .bind(organization_id)
+        .bind(enabled)
+        .bind(raw_days)
+        .bind(history_days)
+        .bind(updated_by)
+        .execute(executor)
+        .await
     }
 
     /// Sets the project's retention override, or clears it with `None`s.
@@ -158,15 +220,22 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE projects SET runtime_retention_enabled=$3,runtime_retention_raw_days=$4,runtime_retention_history_days=$5,runtime_retention_updated_at=now(),runtime_retention_updated_by=$6 WHERE organization_id=$1 AND id=$2")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(enabled)
-            .bind(raw_days)
-            .bind(history_days)
-            .bind(updated_by)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE projects
+             SET runtime_retention_enabled=$3,runtime_retention_raw_days=$4,
+                 runtime_retention_history_days=$5,runtime_retention_updated_at=now(),
+                 runtime_retention_updated_by=$6
+             WHERE organization_id=$1
+                 AND id=$2",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(enabled)
+        .bind(raw_days)
+        .bind(history_days)
+        .bind(updated_by)
+        .execute(executor)
+        .await
     }
 
     /// Expires bounded thread aggregates with the project's raw retention horizon.
@@ -175,8 +244,23 @@ impl RuntimeRetentionRepository {
         project_id: Uuid,
         limit: i64,
     ) -> Result<u64, sqlx::Error> {
-        Ok(sqlx::query("DELETE FROM thread_activity_windows WHERE id IN (SELECT w.id FROM thread_activity_windows w JOIN projects p ON p.id=w.project_id WHERE p.id=$1 AND w.observed_at<p.runtime_closed_before ORDER BY w.observed_at,w.id LIMIT $2)")
-            .bind(project_id).bind(limit).execute(executor).await?.rows_affected())
+        Ok(sqlx::query(
+            "DELETE FROM thread_activity_windows
+             WHERE id IN (
+                 SELECT w.id
+                 FROM thread_activity_windows w
+                 JOIN projects p ON p.id=w.project_id
+                 WHERE p.id=$1
+                     AND w.observed_at<p.runtime_closed_before
+                 ORDER BY w.observed_at,w.id
+                 LIMIT $2
+             )",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .execute(executor)
+        .await?
+        .rows_affected())
     }
 
     /// Folds the events into daily history snapshots per group and day, and
@@ -194,7 +278,29 @@ impl RuntimeRetentionRepository {
             "(group_id,day,format_version) WHERE release_id IS NULL"
         };
         let query = format!(
-            "INSERT INTO runtime_history_snapshots(id,organization_id,project_id,application_id,group_id,release_id,day,occurrence_count,first_observed_at,last_observed_at) SELECT gen_random_uuid(),m.organization_id,m.project_id,m.application_id,m.group_id,m.release_id,(e.observed_at AT TIME ZONE 'UTC')::date,count(*),min(e.observed_at),max(e.observed_at) FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE e.id=ANY($1) AND ($2::timestamptz IS NULL OR e.observed_at >= $2) AND (m.release_id IS NOT NULL)=$3 GROUP BY m.organization_id,m.project_id,m.application_id,m.group_id,m.release_id,(e.observed_at AT TIME ZONE 'UTC')::date ON CONFLICT {conflict} DO UPDATE SET occurrence_count=runtime_history_snapshots.occurrence_count+EXCLUDED.occurrence_count,first_observed_at=LEAST(runtime_history_snapshots.first_observed_at,EXCLUDED.first_observed_at),last_observed_at=GREATEST(runtime_history_snapshots.last_observed_at,EXCLUDED.last_observed_at)"
+            "INSERT INTO runtime_history_snapshots(
+                 id,organization_id,project_id,application_id,group_id,release_id,day,
+                 occurrence_count,first_observed_at,last_observed_at
+             )
+             SELECT gen_random_uuid(),m.organization_id,m.project_id,m.application_id,
+                 m.group_id,m.release_id,(e.observed_at AT TIME ZONE 'UTC')::date,count(*),
+                 min(e.observed_at),max(e.observed_at)
+             FROM runtime_event_group_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE e.id=ANY($1)
+                 AND ($2::timestamptz IS NULL OR e.observed_at >= $2)
+                 AND (m.release_id IS NOT NULL)=$3
+             GROUP BY m.organization_id,m.project_id,m.application_id,m.group_id,
+                 m.release_id,(e.observed_at AT TIME ZONE 'UTC')::date
+             ON CONFLICT {conflict}
+             DO UPDATE SET occurrence_count=runtime_history_snapshots.occurrence_count
+                 +EXCLUDED.occurrence_count,
+                 first_observed_at=LEAST(
+                     runtime_history_snapshots.first_observed_at,EXCLUDED.first_observed_at
+                 ),
+                 last_observed_at=GREATEST(
+                     runtime_history_snapshots.last_observed_at,EXCLUDED.last_observed_at
+                 )"
         );
         sqlx::query(&query)
             .bind(event_ids)
@@ -213,9 +319,15 @@ impl RuntimeRetentionRepository {
         event_ids: &[Uuid],
     ) -> Result<(), sqlx::Error> {
         for query in [
-            "UPDATE runtime_event_groups SET representative_event_id=NULL WHERE representative_event_id=ANY($1)",
-            "UPDATE runtime_event_groups SET first_seen_event_id=NULL WHERE first_seen_event_id=ANY($1)",
-            "UPDATE runtime_event_group_releases SET representative_event_id=NULL WHERE representative_event_id=ANY($1)",
+            "UPDATE runtime_event_groups
+             SET representative_event_id=NULL
+             WHERE representative_event_id=ANY($1)",
+            "UPDATE runtime_event_groups
+             SET first_seen_event_id=NULL
+             WHERE first_seen_event_id=ANY($1)",
+            "UPDATE runtime_event_group_releases
+             SET representative_event_id=NULL
+             WHERE representative_event_id=ANY($1)",
         ] {
             sqlx::query(query)
                 .bind(event_ids)
@@ -267,10 +379,25 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN projects p ON p.id=e.project_id WHERE p.id=$1 AND e.observed_at<p.runtime_closed_before) OR EXISTS(SELECT 1 FROM thread_activity_windows w JOIN projects p ON p.id=w.project_id WHERE p.id=$1 AND w.observed_at<p.runtime_closed_before)")
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM runtime_events e
+                 JOIN projects p ON p.id=e.project_id
+                 WHERE p.id=$1
+                     AND e.observed_at<p.runtime_closed_before
+             )
+                 OR EXISTS(
+                     SELECT 1
+                     FROM thread_activity_windows w
+                     JOIN projects p ON p.id=w.project_id
+                     WHERE p.id=$1
+                         AND w.observed_at<p.runtime_closed_before
+                 )",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// The project's effective retention: whether it is enabled, raw days,
@@ -283,10 +410,21 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (bool, i32, Option<i32>)>("SELECT COALESCE(p.runtime_retention_enabled,o.runtime_retention_enabled),COALESCE(p.runtime_retention_raw_days,o.runtime_retention_raw_days),CASE WHEN p.runtime_retention_enabled IS NULL THEN o.runtime_retention_history_days ELSE p.runtime_retention_history_days END FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1")
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (bool, i32, Option<i32>)>(
+            "SELECT COALESCE(p.runtime_retention_enabled,o.runtime_retention_enabled),
+                 COALESCE(p.runtime_retention_raw_days,o.runtime_retention_raw_days),
+                 CASE
+                     WHEN p.runtime_retention_enabled IS NULL
+                         THEN o.runtime_retention_history_days
+                     ELSE p.runtime_retention_history_days
+                 END
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             WHERE p.id=$1",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// The enabled flag and history days of [`Self::policy`].
@@ -297,10 +435,20 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_as::<_, (bool, Option<i32>)>("SELECT COALESCE(p.runtime_retention_enabled,o.runtime_retention_enabled),CASE WHEN p.runtime_retention_enabled IS NULL THEN o.runtime_retention_history_days ELSE p.runtime_retention_history_days END FROM projects p JOIN organizations o ON o.id=p.organization_id WHERE p.id=$1")
-            .bind(project_id)
-            .fetch_one(executor)
-            .await
+        sqlx::query_as::<_, (bool, Option<i32>)>(
+            "SELECT COALESCE(p.runtime_retention_enabled,o.runtime_retention_enabled),
+                 CASE
+                     WHEN p.runtime_retention_enabled IS NULL
+                         THEN o.runtime_retention_history_days
+                     ELSE p.runtime_retention_history_days
+                 END
+             FROM projects p
+             JOIN organizations o ON o.id=p.organization_id
+             WHERE p.id=$1",
+        )
+        .bind(project_id)
+        .fetch_one(executor)
+        .await
     }
 
     /// Moves the project's closed and history-expired horizons forward,
@@ -314,12 +462,17 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE projects SET runtime_closed_before=GREATEST(runtime_closed_before,$2),runtime_history_expired_before=GREATEST(runtime_history_expired_before,$3) WHERE id=$1")
-            .bind(project_id)
-            .bind(closed_before)
-            .bind(history_expired_before)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE projects
+             SET runtime_closed_before=GREATEST(runtime_closed_before,$2),
+                 runtime_history_expired_before=GREATEST(runtime_history_expired_before,$3)
+             WHERE id=$1",
+        )
+        .bind(project_id)
+        .bind(closed_before)
+        .bind(history_expired_before)
+        .execute(executor)
+        .await
     }
 
     /// Locks up to `limit` grouped raw events of the project observed before
@@ -334,12 +487,32 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtime_events WHERE project_id=$1 AND EXISTS(SELECT 1 FROM runtime_event_group_memberships m WHERE m.event_id=runtime_events.id AND m.fingerprint_version=1) AND observed_at<$2 AND (event_kind NOT IN ('container.restart','container.terminated','process.exit') OR observed_at<$2-interval '10 minutes') ORDER BY observed_at,id LIMIT $3 FOR UPDATE")
-            .bind(project_id)
-            .bind(closed_before)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id
+             FROM runtime_events
+             WHERE project_id=$1
+                 AND EXISTS(
+                     SELECT 1
+                     FROM runtime_event_group_memberships m
+                     WHERE m.event_id=runtime_events.id
+                         AND m.fingerprint_version=1
+                 )
+                 AND observed_at<$2
+                 AND (
+                     event_kind NOT IN (
+                         'container.restart','container.terminated','process.exit'
+                     )
+                     OR observed_at<$2-interval '10 minutes'
+                 )
+             ORDER BY observed_at,id
+             LIMIT $3
+             FOR UPDATE",
+        )
+        .bind(project_id)
+        .bind(closed_before)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// The runtime groups the events belong to.
@@ -366,10 +539,14 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("SELECT DISTINCT item_id FROM runtime_inventory_event_memberships WHERE event_id=ANY($1)")
-            .bind(event_ids)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT item_id
+             FROM runtime_inventory_event_memberships
+             WHERE event_id=ANY($1)",
+        )
+        .bind(event_ids)
+        .fetch_all(executor)
+        .await
     }
 
     /// Records a qualified, retention-incomplete correlation outcome for the
@@ -381,10 +558,27 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_event_correlation_outcomes(organization_id,project_id,event_id,status,candidate_count,tolerance_seconds,retention_incomplete) SELECT e.organization_id,e.project_id,e.id,'qualified',1,30,true FROM runtime_events e WHERE e.id IN (SELECT kernel_event_id FROM runtime_event_correlations WHERE lifecycle_event_id=ANY($1) UNION SELECT lifecycle_event_id FROM runtime_event_correlations WHERE kernel_event_id=ANY($1)) ON CONFLICT(event_id) DO UPDATE SET retention_incomplete=true")
-            .bind(event_ids)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_event_correlation_outcomes(
+                 organization_id,project_id,event_id,status,candidate_count,
+                 tolerance_seconds,retention_incomplete
+             )
+             SELECT e.organization_id,e.project_id,e.id,'qualified',1,30,true
+             FROM runtime_events e
+             WHERE e.id IN (
+                 SELECT kernel_event_id
+                 FROM runtime_event_correlations
+                 WHERE lifecycle_event_id=ANY($1)
+                 UNION SELECT lifecycle_event_id
+                 FROM runtime_event_correlations
+                 WHERE kernel_event_id=ANY($1)
+             )
+             ON CONFLICT(event_id)
+             DO UPDATE SET retention_incomplete=true",
+        )
+        .bind(event_ids)
+        .execute(executor)
+        .await
     }
 
     /// Deletes the raw events.
@@ -410,10 +604,22 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_event_groups g SET semantic_summary=semantic_summary-'latest_termination'-'latest_waiting_reason'-'observed_restart_count'-'window_started_at'-'window_ended_at' WHERE id=ANY($1) AND event_kind='container.restart_loop' AND NOT EXISTS(SELECT 1 FROM runtime_event_group_memberships m WHERE m.group_id=g.id)")
-            .bind(group_ids)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE runtime_event_groups g
+             SET semantic_summary=semantic_summary-'latest_termination'
+                 -'latest_waiting_reason'-'observed_restart_count'-'window_started_at'
+                 -'window_ended_at'
+             WHERE id=ANY($1)
+                 AND event_kind='container.restart_loop'
+                 AND NOT EXISTS(
+                     SELECT 1
+                     FROM runtime_event_group_memberships m
+                     WHERE m.group_id=g.id
+                 )",
+        )
+        .bind(group_ids)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` of the project's history snapshots from before
@@ -428,12 +634,23 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query_scalar::<_, Uuid>("DELETE FROM runtime_history_snapshots WHERE id IN (SELECT id FROM runtime_history_snapshots WHERE project_id=$1 AND day<($2 AT TIME ZONE 'UTC')::date ORDER BY day,id LIMIT $3) RETURNING group_id")
-            .bind(project_id)
-            .bind(expired_before)
-            .bind(limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_scalar::<_, Uuid>(
+            "DELETE FROM runtime_history_snapshots
+             WHERE id IN (
+                 SELECT id
+                 FROM runtime_history_snapshots
+                 WHERE project_id=$1
+                     AND day<($2 AT TIME ZONE 'UTC')::date
+                 ORDER BY day,id
+                 LIMIT $3
+             )
+             RETURNING group_id",
+        )
+        .bind(project_id)
+        .bind(expired_before)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Deletes up to `limit` restart-loop projections whose window ended ten
@@ -446,11 +663,24 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM runtime_restart_loop_projections WHERE ctid IN (SELECT ctid FROM runtime_restart_loop_projections WHERE project_id=$1 AND window_ended_at<(SELECT runtime_closed_before FROM projects WHERE id=$1)-interval '10 minutes' LIMIT $2)")
-            .bind(project_id)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM runtime_restart_loop_projections
+             WHERE ctid IN (
+                 SELECT ctid
+                 FROM runtime_restart_loop_projections
+                 WHERE project_id=$1
+                     AND window_ended_at<(
+                         SELECT runtime_closed_before
+                         FROM projects
+                         WHERE id=$1
+                     )-interval '10 minutes'
+                 LIMIT $2
+             )",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 
     /// Points a group without a representative event at its latest remaining
@@ -462,10 +692,22 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_event_groups SET representative_event_id=(SELECT m.event_id FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.group_id=$1 ORDER BY e.observed_at DESC,e.id DESC LIMIT 1) WHERE id=$1 AND representative_event_id IS NULL")
-            .bind(group_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE runtime_event_groups
+             SET representative_event_id=(
+                 SELECT m.event_id
+                 FROM runtime_event_group_memberships m
+                 JOIN runtime_events e ON e.id=m.event_id
+                 WHERE m.group_id=$1
+                 ORDER BY e.observed_at DESC,e.id DESC
+                 LIMIT 1
+             )
+             WHERE id=$1
+                 AND representative_event_id IS NULL",
+        )
+        .bind(group_id)
+        .execute(executor)
+        .await
     }
 
     /// Recomputes a group's occurrence count and seen window from its raw
@@ -477,10 +719,31 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("WITH evidence AS (SELECT e.observed_at first_at,e.observed_at last_at,1::bigint n FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.group_id=$1 UNION ALL SELECT first_observed_at,last_observed_at,occurrence_count FROM runtime_history_snapshots WHERE group_id=$1), totals AS (SELECT COALESCE(sum(n),0)::bigint n,min(first_at) first_at,max(last_at) last_at FROM evidence) UPDATE runtime_event_groups SET occurrence_count=totals.n,first_seen_at=COALESCE(totals.first_at,first_seen_at),last_seen_at=COALESCE(totals.last_at,last_seen_at),updated_at=now() FROM totals WHERE id=$1")
-            .bind(group_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "WITH evidence AS (
+                 SELECT e.observed_at first_at,e.observed_at last_at,1::bigint n
+                 FROM runtime_event_group_memberships m
+                 JOIN runtime_events e ON e.id=m.event_id
+                 WHERE m.group_id=$1
+                 UNION ALL SELECT first_observed_at,last_observed_at,occurrence_count
+                 FROM runtime_history_snapshots
+                 WHERE group_id=$1
+             ),
+                 totals AS (
+                     SELECT COALESCE(sum(n),0)::bigint n,min(first_at) first_at,
+                         max(last_at) last_at
+                     FROM evidence
+                 )
+             UPDATE runtime_event_groups
+             SET occurrence_count=totals.n,
+                 first_seen_at=COALESCE(totals.first_at,first_seen_at),
+                 last_seen_at=COALESCE(totals.last_at,last_seen_at),updated_at=now()
+             FROM totals
+             WHERE id=$1",
+        )
+        .bind(group_id)
+        .execute(executor)
+        .await
     }
 
     /// Deletes a group's per-release rollups.
@@ -506,10 +769,32 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("WITH evidence AS (SELECT m.organization_id,m.project_id,m.application_id,m.release_id,m.group_id,e.observed_at first_at,e.observed_at last_at,1::bigint n FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.group_id=$1 AND m.release_id IS NOT NULL UNION ALL SELECT organization_id,project_id,application_id,release_id,group_id,first_observed_at,last_observed_at,occurrence_count FROM runtime_history_snapshots WHERE group_id=$1 AND release_id IS NOT NULL) INSERT INTO runtime_event_group_releases(organization_id,project_id,application_id,release_id,group_id,occurrence_count,first_seen_at,last_seen_at,representative_event_id) SELECT organization_id,project_id,application_id,release_id,group_id,sum(n),min(first_at),max(last_at),NULL FROM evidence GROUP BY organization_id,project_id,application_id,release_id,group_id")
-            .bind(group_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "WITH evidence AS (
+                 SELECT m.organization_id,m.project_id,m.application_id,m.release_id,
+                     m.group_id,e.observed_at first_at,e.observed_at last_at,1::bigint n
+                 FROM runtime_event_group_memberships m
+                 JOIN runtime_events e ON e.id=m.event_id
+                 WHERE m.group_id=$1
+                     AND m.release_id IS NOT NULL
+                 UNION ALL SELECT organization_id,project_id,application_id,release_id,
+                     group_id,first_observed_at,last_observed_at,occurrence_count
+                 FROM runtime_history_snapshots
+                 WHERE group_id=$1
+                     AND release_id IS NOT NULL
+             )
+             INSERT INTO runtime_event_group_releases(
+                 organization_id,project_id,application_id,release_id,group_id,
+                 occurrence_count,first_seen_at,last_seen_at,representative_event_id
+             )
+             SELECT organization_id,project_id,application_id,release_id,group_id,sum(n),
+                 min(first_at),max(last_at),NULL
+             FROM evidence
+             GROUP BY organization_id,project_id,application_id,release_id,group_id",
+        )
+        .bind(group_id)
+        .execute(executor)
+        .await
     }
 
     /// Points the groups' per-release rollups at their latest remaining raw
@@ -521,10 +806,22 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE runtime_event_group_releases gr SET representative_event_id=(SELECT m.event_id FROM runtime_event_group_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.group_id=gr.group_id AND m.release_id=gr.release_id ORDER BY e.observed_at DESC,e.id DESC LIMIT 1) WHERE gr.group_id=ANY($1)")
-            .bind(group_ids)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE runtime_event_group_releases gr
+             SET representative_event_id=(
+                 SELECT m.event_id
+                 FROM runtime_event_group_memberships m
+                 JOIN runtime_events e ON e.id=m.event_id
+                 WHERE m.group_id=gr.group_id
+                     AND m.release_id=gr.release_id
+                 ORDER BY e.observed_at DESC,e.id DESC
+                 LIMIT 1
+             )
+             WHERE gr.group_id=ANY($1)",
+        )
+        .bind(group_ids)
+        .execute(executor)
+        .await
     }
 
     /// Recomputes an inventory item's occurrence count, seen window and
@@ -536,10 +833,34 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("WITH totals AS (SELECT count(*) n,min(e.observed_at) first_at,max(e.observed_at) last_at,bool_or(e.event_kind='network.listen') listener,bool_or(e.event_kind='network.accept') accept FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.item_id=$1) UPDATE runtime_inventory_items SET occurrence_count=totals.n,first_seen_at=COALESCE(totals.first_at,first_seen_at),last_seen_at=COALESCE(totals.last_at,last_seen_at),semantic_summary=CASE WHEN inventory_kind='inbound_endpoint' THEN semantic_summary || jsonb_build_object('listener_observed',COALESCE(listener,false),'accept_observed',COALESCE(accept,false)) ELSE semantic_summary END,updated_at=now() FROM totals WHERE id=$1")
-            .bind(item_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "WITH totals AS (
+                 SELECT count(*) n,min(e.observed_at) first_at,max(e.observed_at) last_at,
+                     bool_or(e.event_kind='network.listen') listener,
+                     bool_or(e.event_kind='network.accept') accept
+                 FROM runtime_inventory_event_memberships m
+                 JOIN runtime_events e ON e.id=m.event_id
+                 WHERE m.item_id=$1
+             )
+             UPDATE runtime_inventory_items
+             SET occurrence_count=totals.n,
+                 first_seen_at=COALESCE(totals.first_at,first_seen_at),
+                 last_seen_at=COALESCE(totals.last_at,last_seen_at),
+                 semantic_summary=CASE
+                     WHEN inventory_kind='inbound_endpoint'
+                         THEN semantic_summary || jsonb_build_object(
+                             'listener_observed',COALESCE(listener,false),'accept_observed',
+                             COALESCE(accept,false)
+                         )
+                     ELSE semantic_summary
+                 END,
+                 updated_at=now()
+             FROM totals
+             WHERE id=$1",
+        )
+        .bind(item_id)
+        .execute(executor)
+        .await
     }
 
     /// Rebuilds an item's per-release presence from its raw events.
@@ -550,10 +871,22 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_releases(organization_id,project_id,application_id,item_id,release_id,occurrence_count,first_seen_at,last_seen_at) SELECT m.organization_id,m.project_id,m.application_id,m.item_id,e.release_id,count(*),min(e.observed_at),max(e.observed_at) FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.item_id=$1 AND e.release_id IS NOT NULL GROUP BY m.organization_id,m.project_id,m.application_id,m.item_id,e.release_id")
-            .bind(item_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_releases(
+                 organization_id,project_id,application_id,item_id,release_id,
+                 occurrence_count,first_seen_at,last_seen_at
+             )
+             SELECT m.organization_id,m.project_id,m.application_id,m.item_id,e.release_id,
+                 count(*),min(e.observed_at),max(e.observed_at)
+             FROM runtime_inventory_event_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.item_id=$1
+                 AND e.release_id IS NOT NULL
+             GROUP BY m.organization_id,m.project_id,m.application_id,m.item_id,e.release_id",
+        )
+        .bind(item_id)
+        .execute(executor)
+        .await
     }
 
     /// Rebuilds an item's sightings from its raw events.
@@ -564,10 +897,24 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) SELECT m.organization_id,m.project_id,m.application_id,m.item_id,e.cluster_id,e.namespace,e.workload_kind,e.workload_name,e.pod_uid,max(e.pod_name),e.container_name,count(*),min(e.observed_at),max(e.observed_at) FROM runtime_inventory_event_memberships m JOIN runtime_events e ON e.id=m.event_id WHERE m.item_id=$1 GROUP BY m.organization_id,m.project_id,m.application_id,m.item_id,e.cluster_id,e.namespace,e.workload_kind,e.workload_name,e.pod_uid,e.container_name")
-            .bind(item_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_sightings(
+                 organization_id,project_id,application_id,item_id,cluster_id,namespace,
+                 workload_kind,workload_name,pod_uid,pod_name,container_name,
+                 occurrence_count,first_seen_at,last_seen_at
+             )
+             SELECT m.organization_id,m.project_id,m.application_id,m.item_id,e.cluster_id,
+                 e.namespace,e.workload_kind,e.workload_name,e.pod_uid,max(e.pod_name),
+                 e.container_name,count(*),min(e.observed_at),max(e.observed_at)
+             FROM runtime_inventory_event_memberships m
+             JOIN runtime_events e ON e.id=m.event_id
+             WHERE m.item_id=$1
+             GROUP BY m.organization_id,m.project_id,m.application_id,m.item_id,e.cluster_id,
+                 e.namespace,e.workload_kind,e.workload_name,e.pod_uid,e.container_name",
+        )
+        .bind(item_id)
+        .execute(executor)
+        .await
     }
 
     /// Rebuilds an item's links to runtime groups from its raw events.
@@ -578,10 +925,19 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("INSERT INTO runtime_inventory_group_links(organization_id,project_id,application_id,item_id,group_id) SELECT DISTINCT m.organization_id,m.project_id,m.application_id,m.item_id,g.group_id FROM runtime_inventory_event_memberships m JOIN runtime_event_group_memberships g ON g.event_id=m.event_id WHERE m.item_id=$1")
-            .bind(item_id)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "INSERT INTO runtime_inventory_group_links(
+                 organization_id,project_id,application_id,item_id,group_id
+             )
+             SELECT DISTINCT m.organization_id,m.project_id,m.application_id,m.item_id,
+                 g.group_id
+             FROM runtime_inventory_event_memberships m
+             JOIN runtime_event_group_memberships g ON g.event_id=m.event_id
+             WHERE m.item_id=$1",
+        )
+        .bind(item_id)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` processed outbox messages without deliveries
@@ -594,11 +950,28 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM outbox_messages WHERE id IN (SELECT o.id FROM outbox_messages o JOIN runtime_event_groups g ON g.id=o.aggregate_id WHERE g.project_id=$1 AND g.occurrence_count=0 AND o.processed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM notification_deliveries d WHERE d.outbox_message_id=o.id) ORDER BY o.created_at,o.id LIMIT $2)")
-            .bind(project_id)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM outbox_messages
+             WHERE id IN (
+                 SELECT o.id
+                 FROM outbox_messages o
+                 JOIN runtime_event_groups g ON g.id=o.aggregate_id
+                 WHERE g.project_id=$1
+                     AND g.occurrence_count=0
+                     AND o.processed_at IS NOT NULL
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM notification_deliveries d
+                         WHERE d.outbox_message_id=o.id
+                     )
+                 ORDER BY o.created_at,o.id
+                 LIMIT $2
+             )",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` of the project's items with no occurrence left
@@ -611,11 +984,30 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM runtime_inventory_items WHERE id IN (SELECT i.id FROM runtime_inventory_items i WHERE i.project_id=$1 AND i.occurrence_count=0 AND NOT EXISTS(SELECT 1 FROM runtime_policy_revisions p WHERE p.source_inventory_item_id=i.id) AND NOT EXISTS(SELECT 1 FROM runtime_policy_suppressions p WHERE p.source_inventory_item_id=i.id) LIMIT $2)")
-            .bind(project_id)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM runtime_inventory_items
+             WHERE id IN (
+                 SELECT i.id
+                 FROM runtime_inventory_items i
+                 WHERE i.project_id=$1
+                     AND i.occurrence_count=0
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM runtime_policy_revisions p
+                         WHERE p.source_inventory_item_id=i.id
+                     )
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM runtime_policy_suppressions p
+                         WHERE p.source_inventory_item_id=i.id
+                     )
+                 LIMIT $2
+             )",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 
     /// Deletes up to `limit` of the project's groups with no occurrence left
@@ -628,16 +1020,41 @@ impl RuntimeRetentionRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("DELETE FROM runtime_event_groups WHERE id IN (SELECT g.id FROM runtime_event_groups g WHERE g.project_id=$1 AND g.occurrence_count=0 AND NOT EXISTS(SELECT 1 FROM runtime_policy_revisions p WHERE p.source_runtime_group_id=g.id) AND NOT EXISTS(SELECT 1 FROM runtime_policy_suppressions p WHERE p.source_runtime_group_id=g.id) AND NOT EXISTS(SELECT 1 FROM outbox_messages o WHERE o.aggregate_id=g.id) LIMIT $2)")
-            .bind(project_id)
-            .bind(limit)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "DELETE FROM runtime_event_groups
+             WHERE id IN (
+                 SELECT g.id
+                 FROM runtime_event_groups g
+                 WHERE g.project_id=$1
+                     AND g.occurrence_count=0
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM runtime_policy_revisions p
+                         WHERE p.source_runtime_group_id=g.id
+                     )
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM runtime_policy_suppressions p
+                         WHERE p.source_runtime_group_id=g.id
+                     )
+                     AND NOT EXISTS(
+                         SELECT 1
+                         FROM outbox_messages o
+                         WHERE o.aggregate_id=g.id
+                     )
+                 LIMIT $2
+             )",
+        )
+        .bind(project_id)
+        .bind(limit)
+        .execute(executor)
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::SnapshotPageQuery;
     use chrono::{DateTime, Duration, NaiveDate, Utc};
     use sqlx::{FromRow, PgPool};
     use uuid::Uuid;
@@ -982,13 +1399,15 @@ mod tests {
 
         let snapshots: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
             &pool,
-            own.organization_id,
-            group,
-            None,
-            None,
-            None,
-            None,
-            10,
+            SnapshotPageQuery {
+                organization_id: own.organization_id,
+                group_id: group,
+                day_from: None,
+                day_to: None,
+                release_id: None,
+                cursor: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1005,13 +1424,15 @@ mod tests {
         );
         let for_release: Vec<Snapshot> = RuntimeRetentionRepository::snapshot_page(
             &pool,
-            own.organization_id,
-            group,
-            Some(day),
-            day.succ_opt(),
-            Some(release),
-            None,
-            10,
+            SnapshotPageQuery {
+                organization_id: own.organization_id,
+                group_id: group,
+                day_from: Some(day),
+                day_to: day.succ_opt(),
+                release_id: Some(release),
+                cursor: None,
+                fetch_limit: 10,
+            },
         )
         .await
         .unwrap();
@@ -1028,7 +1449,10 @@ mod tests {
             "two in history, one raw"
         );
         let group_release: i64 = sqlx::query_scalar(
-            "SELECT occurrence_count FROM runtime_event_group_releases WHERE group_id=$1 AND release_id=$2",
+            "SELECT occurrence_count
+             FROM runtime_event_group_releases
+             WHERE group_id=$1
+                 AND release_id=$2",
         )
         .bind(group)
         .bind(release)

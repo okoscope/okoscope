@@ -40,10 +40,18 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT o.id,o.slug,o.name,m.role FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.user_id=$1 AND o.status='active' ORDER BY m.created_at,o.id LIMIT 200")
-            .bind(user_id)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT o.id,o.slug,o.name,m.role
+             FROM organization_memberships m
+             JOIN organizations o ON o.id=m.organization_id
+             WHERE m.user_id=$1
+                 AND o.status='active'
+             ORDER BY m.created_at,o.id
+             LIMIT 200",
+        )
+        .bind(user_id)
+        .fetch_all(executor)
+        .await
     }
 
     /// A page of the organization's members by user id, after the cursor
@@ -61,12 +69,21 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND ($2::uuid IS NULL OR u.id>$2) ORDER BY u.id LIMIT $3")
-            .bind(organization_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),
+                 (u.email_verified_at IS NOT NULL),m.created_at
+             FROM organization_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE m.organization_id=$1
+                 AND ($2::uuid IS NULL OR u.id>$2)
+             ORDER BY u.id
+             LIMIT $3",
+        )
+        .bind(organization_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One organization member with the columns of
@@ -80,11 +97,18 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND m.user_id=$2")
-            .bind(organization_id)
-            .bind(user_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),
+                 (u.email_verified_at IS NOT NULL),m.created_at
+             FROM organization_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE m.organization_id=$1
+                 AND m.user_id=$2",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// Changes an organization member's role. A check constraint rejects
@@ -123,12 +147,20 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,m.created_at FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 AND ($2::uuid IS NULL OR u.id>$2) ORDER BY u.id LIMIT $3")
-            .bind(project_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,m.role,m.created_at
+             FROM project_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE m.project_id=$1
+                 AND ($2::uuid IS NULL OR u.id>$2)
+             ORDER BY u.id
+             LIMIT $3",
+        )
+        .bind(project_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// One project member with the columns of [`Self::project_member_page`].
@@ -141,11 +173,17 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,m.created_at FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=$1 AND m.user_id=$2")
-            .bind(project_id)
-            .bind(user_id)
-            .fetch_optional(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,m.role,m.created_at
+             FROM project_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE m.project_id=$1
+                 AND m.user_id=$2",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .fetch_optional(executor)
+        .await
     }
 
     /// A page of the organization's enabled members who are not yet members
@@ -162,13 +200,29 @@ impl MembershipRepository {
         E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
-        sqlx::query_as("SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),(u.email_verified_at IS NOT NULL),m.created_at FROM organization_memberships m JOIN users u ON u.id=m.user_id WHERE m.organization_id=$1 AND u.disabled_at IS NULL AND NOT EXISTS(SELECT 1 FROM project_memberships pm WHERE pm.project_id=$2 AND pm.user_id=u.id) AND ($3::uuid IS NULL OR u.id>$3) ORDER BY u.id LIMIT $4")
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(cursor)
-            .bind(fetch_limit)
-            .fetch_all(executor)
-            .await
+        sqlx::query_as(
+            "SELECT u.id,u.email,u.display_name,m.role,(u.disabled_at IS NULL),
+                 (u.email_verified_at IS NOT NULL),m.created_at
+             FROM organization_memberships m
+             JOIN users u ON u.id=m.user_id
+             WHERE m.organization_id=$1
+                 AND u.disabled_at IS NULL
+                 AND NOT EXISTS(
+                     SELECT 1
+                     FROM project_memberships pm
+                     WHERE pm.project_id=$2
+                         AND pm.user_id=u.id
+                 )
+                 AND ($3::uuid IS NULL OR u.id>$3)
+             ORDER BY u.id
+             LIMIT $4",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(cursor)
+        .bind(fetch_limit)
+        .fetch_all(executor)
+        .await
     }
 
     /// Changes a project member's role.
@@ -181,12 +235,17 @@ impl MembershipRepository {
     where
         E: PgExecutor<'e>,
     {
-        sqlx::query("UPDATE project_memberships SET role=$3,updated_at=now() WHERE project_id=$1 AND user_id=$2")
-            .bind(project_id)
-            .bind(user_id)
-            .bind(role)
-            .execute(executor)
-            .await
+        sqlx::query(
+            "UPDATE project_memberships
+             SET role=$3,updated_at=now()
+             WHERE project_id=$1
+                 AND user_id=$2",
+        )
+        .bind(project_id)
+        .bind(user_id)
+        .bind(role)
+        .execute(executor)
+        .await
     }
 
     /// Takes the transaction-scoped advisory lock that serialises changes to

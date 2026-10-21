@@ -56,21 +56,50 @@ async fn session(pool: &sqlx::PgPool, ids: &BootstrapIds, role: &str) -> String 
     .await
     .unwrap();
     if role == "member" {
-        sqlx::query("INSERT INTO project_memberships(organization_id,project_id,user_id,role) VALUES($1,$2,$3,'member')")
-            .bind(ids.organization_id)
-            .bind(ids.project_id)
-            .bind(user)
-            .execute(pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO project_memberships(organization_id,project_id,user_id,role)
+             VALUES($1,$2,$3,'member')",
+        )
+        .bind(ids.organization_id)
+        .bind(ids.project_id)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
     }
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')").bind(Uuid::new_v4()).bind(user).bind(ids.organization_id).bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user)
+    .bind(ids.organization_id)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     format!("{SESSION_COOKIE}={}", token.expose())
 }
 
 async fn item(pool: &sqlx::PgPool, ids: &BootstrapIds) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_inventory_items(id,organization_id,project_id,application_id,inventory_kind,identity_version,identity_digest,semantic_summary,first_seen_at,last_seen_at,occurrence_count) VALUES($1,$2,$3,$4,'process',2,$5,$6,now(),now(),1)").bind(id).bind(ids.organization_id).bind(ids.project_id).bind(ids.application_id).bind(vec![7_u8;32]).bind(serde_json::json!({"executable":"/app"})).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_inventory_items(
+             id,organization_id,project_id,application_id,inventory_kind,
+             identity_version,identity_digest,semantic_summary,first_seen_at,
+             last_seen_at,occurrence_count
+         )
+         VALUES($1,$2,$3,$4,'process',2,$5,$6,now(),now(),1)",
+    )
+    .bind(id)
+    .bind(ids.organization_id)
+    .bind(ids.project_id)
+    .bind(ids.application_id)
+    .bind(vec![7_u8; 32])
+    .bind(serde_json::json!({"executable":"/app"}))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -110,7 +139,25 @@ async fn policy_commands_preview_and_suppression_are_tenant_scoped_and_idempoten
     let second = bootstrap(&pool, &config("policy-second")).await.unwrap();
     let cookie = session(&pool, &first, "member").await;
     let item_id = item(&pool, &first).await;
-    sqlx::query("INSERT INTO runtime_inventory_sightings(organization_id,project_id,application_id,item_id,cluster_id,namespace,workload_kind,workload_name,pod_uid,pod_name,container_name,occurrence_count,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,'production','Deployment','app','pod-1','app-1','app',1,now(),now())").bind(first.organization_id).bind(first.project_id).bind(first.application_id).bind(item_id).bind(first.cluster_id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO runtime_inventory_sightings(
+             organization_id,project_id,application_id,item_id,cluster_id,namespace,
+             workload_kind,workload_name,pod_uid,pod_name,container_name,
+             occurrence_count,first_seen_at,last_seen_at
+         )
+         VALUES(
+             $1,$2,$3,$4,$5,'production','Deployment','app','pod-1','app-1','app',1,
+             now(),now()
+         )",
+    )
+    .bind(first.organization_id)
+    .bind(first.project_id)
+    .bind(first.application_id)
+    .bind(item_id)
+    .bind(first.cluster_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let app = web_api::router(policy_api::router(pool.clone()), &WebApiConfig::default());
     let base = format!(
         "/api/v1/projects/{}/applications/{}",
@@ -364,11 +411,15 @@ async fn policy_commands_preview_and_suppression_are_tenant_scoped_and_idempoten
         0
     );
     let crashed_owner = Uuid::new_v4();
-    sqlx::query("UPDATE runtime_policy_recomputations SET state='running',lease_owner=$1,lease_expires_at=now()-interval '1 second' WHERE state='pending'")
-        .bind(crashed_owner)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE runtime_policy_recomputations
+         SET state='running',lease_owner=$1,lease_expires_at=now()-interval '1 second'
+         WHERE state='pending'",
+    )
+    .bind(crashed_owner)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (worker_a, worker_b) = tokio::join!(
         server::policy_recompute::run_one_batch(&pool, Uuid::new_v4(), 1),
         server::policy_recompute::run_one_batch(&pool, Uuid::new_v4(), 1)
@@ -414,8 +465,16 @@ async fn policy_commands_preview_and_suppression_are_tenant_scoped_and_idempoten
 /// runtime group linked to it. Returns both ids.
 async fn observed_process(pool: &sqlx::PgPool, ids: &BootstrapIds) -> (Uuid, Uuid) {
     let agent_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version) VALUES ($1,$2,$3,'node-1','test')")
-        .bind(agent_id).bind(ids.organization_id).bind(ids.cluster_id).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agents (id,organization_id,cluster_id,node_name,agent_version)
+         VALUES ($1,$2,$3,'node-1','test')",
+    )
+    .bind(agent_id)
+    .bind(ids.organization_id)
+    .bind(ids.cluster_id)
+    .execute(pool)
+    .await
+    .unwrap();
     let event = RuntimeEvent {
         id: Uuid::new_v4(),
         observed_at: Utc::now(),

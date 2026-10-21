@@ -97,15 +97,23 @@ async fn workers_are_evidence_based_paginated_and_tenant_safe(pool: sqlx::PgPool
     let rich_agent = Uuid::new_v4();
     let sparse_agent = Uuid::new_v4();
     let no_evidence_agent = Uuid::new_v4();
-    sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version,architecture,kernel_release) VALUES($1,$2,$3,'node-new','1.2.3','x86_64','6.9.2'),($4,$2,$3,'node-old','1.1.0',NULL,NULL),($5,$2,$3,'node-idle','1.2.3','aarch64','6.8.1')")
-        .bind(rich_agent)
-        .bind(first.organization_id)
-        .bind(first.cluster_id)
-        .bind(sparse_agent)
-        .bind(no_evidence_agent)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO agents(
+             id,organization_id,cluster_id,node_name,agent_version,architecture,
+             kernel_release
+         )
+         VALUES($1,$2,$3,'node-new','1.2.3','x86_64','6.9.2'),
+             ($4,$2,$3,'node-old','1.1.0',NULL,NULL),
+             ($5,$2,$3,'node-idle','1.2.3','aarch64','6.8.1')",
+    )
+    .bind(rich_agent)
+    .bind(first.organization_id)
+    .bind(first.cluster_id)
+    .bind(sparse_agent)
+    .bind(no_evidence_agent)
+    .execute(&pool)
+    .await
+    .unwrap();
     let scope = SessionScope {
         organization_id: first.organization_id,
         cluster_id: first.cluster_id,
@@ -250,6 +258,16 @@ async fn session(pool: &sqlx::PgPool, organization: Uuid, role: &str) -> String 
     .await
     .unwrap();
     let token = server::auth::SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')").bind(Uuid::new_v4()).bind(user).bind(organization).bind(token.digest().as_slice()).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user)
+    .bind(organization)
+    .bind(token.digest().as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }

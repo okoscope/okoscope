@@ -75,8 +75,18 @@ async fn application_mail_fans_out_only_to_verified_owners(pool: sqlx::PgPool) {
         ("member@example.com", "member", true, "en"),
     ] {
         let user_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale) VALUES($1,$2,$3,CASE WHEN $4 THEN now() END,$5)")
-            .bind(user_id).bind(email).bind("x".repeat(32)).bind(verified).bind(locale).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users(id,email,password_hash,email_verified_at,preferred_locale)
+             VALUES($1,$2,$3,CASE WHEN $4 THEN now() END,$5)",
+        )
+        .bind(user_id)
+        .bind(email)
+        .bind("x".repeat(32))
+        .bind(verified)
+        .bind(locale)
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO organization_memberships(organization_id,user_id,role) VALUES($1,$2,$3)",
         )
@@ -169,9 +179,16 @@ async fn super_admin_token(pool: &sqlx::PgPool) -> String {
         .await
         .unwrap();
     let token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until) VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(token.digest().to_vec())
-        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,token_hash,expires_at,privileged_until)
+         VALUES($1,$2,$3,now()+interval '1 hour',now()+interval '15 minutes')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(token.digest().to_vec())
+    .execute(pool)
+    .await
+    .unwrap();
     token.expose().to_owned()
 }
 
@@ -316,7 +333,9 @@ async fn admin_provisions_hierarchy_and_rotates_secret_safely(pool: sqlx::PgPool
     assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
 
     let digest_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM application_ingestion_credentials WHERE octet_length(credential_hash)=32",
+        "SELECT count(*)
+         FROM application_ingestion_credentials
+         WHERE octet_length(credential_hash)=32",
     )
     .fetch_one(&pool)
     .await
@@ -502,9 +521,17 @@ async fn tenant_provisions_only_its_owned_hierarchy(pool: sqlx::PgPool) {
     .await
     .unwrap();
     let tenant_token = SessionToken::generate();
-    sqlx::query("INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '1 hour')")
-        .bind(Uuid::new_v4()).bind(user_id).bind(organization_id)
-        .bind(tenant_token.digest().as_slice()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_sessions(id,user_id,organization_id,token_hash,expires_at)
+         VALUES($1,$2,$3,$4,now()+interval '1 hour')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(tenant_token.digest().as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let tenant_cannot_create_organization = app
         .clone()

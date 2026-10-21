@@ -1,6 +1,6 @@
 use crate::repository::email_actions::EmailActionRepository;
 use crate::repository::invitations::InvitationRepository;
-use crate::repository::transactional_mail::TransactionalMailRepository;
+use crate::repository::transactional_mail::{NewMailMessage, TransactionalMailRepository};
 use crate::repository::users::UserRepository;
 use std::{fmt::Write as _, future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -548,17 +548,19 @@ async fn insert_encrypted(
         chrono::Duration::from_std(config.retention).map_err(|_| MailError::InvalidPayload)?;
     TransactionalMailRepository::insert(
         &mut **tx,
-        id,
-        logical_key,
-        kind,
-        recipient,
-        locale.as_str(),
-        ciphertext,
-        nonce.to_vec(),
-        action_id,
-        invitation_id,
-        expires_at,
-        retention,
+        NewMailMessage {
+            id,
+            logical_key,
+            template_kind: kind,
+            recipient_email: recipient,
+            locale: locale.as_str(),
+            payload_ciphertext: ciphertext,
+            payload_nonce: nonce.to_vec(),
+            action_id,
+            invitation_id,
+            expires_at,
+            retention,
+        },
     )
     .await?;
     Ok(())

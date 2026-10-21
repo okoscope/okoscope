@@ -17,7 +17,9 @@ use crate::application_credentials;
 use crate::auth::{SessionToken, UserPrincipal, hash_password, normalize_email, validate_password};
 use crate::repository::application_credentials::ApplicationCredentialRepository;
 use crate::repository::events::EventRepository;
-use crate::repository::installations::InstallationRepository;
+use crate::repository::installations::{
+    InstallationRepository, InstallationUpdate, NewInstallation,
+};
 use crate::repository::{ApplicationRepository, UserRepository};
 use crate::service::identity::{insert_identity_session, valid_name};
 use crate::service::project_access::member_project_role;
@@ -378,24 +380,26 @@ impl OnboardingService {
         .await?;
         let installation = InstallationRepository::insert::<_, Installation>(
             &mut *tx,
-            id,
-            principal.organization_id,
-            project_id,
-            application_id,
-            issued.summary.id,
-            key,
-            hash.as_slice(),
-            &input.cluster_name,
-            &input.workload.namespace,
-            &input.workload.kind,
-            input.workload.name.as_deref(),
-            input
-                .workload
-                .labels
-                .as_ref()
-                .map(|v| serde_json::to_value(v).expect("labels serialize")),
-            &metadata.chart_version,
-            metadata.configuration_schema_version,
+            NewInstallation {
+                id,
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                credential_id: issued.summary.id,
+                idempotency_key: key,
+                request_hash: hash.as_slice(),
+                cluster_name: &input.cluster_name,
+                workload_namespace: &input.workload.namespace,
+                workload_kind: &input.workload.kind,
+                workload_name: input.workload.name.as_deref(),
+                workload_labels: input
+                    .workload
+                    .labels
+                    .as_ref()
+                    .map(|v| serde_json::to_value(v).expect("labels serialize")),
+                chart_version: &metadata.chart_version,
+                configuration_schema_version: metadata.configuration_schema_version,
+            },
         )
         .await?;
         tx.commit().await?;
@@ -465,19 +469,21 @@ impl OnboardingService {
         validate_installation(&input)?;
         InstallationRepository::update::<_, Installation>(
             &self.pool,
-            principal.organization_id,
-            project_id,
-            application_id,
-            installation_id,
-            &input.cluster_name,
-            &input.workload.namespace,
-            &input.workload.kind,
-            input.workload.name.as_deref(),
-            input
-                .workload
-                .labels
-                .as_ref()
-                .map(|labels| serde_json::to_value(labels).expect("bounded labels serialize")),
+            InstallationUpdate {
+                organization_id: principal.organization_id,
+                project_id,
+                application_id,
+                installation_id,
+                cluster_name: &input.cluster_name,
+                workload_namespace: &input.workload.namespace,
+                workload_kind: &input.workload.kind,
+                workload_name: input.workload.name.as_deref(),
+                workload_labels: input
+                    .workload
+                    .labels
+                    .as_ref()
+                    .map(|labels| serde_json::to_value(labels).expect("bounded labels serialize")),
+            },
         )
         .await?
         .ok_or(OnboardingServiceError::NotFound)
