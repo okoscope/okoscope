@@ -10,7 +10,7 @@ use chacha20poly1305::{
 };
 use chrono::{DateTime, Utc};
 use clap::Args;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{Mailbox, MultiPart, SinglePart, header::ContentType},
@@ -1194,16 +1194,28 @@ pub async fn run(service: MailService, mut shutdown: tokio::sync::watch::Receive
     }
 }
 
+/// Processes one claimed batch. Every mail in it runs to completion even when
+/// another fails: dropping an in-flight send could leave mail that was sent
+/// but not marked delivered, to be sent again once its lease expires. The
+/// first failure is returned after the batch.
 async fn process_batch(service: &MailService, worker_id: Uuid) -> Result<(), MailError> {
     let claimed = claim(&service.pool, &service.config, worker_id).await?;
     crate::metrics::record_mail_claims(claimed.len());
-    futures::stream::iter(claimed)
+    let results: Vec<Result<(), MailError>> = futures::stream::iter(claimed)
         .map(|mail| process_one(service, worker_id, mail))
         .buffer_unordered(service.config.concurrency)
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect()
+        .await;
+    let mut first_error = None;
+    for error in results.into_iter().filter_map(Result::err) {
+        if first_error.is_some() {
+            tracing::error!(error = %error, "transactional mail delivery failed");
+        } else {
+            first_error = Some(error);
+        }
+    }
     cleanup(&service.pool).await?;
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 pub async fn process_once(service: &MailService) -> Result<(), MailError> {
