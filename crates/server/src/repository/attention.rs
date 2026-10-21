@@ -307,7 +307,7 @@ impl AttentionRepository {
                          WHERE (
                              e.group_id IS NULL
                              OR e.policy_state_version<>COALESCE(ps.state_version,0)
-                             OR e.evaluator_version<>1
+                             OR e.evaluator_version<>$5
                              OR e.verdict<>'expected'
                          )
                      ),
@@ -315,30 +315,30 @@ impl AttentionRepository {
                      count(*) FILTER(
                          WHERE e.group_id IS NULL
                          OR e.policy_state_version<>COALESCE(ps.state_version,0)
-                         OR e.evaluator_version<>1
+                         OR e.evaluator_version<>$5
                      ),
                      'expected',
                      count(*) FILTER(
                          WHERE e.policy_state_version=COALESCE(ps.state_version,0)
-                         AND e.evaluator_version=1
+                         AND e.evaluator_version=$5
                          AND e.verdict='expected'
                      ),
                      'requires_review',
                      count(*) FILTER(
                          WHERE e.policy_state_version=COALESCE(ps.state_version,0)
-                         AND e.evaluator_version=1
+                         AND e.evaluator_version=$5
                          AND e.verdict='requires_review'
                      ),
                      'policy_conflict',
                      count(*) FILTER(
                          WHERE e.policy_state_version=COALESCE(ps.state_version,0)
-                         AND e.evaluator_version=1
+                         AND e.evaluator_version=$5
                          AND e.verdict='policy_conflict'
                      ),
                      'unclassified',
                      count(*) FILTER(
                          WHERE e.policy_state_version=COALESCE(ps.state_version,0)
-                         AND e.evaluator_version=1
+                         AND e.evaluator_version=$5
                          AND e.verdict='unclassified'
                      )
                  )
@@ -361,13 +361,15 @@ impl AttentionRepository {
     /// `acknowledged_discoveries`, `changed_applications`,
     /// `projects_with_notification_problems` (always 0, for the caller to
     /// fill), `failed_notification_deliveries`, `resource_regressions` and
-    /// `policy`.
+    /// `policy`. An evaluation counts as current only when it was made by
+    /// `evaluator_version`.
     pub async fn organization_totals<'e, E, T>(
         executor: E,
         organization_id: Uuid,
         project_ids: &[Uuid],
         from: DateTime<Utc>,
         to: DateTime<Utc>,
+        evaluator_version: i16,
     ) -> Result<T, sqlx::Error>
     where
         E: PgExecutor<'e>,
@@ -378,6 +380,7 @@ impl AttentionRepository {
             .bind(project_ids)
             .bind(from)
             .bind(to)
+            .bind(evaluator_version)
             .fetch_one(executor)
             .await
     }
@@ -1171,6 +1174,7 @@ mod tests {
             &[own.project_id],
             from,
             to,
+            crate::policy::POLICY_EVALUATOR_VERSION,
         )
         .await
         .unwrap();
@@ -1192,6 +1196,30 @@ mod tests {
             (0, 0, 0)
         );
         assert_eq!(totals.policy["factual_total"], 3);
+
+        // Ingestion evaluated every group with the current evaluator; under
+        // any other version those evaluations are stale.
+        let version = crate::policy::POLICY_EVALUATOR_VERSION;
+        for (asked, unclassified, pending) in [(version, 3, 0), (version + 1, 0, 3)] {
+            let totals: Totals = AttentionRepository::organization_totals(
+                &pool,
+                own.organization_id,
+                &[own.project_id],
+                from,
+                to,
+                asked,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                totals.policy["unclassified"], unclassified,
+                "evaluator version {asked}"
+            );
+            assert_eq!(
+                totals.policy["evaluation_pending"], pending,
+                "evaluator version {asked}"
+            );
+        }
 
         let discoveries: Vec<Discovery> = AttentionRepository::discoveries(
             &pool,

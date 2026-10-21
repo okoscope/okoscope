@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use server::transactional_mail::{
-    CapturingSender, Locale, MailConfig, MailService, TemplateData, cleanup, enqueue,
-    enqueue_invitation, process_once,
+    CapturingSender, DeliveryFailure, Locale, MailConfig, MailSender, MailService, RenderedMail,
+    TemplateData, cleanup, enqueue, enqueue_invitation, process_once,
 };
 use uuid::Uuid;
 
@@ -233,6 +233,85 @@ async fn invitation_mail_is_encrypted_referenced_and_delivered_once(pool: sqlx::
     .await
     .unwrap();
     assert_eq!(retained_reference, (0, None));
+}
+
+/// Delivers mail to `slow@example.com` only after a pause, so a failure on
+/// another mail of the batch happens while that send is still in flight.
+#[derive(Default)]
+struct SlowSender {
+    delivered: std::sync::Mutex<Vec<String>>,
+}
+
+impl MailSender for SlowSender {
+    fn send<'a>(
+        &'a self,
+        recipient: &'a str,
+        _rendered: &'a RenderedMail,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), DeliveryFailure>> + Send + 'a>> {
+        Box::pin(async move {
+            if recipient == "slow@example.com" {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            self.delivered.lock().unwrap().push(recipient.to_owned());
+            Ok(())
+        })
+    }
+}
+
+#[sqlx::test(migrator = "server::database::MIGRATOR")]
+#[ignore = "requires a PostgreSQL server with DATABASE_URL"]
+async fn a_failed_mail_does_not_cancel_the_rest_of_its_batch(pool: sqlx::PgPool) {
+    let config = config();
+    let mut tx = pool.begin().await.unwrap();
+    for key in ["fails", "slow"] {
+        enqueue(
+            &mut tx,
+            &config,
+            key,
+            &[(format!("{key}@example.com"), Locale::En)],
+            &TemplateData::PasswordChanged,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION fail_mail_delivery() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.delivered_at IS NOT NULL AND OLD.logical_key='fails' THEN
+                 RAISE EXCEPTION 'delivery bookkeeping failed';
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER fail_mail_delivery BEFORE UPDATE ON transactional_mail_outbox
+             FOR EACH ROW EXECUTE FUNCTION fail_mail_delivery();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let sender = Arc::new(SlowSender::default());
+    let service = MailService::with_sender(pool.clone(), config, sender.clone());
+    assert!(
+        process_once(&service).await.is_err(),
+        "the failure is reported"
+    );
+
+    let mut sent = sender.delivered.lock().unwrap().clone();
+    sent.sort();
+    assert_eq!(sent, ["fails@example.com", "slow@example.com"]);
+    let slow_delivered: bool = sqlx::query_scalar(
+        "SELECT delivered_at IS NOT NULL FROM transactional_mail_outbox WHERE logical_key='slow'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        slow_delivered,
+        "the in-flight send finished and was recorded"
+    );
 }
 
 async fn outbox_count(pool: &sqlx::PgPool) -> i64 {

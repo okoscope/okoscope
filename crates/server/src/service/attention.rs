@@ -1234,6 +1234,7 @@ impl AttentionService {
             &access.project_ids,
             from,
             now,
+            crate::policy::POLICY_EVALUATOR_VERSION,
         )
         .await?;
         totals.projects_with_notification_problems = total_problem_count;

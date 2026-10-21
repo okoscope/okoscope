@@ -60,6 +60,12 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
   it as a decode failure, and logs a failed kernel counter read instead of
   exiting. One malformed record, for example from a mismatched eBPF object,
   no longer crash-loops the agent.
+- Organization attention totals judge whether a policy evaluation is current
+  by the running evaluator version. The query hard-coded version 1, so raising
+  the evaluator version would have shown stale evaluations as current.
+- A failure on one transactional mail no longer cancels the other sends in its
+  batch. Mail already handed to SMTP was left unrecorded and sent again after
+  its lease expired.
 
 ### Upgrade notes
 
