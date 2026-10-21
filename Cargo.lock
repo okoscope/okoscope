@@ -29,6 +29,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "protocol",
+ "rand 0.9.5",
  "serde",
  "serde_yaml",
  "sha2",

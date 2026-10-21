@@ -4,6 +4,7 @@ use chrono::Utc;
 use event_model::{ResourceAggregate, RuntimeEvent};
 use protocol::v1::{AgentHello, AgentMessage, Heartbeat, agent_message, server_message};
 use tokio::sync::{mpsc, watch};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     config::{LoadedApplicationCredential, ResourceObservationConfig, SafetyLimits, ServerConfig},
     counters::{ApplicationCounters, Counters},
     delivery::EventBuffer,
-    session::{connect_with_backoff, handle_control},
+    session::{Backoff, connect, handle_control, sleep_unless_shutdown},
 };
 
 #[derive(Clone, Debug)]
@@ -233,23 +234,25 @@ async fn run_stream(
     let mut resource_queued = Vec::<ResourceAggregate>::new();
     let mut resource_pending = BTreeMap::<u64, Vec<ResourceAggregate>>::new();
     let mut resource_sequence = 1_u64;
+    let mut backoff = Backoff::default();
     loop {
-        if *shutdown.borrow() {
+        let Some(mut session) = connect(
+            &server,
+            credential.token.trim(),
+            &hello,
+            &mut backoff,
+            &mut shutdown,
+        )
+        .instrument(tracing::warn_span!(
+            "application_stream",
+            route_id = %credential.route_id,
+            credential_path = %credential.canonical_path,
+        ))
+        .await
+        else {
             return;
-        }
-        let session = connect_with_backoff(&server, credential.token.trim(), hello.clone()).await;
-        let mut session = match session {
-            Ok(session) => session,
-            Err(error) => {
-                tracing::warn!(
-                    route_id=%credential.route_id,
-                    credential_path=%credential.canonical_path,
-                    %error,
-                    "Application stream connection failed"
-                );
-                continue;
-            }
         };
+        let connected_at = std::time::Instant::now();
         for batch in buffer.replay_pending(&counters, &application_counters) {
             if send_batch(&session.sender, batch).await.is_err() {
                 break;
@@ -317,7 +320,11 @@ async fn run_stream(
                 }
             }
         }
-        tracing::warn!(route_id=%credential.route_id, "Application stream disconnected; reconnecting");
+        let delay = backoff.after_session(connected_at.elapsed());
+        tracing::warn!(route_id=%credential.route_id, ?delay, "Application stream disconnected; reconnecting");
+        if !sleep_unless_shutdown(delay, &mut shutdown).await {
+            return;
+        }
     }
 }
 

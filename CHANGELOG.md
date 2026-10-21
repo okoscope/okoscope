@@ -69,6 +69,11 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 - Agent health buckets are pruned by a server worker once a minute instead of
   inside every agent heartbeat transaction, where concurrent heartbeats
   contended for the same rows and a failed prune failed the heartbeat.
+- The agent's reconnect backoff no longer falls back to 250 ms after reaching
+  30 s, adds jitter so agents do not reconnect in lockstep, bounds connecting
+  and opening a session, waits before reconnecting after a session the server
+  closed straight away, and stops waiting on shutdown. A rejected credential
+  or protocol version is retried at the longest delay.
 
 ### Upgrade notes
 
