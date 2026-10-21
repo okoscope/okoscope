@@ -56,6 +56,10 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
   sign-in costs one Argon2 verification instead of two. Previously every
   sign-in hashed a dummy password on an async worker, so a burst of login
   attempts could stall HTTP and agent gRPC traffic.
+- The agent skips a DNS, inbound or process record it cannot decode and counts
+  it as a decode failure, and logs a failed kernel counter read instead of
+  exiting. One malformed record, for example from a mismatched eBPF object,
+  no longer crash-loops the agent.
 
 ### Upgrade notes
 
