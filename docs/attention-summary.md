@@ -7,9 +7,11 @@ Okoscope exposes two authenticated snapshots:
 
 Both accept `window=24h|7d` (default `24h`), `limit=1..50` (default `20`), and `recommendation_limit=1..10` (default `5`). The Organization endpoint also accepts `changed_application_limit=1..10`; the Application endpoint accepts `largest_change_limit=1..10`; both default to `5`.
 
+Requests authenticate with the session cookie from `POST /api/v1/auth/login`; see [Calling the API from the command line](deployment.md#calling-the-api-from-the-command-line).
+
 ```console
-curl -H 'Authorization: Bearer …' \
-  'https://okoscope.example/api/v1/attention-summary?window=24h&limit=20'
+curl -b okoscope.cookies \
+  'https://okoscope.example.com/api/v1/attention-summary?window=24h&limit=20'
 ```
 
 ```json

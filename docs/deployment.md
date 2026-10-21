@@ -86,7 +86,7 @@ and never expose their one-time plaintext token again. Provisioning validation
 errors use stable machine-readable codes and may include a `fields` map for
 form-level feedback.
 
-Cross-origin browser access is disabled by default. Set `OKOSCOPE_CORS_ORIGINS` to a comma-separated list of exact `http` or `https` origins (for example `https://okoscope.example.com`); wildcards and URL paths are rejected at startup. Roll out first with an empty value, verify same-origin access, then add only the UI origin and check an authenticated preflight. CORS grants browser permission only—it never replaces bearer authentication.
+Cross-origin browser access is disabled by default. Set `OKOSCOPE_CORS_ORIGINS` to a comma-separated list of exact `http` or `https` origins (for example `https://okoscope.example.com`); wildcards and URL paths are rejected at startup. Roll out first with an empty value, verify same-origin access, then add only the UI origin and check an authenticated preflight. CORS grants browser permission only—it never replaces session authentication. A state-changing request that carries a session cookie must also send a trusted `Origin`: one listed in `OKOSCOPE_CORS_ORIGINS`, or the origin of the server address being called; otherwise it is rejected with `403 untrusted_origin`.
 
 Transactional email uses standard authenticated SMTP and a PostgreSQL outbox. Prefer the Helm interface documented in [production self-hosting](self-hosted-deployment.md#transactional-email): it maps non-secret `mail` values to `OKOSCOPE_MAIL_*` / `OKOSCOPE_SMTP_*` settings and reads the SMTP username, password, and dedicated 64-hex-character mail encryption key only from Kubernetes Secrets. The worker is off by default. Production requires HTTPS action links plus STARTTLS or implicit TLS with certificate validation; plaintext SMTP is limited to an explicitly selected local development configuration. Invitation tokens use fragment links and digest-only business persistence; an explicit POST accepts the grant.
 
@@ -131,15 +131,27 @@ Known limits: one tested Linux profile, Deployment owner chains only, bounded in
 
 ## Runtime event grouping upgrade
 
-Migration `0003_runtime_event_groups.sql` is additive and required by server readiness. The current coordinated agent protocol uses an Application credential for each stream; the server derives Organization, Project, and Application from its SHA-256 digest and discovers Cluster identity from the agent's Kubernetes UID. `api-credential` continues to authenticate the existing read API until user authorization replaces it.
+Migration `0003_runtime_event_groups.sql` is additive and required by server readiness. The current coordinated agent protocol uses an Application credential for each stream; the server derives Organization, Project, and Application from its SHA-256 digest and discovers Cluster identity from the agent's Kubernetes UID. The Web API authenticates users with session cookies only; it no longer accepts an Organization API credential as `Authorization: Bearer`.
 
-List groups using the Organization-bound credential. Project and Application are explicit filters, while Organization is always derived from the credential:
+### Calling the API from the command line
+
+Sign in as a user with access to the Project and keep the session cookie in a private file:
 
 ```sh
 kubectl -n okoscope port-forward service/okoscope-server 8080:8080
-curl -H 'Authorization: Bearer <api-credential>' \
+curl -fsS -c okoscope.cookies -H 'Content-Type: application/json' \
+  -d '{"email":"<email>","password":"<password>"}' \
+  http://localhost:8080/api/v1/auth/login
+```
+
+Pass the cookie with `-b okoscope.cookies` on every request. State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) also need `-H 'Origin: http://localhost:8080'`, matching the address being called. The file holds a live session: sign out with `curl -X POST -b okoscope.cookies -H 'Origin: http://localhost:8080' http://localhost:8080/api/v1/auth/logout` and delete it when done.
+
+List groups in the session's active Organization. Project and Application are explicit filters:
+
+```sh
+curl -b okoscope.cookies \
   'http://localhost:8080/api/v1/runtime-groups?project_id=<project-uuid>&application_id=<application-uuid>'
-curl -H 'Authorization: Bearer <api-credential>' \
+curl -b okoscope.cookies \
   'http://localhost:8080/api/v1/runtime-groups/<group-uuid>'
 curl http://localhost:8080/metrics
 ```
@@ -173,11 +185,11 @@ The group detail API now returns a secret-free notification summary, while raw o
 
 Migration `0004_notification_delivery.sql` is additive. The example manifest supplies a syntactically valid development encryption key but leaves `OKOSCOPE_NOTIFICATION_DELIVERY_ENABLED=false`. Replace the key with 32 cryptographically random bytes encoded as 64 hexadecimal characters before creating destinations; back it up separately from PostgreSQL. Losing the key makes stored signing secrets undecryptable.
 
-Create a Project destination through the authenticated API:
+Create a Project destination through the authenticated API, signed in as described in [Calling the API from the command line](#calling-the-api-from-the-command-line):
 
 ```sh
 curl -X POST \
-  -H 'Authorization: Bearer <api-credential>' \
+  -b okoscope.cookies -H 'Origin: http://localhost:8080' \
   -H 'Content-Type: application/json' \
   http://localhost:8080/api/v1/projects/<project-uuid>/webhook-destinations \
   -d '{"name":"primary","url":"https://receiver.example.com/okoscope","deliver_backfill":false}'
@@ -188,7 +200,7 @@ The generated `secret` appears only in this response. Store it in the receiver s
 Test a destination without consuming runtime outbox work:
 
 ```sh
-curl -X POST -H 'Authorization: Bearer <api-credential>' \
+curl -X POST -b okoscope.cookies -H 'Origin: http://localhost:8080' \
   http://localhost:8080/api/v1/projects/<project-uuid>/webhook-destinations/<destination-id>/test
 ```
 
@@ -228,10 +240,10 @@ One immutable Release can have multiple deployment episodes. Returning to an old
 List releases and compare a target with its automatically selected previous release:
 
 ```sh
-curl -H 'Authorization: Bearer <api-credential>' \
+curl -b okoscope.cookies \
   'http://localhost:8080/api/v1/projects/<project-uuid>/applications/<application-uuid>/releases?limit=50'
 
-curl -H 'Authorization: Bearer <api-credential>' \
+curl -b okoscope.cookies \
   'http://localhost:8080/api/v1/projects/<project-uuid>/applications/<application-uuid>/releases/<target-release-uuid>/runtime-diff?limit=50'
 ```
 
