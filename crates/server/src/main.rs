@@ -83,7 +83,7 @@ async fn serve(
     let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
     let signal_sender = shutdown_sender.clone();
     let signal_task = tokio::spawn(async move {
-        if let Err(error) = tokio::signal::ctrl_c().await {
+        if let Err(error) = shutdown_signal().await {
             tracing::error!(error=%error, "failed to listen for shutdown signal");
         }
         let _ = signal_sender.send(true);
@@ -161,6 +161,21 @@ async fn serve(
     let _ = retention_task.await;
     let _ = policy_worker_task.await;
     Ok(())
+}
+
+/// Resolves on Ctrl+C or on SIGTERM, which Kubernetes sends to stop a pod.
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[derive(Debug, Parser)]
@@ -691,5 +706,37 @@ mod tests {
     #[test]
     fn flattened_command_line_arguments_have_unique_ids() {
         Args::command().debug_assert();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_requests_shutdown() {
+        use std::time::Duration;
+        use tokio::signal::unix::{SignalKind, signal};
+
+        // Once any SIGTERM listener exists, the signal no longer terminates
+        // the test process, so it can be raised until the listener under test
+        // has registered and returned.
+        let _guard = signal(SignalKind::terminate()).expect("register SIGTERM");
+        let mut shutdown = tokio::spawn(super::shutdown_signal());
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = std::process::Command::new("kill")
+                    .args(["-TERM", &std::process::id().to_string()])
+                    .status()
+                    .expect("run kill");
+                assert!(status.success());
+                if let Ok(result) =
+                    tokio::time::timeout(Duration::from_millis(50), &mut shutdown).await
+                {
+                    break result;
+                }
+            }
+        })
+        .await;
+        result
+            .expect("SIGTERM should request shutdown")
+            .expect("signal task")
+            .expect("signal listener");
     }
 }

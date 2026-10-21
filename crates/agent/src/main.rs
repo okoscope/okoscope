@@ -120,6 +120,8 @@ mod linux {
         time::{Duration, Instant},
     };
 
+    use tokio::signal::unix::{Signal, SignalKind, signal};
+
     use super::handshake::hello;
     use agent::{
         attribution::{AttributionCache, resolve_and_count, run_watches},
@@ -256,6 +258,9 @@ mod linux {
             config.observation.resources.sample_interval_seconds,
         ));
         let mut lifecycle_readiness_open = true;
+        // Kubernetes stops the pod with SIGTERM; register before the loop so a
+        // signal arriving between iterations is not lost.
+        let mut terminate = signal(SignalKind::terminate())?;
         loop {
             tokio::select! {
                 _ = resource_poll.tick(), if resource_sampler.is_some() => {
@@ -446,7 +451,7 @@ mod linux {
                         tracing::info!(state = ?*lifecycle_readiness.borrow(), "Kubernetes lifecycle readiness changed");
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
+                () = shutdown_requested(&mut terminate) => {
                     for event in file_aggregator.drain_all() {
                         if rate_limiter.allow() { streams.route(event); }
                         else {
@@ -459,6 +464,14 @@ mod linux {
                     return Ok(());
                 },
             }
+        }
+    }
+
+    /// Resolves on Ctrl+C or SIGTERM.
+    async fn shutdown_requested(terminate: &mut Signal) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
         }
     }
 
@@ -875,7 +888,24 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use super::task_owner_identity;
+        use std::time::Duration;
+
+        use tokio::signal::unix::{SignalKind, signal};
+
+        use super::{shutdown_requested, task_owner_identity};
+
+        #[tokio::test]
+        async fn sigterm_requests_shutdown() {
+            let mut terminate = signal(SignalKind::terminate()).expect("register SIGTERM");
+            let status = std::process::Command::new("kill")
+                .args(["-TERM", &std::process::id().to_string()])
+                .status()
+                .expect("run kill");
+            assert!(status.success());
+            tokio::time::timeout(Duration::from_secs(5), shutdown_requested(&mut terminate))
+                .await
+                .expect("SIGTERM should request shutdown");
+        }
 
         #[test]
         fn thread_events_use_the_thread_group_leader_as_process_identity() {

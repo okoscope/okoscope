@@ -48,6 +48,10 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
   answers `404 user_not_found` instead of `500`.
 - Creating or renaming a webhook destination to a name already used in the
   project now answers `409 destination_name_conflict` instead of `500`.
+- The server and the agent now shut down gracefully on SIGTERM, which
+  Kubernetes sends to stop a pod. Previously only Ctrl+C was handled, so on
+  every rollout the server skipped draining notifications and mail, and the
+  agent dropped pending file aggregates and unacknowledged event batches.
 
 ### Upgrade notes
 
