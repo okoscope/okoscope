@@ -18,6 +18,7 @@ hex.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 protocol.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true

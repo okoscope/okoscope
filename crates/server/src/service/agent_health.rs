@@ -242,9 +242,6 @@ pub async fn record_heartbeat(
     )
     .await
     .map_err(|_| "database error")?;
-    cleanup(&mut tx, received_at)
-        .await
-        .map_err(|_| "database error")?;
     tx.commit().await.map_err(|_| "database error")?;
     Ok(())
 }
@@ -391,12 +388,42 @@ fn deltas(old: &[u64], new: &[u64]) -> [i64; DIAGNOSTIC_COUNT] {
     })
 }
 
-async fn cleanup(
-    tx: &mut Transaction<'_, Postgres>,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+/// How often [`run_retention`] prunes signal and diagnostic buckets.
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Rows per table and statement; a pass repeats until a batch comes back short.
+const PRUNE_BATCH: i64 = 500;
+
+/// Prunes signal and diagnostic buckets past [`HEALTH_RETENTION_HOURS`] once a
+/// minute until shutdown. Reads already ignore buckets outside the window, so
+/// pruning only bounds storage. It runs here rather than in every heartbeat
+/// transaction, where concurrent agents contended for the same rows.
+pub async fn run_retention(pool: PgPool, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = interval.tick() => {
+                if let Err(error) = prune(&pool, Utc::now()).await {
+                    tracing::error!(%error, "agent health retention failed");
+                }
+            }
+        }
+    }
+}
+
+/// Deletes buckets older than the retention window at `now`, batch by batch,
+/// and returns how many batches it ran.
+pub async fn prune(pool: &PgPool, now: DateTime<Utc>) -> Result<u64, sqlx::Error> {
     let cutoff = now - Duration::hours(HEALTH_RETENTION_HOURS);
-    AgentHealthRepository::prune_buckets(tx, cutoff).await
+    let mut conn = pool.acquire().await?;
+    let mut batches = 0;
+    loop {
+        let deleted = AgentHealthRepository::prune_buckets(&mut conn, cutoff, PRUNE_BATCH).await?;
+        batches += 1;
+        if deleted < PRUNE_BATCH.unsigned_abs() {
+            return Ok(batches);
+        }
+    }
 }
 
 pub async fn end_session(
