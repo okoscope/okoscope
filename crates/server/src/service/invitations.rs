@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 use crate::access_audit::{AccessAuditActor, AccessAuditEvent, write_access_audit};
 use crate::access_control::{ProjectRole, can_manage_project_role};
 use crate::auth::{
-    IdentityPrincipal, OrganizationRole, SessionToken, hash_password, normalize_email,
+    IdentityPrincipal, OrganizationRole, SessionToken, hash_password_blocking, normalize_email,
     validate_password,
 };
 use crate::repository::invitations::{InvitationRepository, NewInvitationRecord};
@@ -674,7 +674,8 @@ impl InvitationService {
             return Err(invalid("display name is invalid"));
         }
         let digest = invitation_digest(&input.token).ok_or(InvitationServiceError::Unusable)?;
-        let password_hash = hash_password(&input.password)
+        let password_hash = hash_password_blocking(&input.password)
+            .await
             .map_err(|_error| InvitationServiceError::PasswordHashing)?;
         let mut tx = self.pool.begin().await?;
         let row = load_invitation_by_digest(&mut tx, digest)

@@ -331,7 +331,11 @@ mod linux {
                             counters.file_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    while let Some(packet) = observer.next_dns_packet()? {
+                    while let Some(packet) = observer.next_dns_packet() {
+                        let Ok(packet) = packet else {
+                            counters.decode_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
                         let Some((process, payload)) = dns_processor.process(&packet, &counters) else { continue };
                         let container = cgroup_resolver.resolve(process.pid, process.cgroup_id).ok();
                         let Some(attribution) = resolve_and_count(
@@ -349,7 +353,11 @@ mod linux {
                             counters.dns_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    while let Some(kernel) = observer.next_inbound_event()? {
+                    while let Some(kernel) = observer.next_inbound_event() {
+                        let Ok(kernel) = kernel else {
+                            counters.decode_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
                         let is_accept = kernel.event_kind == agent_ebpf_common::EVENT_KIND_NETWORK_ACCEPT;
                         let Some(event) = runtime_inbound_event(
                             &kernel, &mut cgroup_resolver, &cache, &counters, &config,
@@ -361,7 +369,11 @@ mod linux {
                             counters.inbound_rate_limited.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    while let Some(kernel) = observer.next_event()? {
+                    while let Some(kernel) = observer.next_event() {
+                        let Ok(kernel) = kernel else {
+                            counters.decode_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
                         let Some(mut event) = runtime_event(&kernel, architecture, &mut cgroup_resolver, &cache, &counters, &config, &mut dns_processor) else { continue };
                         if let EventPayload::ProcessExec(exec) = &mut event.payload {
                             exec.generation = Some(process_generations.observe_exec(
@@ -431,11 +443,21 @@ mod linux {
                     }
                 }
                 _ = heartbeat.tick() => {
-                    counters.update_network_kernel(observer.network_counters()?);
-                    counters.update_inbound_kernel(observer.inbound_kernel_counters()?);
-                    counters.update_dns_kernel(observer.dns_kernel_counters()?);
-                    counters.update_file_kernel(observer.file_kernel_counters()?);
-                    counters.update_exit_kernel(observer.exit_kernel_counters()?);
+                    if let Some(value) = kernel_counters("network", observer.network_counters()) {
+                        counters.update_network_kernel(value);
+                    }
+                    if let Some(value) = kernel_counters("inbound", observer.inbound_kernel_counters()) {
+                        counters.update_inbound_kernel(value);
+                    }
+                    if let Some(value) = kernel_counters("dns", observer.dns_kernel_counters()) {
+                        counters.update_dns_kernel(value);
+                    }
+                    if let Some(value) = kernel_counters("file", observer.file_kernel_counters()) {
+                        counters.update_file_kernel(value);
+                    }
+                    if let Some(value) = kernel_counters("exit", observer.exit_kernel_counters()) {
+                        counters.update_exit_kernel(value);
+                    }
                     for event in task_lifecycle.flush_due(Utc::now()) {
                         if rate_limiter.allow() { streams.route(event); }
                         else { counters.capacity_dropped.fetch_add(1, Ordering::Relaxed); }
@@ -465,6 +487,15 @@ mod linux {
                 },
             }
         }
+    }
+
+    /// A failed kernel counter read keeps the previous values: a heartbeat
+    /// must not stop the agent.
+    fn kernel_counters<T>(source: &str, read: anyhow::Result<T>) -> Option<T> {
+        read.map_err(|error| {
+            tracing::warn!(error = ?error, source, "reading kernel counters failed");
+        })
+        .ok()
     }
 
     /// Resolves on Ctrl+C or SIGTERM.
@@ -892,7 +923,16 @@ mod linux {
 
         use tokio::signal::unix::{SignalKind, signal};
 
-        use super::{shutdown_requested, task_owner_identity};
+        use super::{kernel_counters, shutdown_requested, task_owner_identity};
+
+        #[test]
+        fn failed_kernel_counter_reads_are_skipped() {
+            assert_eq!(kernel_counters("network", Ok(7_u64)), Some(7));
+            assert_eq!(
+                kernel_counters::<u64>("network", Err(anyhow::anyhow!("map read failed"))),
+                None
+            );
+        }
 
         #[tokio::test]
         async fn sigterm_requests_shutdown() {

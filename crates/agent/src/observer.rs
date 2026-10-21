@@ -356,18 +356,20 @@ impl Observer {
         })
     }
 
-    pub fn next_dns_packet(&mut self) -> Result<Option<agent_ebpf_common::DnsPacketRecord>> {
+    pub fn next_dns_packet(
+        &mut self,
+    ) -> Option<Result<agent_ebpf_common::DnsPacketRecord, kernel_event::DecodeError>> {
         self.dns_events
             .next()
-            .map(|item| kernel_event::decode_dns_packet(&item).map_err(Into::into))
-            .transpose()
+            .map(|item| kernel_event::decode_dns_packet(&item))
     }
 
-    pub fn next_inbound_event(&mut self) -> Result<Option<agent_ebpf_common::InboundKernelEvent>> {
+    pub fn next_inbound_event(
+        &mut self,
+    ) -> Option<Result<agent_ebpf_common::InboundKernelEvent, kernel_event::DecodeError>> {
         self.inbound_events
             .next()
-            .map(|item| kernel_event::decode_inbound(&item).map_err(Into::into))
-            .transpose()
+            .map(|item| kernel_event::decode_inbound(&item))
     }
 
     pub fn inbound_kernel_counters(&self) -> Result<InboundKernelCounters> {
@@ -396,11 +398,10 @@ impl Observer {
         })
     }
 
-    pub fn next_event(&mut self) -> Result<Option<agent_ebpf_common::KernelEvent>> {
-        self.events
-            .next()
-            .map(|item| kernel_event::decode(&item).map_err(Into::into))
-            .transpose()
+    pub fn next_event(
+        &mut self,
+    ) -> Option<Result<agent_ebpf_common::KernelEvent, kernel_event::DecodeError>> {
+        self.events.next().map(|item| kernel_event::decode(&item))
     }
 
     pub fn network_counters(&self) -> Result<NetworkKernelCounters> {
