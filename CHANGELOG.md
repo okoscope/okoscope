@@ -47,6 +47,8 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Fixed
 
+- Update the shared Tokio runtime to 1.53.3 to resolve RUSTSEC-2026-0386
+  in server and runtime-agent builds.
 - Logical DNS summaries resolve Kubernetes search-expansion candidates once per
   distinct name and process/placement context instead of once per observation,
   reducing database work for repeated DNS activity while preserving filters,
