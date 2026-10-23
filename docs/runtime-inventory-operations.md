@@ -11,6 +11,15 @@ evaluation, or collected evidence. Duplicate label text is allowed.
 
 ## Logical DNS presentation groups
 
+The Application Activity DNS overview uses the exact inventory distribution,
+not the logical DNS group APIs described below. Each question name and A/AAAA
+record type remains separate, including Kubernetes search-expansion variants.
+Counts are each matching identity's retained observation totals. Release,
+placement, and observation-window filters select inventory identities without
+recounting their individual events; policy verdict, suppression, and evaluation
+state filters apply to the detailed inventory list only. Top entries and `other`
+reconcile with the exact distribution's totals, independently of list pagination.
+
 The additive `.../runtime-inventory/dns-groups` API presents DNS observations as
 logical destinations without changing the stored `domain` inventory items.
 Questions for A and AAAA records share a logical group when their canonical

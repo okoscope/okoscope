@@ -62,4 +62,20 @@ See [high-cardinality verification](data-visualizations-high-cardinality.md) for
 
 Named-thread activity is stored separately from executable inventory and Runtime Groups. Window pages are capped at 200; summary queries inspect at most 10,000 newest windows over at most 31 days and fold more than 66 result names into `other`. Thread windows expire with effective Project raw retention. The ingestion benchmark includes a bounded thread-window storage/query profile; it does not establish a production latency guarantee.
 
-Logical DNS group reads precompute same-scope canonical-name corroboration and choose one longest eligible suffix per occurrence before aggregating. This bounds repeated scans of the scoped evidence while retaining the documented grouping rules.
+Logical DNS group reads first deduplicate canonical names within each observed
+process, cluster, namespace, Pod, and container context after applying the
+effective event filters. Kubernetes search-expansion candidates, corroboration,
+and longest eligible name selection run on these distinct contexts rather than
+on every repeated observation. The selected names are joined back to retained
+events for the existing exact counts, dates, variants, and placement aggregates.
+This preserves grouping and pagination semantics without summing overlapping
+distinct counts. Reading the filtered events and final aggregation still depend
+on retained history size; the response limit does not bound that work.
+
+The Application Activity DNS overview reads the exact inventory distribution
+instead of the logical DNS group distribution. Its top-five query ranks stored
+inventory identity counts without resolving Kubernetes DNS search expansions
+or scanning individual DNS events for grouping. Placement and time filters
+select identities, and counts retain each identity's full retained history;
+policy-state filters apply only to the detailed list. Measure this endpoint's
+latency separately from the logical DNS API, which remains available.

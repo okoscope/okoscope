@@ -34,6 +34,10 @@ pub struct DnsGroupFilter<'a> {
     pub evaluation_pending: Option<bool>,
 }
 
+// Resolve search expansions once per distinct name and resolver context. Query
+// types, item IDs and repeated occurrences do not affect candidate eligibility.
+// Reattach the mapping to the original events so all distinct counts, timestamps
+// and scope filters retain their event-level semantics.
 const GROUP_CTE: &str = r#"
 WITH scoped AS MATERIALIZED (
  SELECT e.id occurrence_id,i.id item_id,lower(trim(trailing '.' from i.semantic_summary->>'name')) canonical_name,
@@ -50,9 +54,11 @@ WITH scoped AS MATERIALIZED (
  AND ($13::text IS NULL OR EXISTS(SELECT 1 FROM runtime_sighting_policy_evaluations p JOIN runtime_policy_states ps ON ps.organization_id=p.organization_id AND ps.project_id=p.project_id AND ps.application_id=p.application_id WHERE p.item_id=i.id AND p.cluster_id=e.cluster_id AND p.namespace=e.namespace AND p.workload_kind=e.workload_kind AND p.workload_name=e.workload_name AND p.pod_uid=e.pod_uid AND p.container_name=e.container_name AND p.policy_state_version=ps.state_version AND p.evaluator_version=$16 AND p.verdict=$13))
  AND ($14::bool IS NULL OR $14=EXISTS(SELECT 1 FROM runtime_policy_suppressions z WHERE z.organization_id=i.organization_id AND z.project_id=i.project_id AND z.application_id=i.application_id AND z.identity_version=i.identity_version AND z.identity_digest=i.identity_digest AND z.cancelled_at IS NULL AND z.expires_at>now() AND (cardinality(z.cluster_ids)=0 OR e.cluster_id=ANY(z.cluster_ids)) AND (cardinality(z.namespaces)=0 OR e.namespace=ANY(z.namespaces)) AND (cardinality(z.workload_kinds)=0 OR e.workload_kind=ANY(z.workload_kinds)) AND (cardinality(z.workload_names)=0 OR e.workload_name=ANY(z.workload_names))))
  AND ($15::bool IS NULL OR $15=EXISTS(SELECT 1 FROM runtime_inventory_sightings s LEFT JOIN runtime_sighting_policy_evaluations p ON p.item_id=s.item_id AND p.cluster_id=s.cluster_id AND p.namespace=s.namespace AND p.workload_kind=s.workload_kind AND p.workload_name=s.workload_name AND p.pod_uid=s.pod_uid AND p.container_name=s.container_name LEFT JOIN runtime_policy_states ps ON ps.organization_id=s.organization_id AND ps.project_id=s.project_id AND ps.application_id=s.application_id WHERE s.item_id=i.id AND s.cluster_id=e.cluster_id AND s.namespace=e.namespace AND s.workload_kind=e.workload_kind AND s.workload_name=e.workload_name AND s.pod_uid=e.pod_uid AND s.container_name=e.container_name AND (p.item_id IS NULL OR p.policy_state_version<>COALESCE(ps.state_version,0) OR p.evaluator_version<>$16)))
+), exact_names AS MATERIALIZED (
+ SELECT DISTINCT canonical_name,process_command,cluster_id,namespace,pod_uid,container_name FROM scoped
 ), candidates AS MATERIALIZED (
  SELECT s.*,candidate.candidate_name,candidate.suffix_kind
- FROM scoped s
+ FROM exact_names s
  CROSS JOIN LATERAL (
   VALUES
    (left(s.canonical_name,-length('.'||lower(s.namespace)||'.svc.cluster.local')),'namespace'),
@@ -62,8 +68,6 @@ WITH scoped AS MATERIALIZED (
  WHERE (candidate.suffix_kind='namespace' AND s.canonical_name LIKE ('%.'||lower(s.namespace)||'.svc.cluster.local'))
     OR (candidate.suffix_kind='service' AND s.canonical_name LIKE '%.svc.cluster.local')
     OR (candidate.suffix_kind='cluster' AND s.canonical_name LIKE '%.cluster.local')
-), exact_names AS MATERIALIZED (
- SELECT DISTINCT canonical_name,process_command,cluster_id,namespace,pod_uid,container_name FROM scoped
 ), candidate_evidence AS MATERIALIZED (
  SELECT c.candidate_name,c.process_command,c.cluster_id,c.namespace,c.pod_uid,c.container_name,
         count(DISTINCT c.canonical_name) exact_name_count,count(DISTINCT c.suffix_kind) suffix_kind_count,
@@ -75,18 +79,22 @@ WITH scoped AS MATERIALIZED (
   AND exact.container_name=c.container_name
  GROUP BY c.candidate_name,c.process_command,c.cluster_id,c.namespace,c.pod_uid,c.container_name
 ), selected_candidates AS MATERIALIZED (
- SELECT DISTINCT ON (c.occurrence_id,c.item_id) c.occurrence_id,c.item_id,c.candidate_name
+ SELECT DISTINCT ON (c.canonical_name,c.process_command,c.cluster_id,c.namespace,c.pod_uid,c.container_name)
+        c.canonical_name,c.process_command,c.cluster_id,c.namespace,c.pod_uid,c.container_name,c.candidate_name
  FROM candidates c
  JOIN candidate_evidence evidence ON evidence.candidate_name=c.candidate_name
   AND evidence.process_command=c.process_command AND evidence.cluster_id=c.cluster_id
   AND evidence.namespace=c.namespace AND evidence.pod_uid IS NOT DISTINCT FROM c.pod_uid
   AND evidence.container_name=c.container_name
  WHERE evidence.has_exact_name OR (evidence.exact_name_count>=2 AND evidence.suffix_kind_count>=2)
- ORDER BY c.occurrence_id,c.item_id,length(c.candidate_name) DESC,c.candidate_name
+ ORDER BY c.canonical_name,c.process_command,c.cluster_id,c.namespace,c.pod_uid,c.container_name,length(c.candidate_name) DESC,c.candidate_name
 ), normalized AS MATERIALIZED (
  SELECT s.*,COALESCE(selected.candidate_name,s.canonical_name) display_name
  FROM scoped s
- LEFT JOIN selected_candidates selected ON selected.occurrence_id=s.occurrence_id AND selected.item_id=s.item_id
+ LEFT JOIN selected_candidates selected ON selected.canonical_name=s.canonical_name
+  AND selected.process_command=s.process_command AND selected.cluster_id=s.cluster_id
+  AND selected.namespace=s.namespace AND selected.pod_uid IS NOT DISTINCT FROM s.pod_uid
+  AND selected.container_name=s.container_name
 ), groups AS MATERIALIZED (
  SELECT display_name,process_command,CASE WHEN bool_or(display_name<>canonical_name) THEN 'kubernetes_search_expansion' ELSE 'canonical_name' END grouping_reason,
  CASE WHEN bool_or(display_name<>canonical_name) THEN 'high' ELSE 'exact' END confidence,
@@ -298,7 +306,13 @@ mod tests {
         process_command: String,
         grouping_reason: String,
         confidence: String,
+        first_seen_at: DateTime<Utc>,
         last_seen_at: DateTime<Utc>,
+        cluster_count: i64,
+        namespace_count: i64,
+        workload_count: i64,
+        pod_count: i64,
+        container_count: i64,
         observation_count: i64,
         variant_count: i64,
         query_types: Vec<String>,
@@ -602,5 +616,211 @@ mod tests {
         .await
         .unwrap();
         assert!(worker.is_empty());
+    }
+    async fn seed_repeated_contexts(pool: &PgPool, own: &Tenant) -> DateTime<Utc> {
+        let base = (Utc::now() - Duration::hours(1)).trunc_subsecs(0);
+        let cases = [
+            (
+                "s3.example.com",
+                DnsQueryType::A,
+                "api",
+                "shared",
+                "production",
+            ),
+            (
+                "s3.example.com",
+                DnsQueryType::Aaaa,
+                "api",
+                "shared",
+                "production",
+            ),
+            (
+                "s3.example.com.cluster.local",
+                DnsQueryType::A,
+                "api",
+                "shared",
+                "production",
+            ),
+            (
+                "s3.example.com.cluster.local",
+                DnsQueryType::A,
+                "api",
+                "isolated",
+                "production",
+            ),
+            (
+                "s3.example.com.cluster.local",
+                DnsQueryType::A,
+                "worker",
+                "shared",
+                "production",
+            ),
+            (
+                "s3.example.com.cluster.local",
+                DnsQueryType::A,
+                "api",
+                "shared",
+                "staging",
+            ),
+        ];
+        let mut events = Vec::new();
+        for repetition in 0..12 {
+            for (index, (name, kind, command, pod, namespace)) in cases.iter().enumerate() {
+                let mut event = dns(own, name, *kind, command);
+                event.observed_at =
+                    base + Duration::seconds(repetition * 10 + i64::try_from(index).unwrap());
+                event.attribution.pod_uid = (*pod).into();
+                event.attribution.namespace = (*namespace).into();
+                events.push(event);
+            }
+        }
+        ingest(pool, own, &events).await;
+
+        base
+    }
+
+    /// Repeated observations must not multiply search-expansion candidates;
+    /// candidate evidence remains scoped to the process, namespace and pod.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn repeated_observations_resolve_distinct_contexts(pool: PgPool) {
+        let own = tenant(&pool, "dns-distinct-contexts").await;
+        let base = seed_repeated_contexts(&pool, &own).await;
+
+        let sql = format!(
+            "{} SELECT (SELECT count(*) FROM scoped), (SELECT count(*) FROM candidates)",
+            super::GROUP_CTE
+        );
+        let counts: Vec<(i64, i64)> = super::bind_filter(sqlx::query_as(&sql), filter(&own))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            counts,
+            [(72, 4)],
+            "candidate work depends on unique contexts, not occurrences"
+        );
+
+        let all = groups(&pool, filter(&own), None, None, 10).await;
+        assert_eq!(all.len(), 3);
+        let folded = all
+            .iter()
+            .find(|row| row.display_name == "s3.example.com")
+            .unwrap();
+        assert_eq!((folded.observation_count, folded.variant_count), (36, 3));
+        assert_eq!(folded.query_types, ["A", "AAAA"]);
+        assert_eq!(folded.first_seen_at, base);
+        assert_eq!(folded.last_seen_at, base + Duration::seconds(112));
+        assert_eq!(
+            (
+                folded.cluster_count,
+                folded.namespace_count,
+                folded.workload_count
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!((folded.pod_count, folded.container_count), (1, 1));
+        assert!(
+            all.iter()
+                .all(|row| row.total_observation_count == 72 && row.total_group_count == 3)
+        );
+        let exact = all
+            .iter()
+            .find(|row| {
+                row.process_command == "api" && row.display_name.ends_with(".cluster.local")
+            })
+            .unwrap();
+        assert_eq!(exact.observation_count, 24);
+        assert_eq!(exact.namespace_count, 2);
+        assert_eq!(exact.grouping_reason, "canonical_name");
+        let variants: Vec<Variant> =
+            DnsGroupRepository::variants(&pool, filter(&own), "s3.example.com", "api", None, 10)
+                .await
+                .unwrap();
+        assert_eq!(variants.len(), 3);
+        assert!(variants.iter().all(|row| row.observation_count == 12));
+        let narrowed = DnsGroupFilter {
+            observed_from: Some(base + Duration::seconds(112)),
+            ..filter(&own)
+        };
+        let late = groups(&pool, narrowed, None, None, 10).await;
+        assert!(
+            late.iter()
+                .all(|row| row.display_name == "s3.example.com.cluster.local"
+                    && row.grouping_reason == "canonical_name")
+        );
+    }
+    /// When several suffix removals are eligible, choose the longest name;
+    /// two distinct suffix kinds still corroborate a name without a direct lookup.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn unique_candidates_keep_longest_and_suffix_evidence(pool: PgPool) {
+        let own = tenant(&pool, "dns-longest-evidence").await;
+        let names = [
+            "target",
+            "target.production.svc",
+            "target.production.svc.cluster.local",
+            "fallback.svc.cluster.local",
+            "fallback.cluster.local",
+        ];
+        let events: Vec<_> = names
+            .into_iter()
+            .flat_map(|name| {
+                [DnsQueryType::A, DnsQueryType::Aaaa].map(|kind| {
+                    let mut event = dns(&own, name, kind, "api");
+                    event.attribution.pod_uid = "same-pod".into();
+                    event
+                })
+            })
+            .collect();
+        ingest(&pool, &own, &events).await;
+        let all = groups(&pool, filter(&own), None, None, 10).await;
+        assert_eq!(all.len(), 3);
+        for (name, observations, variants, reason) in [
+            ("target", 2, 2, "canonical_name"),
+            ("target.production.svc", 4, 4, "kubernetes_search_expansion"),
+            ("fallback", 4, 4, "kubernetes_search_expansion"),
+        ] {
+            let group = all.iter().find(|row| row.display_name == name).unwrap();
+            assert_eq!(
+                (group.observation_count, group.variant_count),
+                (observations, variants)
+            );
+            assert_eq!(group.grouping_reason, reason);
+        }
+    }
+    /// Identical pod names in another container or cluster provide no evidence.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn evidence_stays_inside_cluster_and_container(pool: PgPool) {
+        let own = tenant(&pool, "dns-cluster-container").await;
+        let mut direct = dns(&own, "s3.example.com", DnsQueryType::A, "api");
+        direct.attribution.pod_uid = "resolver".into();
+        let mut expansion = dns(&own, "s3.example.com.cluster.local", DnsQueryType::A, "api");
+        expansion.attribution.pod_uid = "resolver".into();
+        expansion.attribution.container_name = "sidecar".into();
+        ingest(&pool, &own, &[direct, expansion]).await;
+        let separate = groups(&pool, filter(&own), None, None, 10).await;
+        assert_eq!(separate.len(), 2);
+        assert!(
+            separate
+                .iter()
+                .all(|row| row.grouping_reason == "canonical_name")
+        );
+        let other_cluster = Uuid::new_v4();
+        sqlx::query("INSERT INTO clusters(id,organization_id,external_id,name) VALUES($1,$2,'other','Other')")
+            .bind(other_cluster).bind(own.organization_id).execute(&pool).await.unwrap();
+        let other_agent = Uuid::new_v4();
+        sqlx::query("INSERT INTO agents(id,organization_id,cluster_id,node_name,agent_version) VALUES($1,$2,$3,'other','test')")
+            .bind(other_agent).bind(own.organization_id).bind(other_cluster).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE runtime_events SET cluster_id=$1,agent_id=$2,container_name='app' WHERE application_id=$3 AND container_name='sidecar'")
+            .bind(other_cluster).bind(other_agent).bind(own.application_id).execute(&pool).await.unwrap();
+        let separate = groups(&pool, filter(&own), None, None, 10).await;
+        assert_eq!(separate.len(), 2);
+        assert!(
+            separate
+                .iter()
+                .all(|row| row.grouping_reason == "canonical_name")
+        );
     }
 }

@@ -24,6 +24,11 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Changed
 
+- The Application Activity DNS overview now shows exact question names and record
+  types using the inventory distribution instead of rebuilding logical resolver
+  groups. Counts cover matching identities' retained history; placement/time
+  filters select identities and policy-state filters apply only to the detailed
+  list. Existing logical DNS API routes remain available.
 - DNS group queries now reuse scoped evidence and select each occurrence's
   longest eligible name once, reducing repeated database work without changing
   grouping results.
@@ -42,6 +47,10 @@ Okoscope is pre-1.0, so minor releases may contain documented breaking changes.
 
 ### Fixed
 
+- Logical DNS summaries resolve Kubernetes search-expansion candidates once per
+  distinct name and process/placement context instead of once per observation,
+  reducing database work for repeated DNS activity while preserving filters,
+  grouping, exact counts, and pagination.
 - Adding a user who does not exist, or is not a member of the organization,
   to a project now answers `404 user_not_found` instead of `500`.
 - Revoking the super administrator role of a user who does not exist now

@@ -1003,7 +1003,19 @@ paths:
       ]
     get:
       operationId: getApplicationRuntimeInventoryDistribution
-      description: Returns a complete-scope bounded distribution ordered by occurrence_count descending and identity_token ascending. Top entries plus other account for the full totals.
+      description: >-
+        Returns a bounded distribution of exact inventory identities, ordered by
+        occurrence_count descending and identity_token ascending. For domain items,
+        each exact DNS name and query type remains a separate identity; related
+        Kubernetes search-domain names are not grouped. Counts are the stored
+        cumulative occurrence counters of the selected identities. Release,
+        cluster, namespace, workload and container filters select identities with
+        matching presence; each presence filter is applied independently.
+        observed_from and observed_to select identities whose first/last observation
+        interval overlaps the requested interval. These filters do not restrict
+        occurrence counters to individual matching events. Top entries plus other
+        reconcile with the totals across all selected identities. Policy verdict,
+        suppressed and evaluation_pending filters are not supported by this endpoint.
       parameters:
         - {
             name: kind,
