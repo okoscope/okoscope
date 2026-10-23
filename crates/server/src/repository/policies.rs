@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::PgExecutor;
+use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 
 /// Input to [`PolicyRepository::store_group_evaluation`].
@@ -138,6 +138,13 @@ pub struct NewSuppression<'a> {
 /// Runtime policies, their revisions and suppressions, and the commands that change them.
 #[derive(Clone, Copy, Debug)]
 pub struct PolicyRepository;
+
+struct PolicyScope {
+    organization: Uuid,
+    project: Uuid,
+    application: Uuid,
+    policy: Uuid,
+}
 
 impl PolicyRepository {
     /// The application's policy state version, if it has one.
@@ -1160,18 +1167,51 @@ impl PolicyRepository {
         .await
     }
 
+    // Lock the policy before joining its current revision. At READ COMMITTED,
+    // a join that waits for an updated policy tuple can lose its row during
+    // PostgreSQL's join recheck. A separate statement gets a fresh snapshot after
+    // the lock wait. Callers keep both statements in their existing transaction.
+    async fn lock_policy_for_update(
+        executor: &mut PgConnection,
+        scope: PolicyScope,
+    ) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM runtime_policies
+             WHERE organization_id=$1 AND project_id=$2 AND application_id=$3 AND id=$4
+             FOR UPDATE",
+        )
+        .bind(scope.organization)
+        .bind(scope.project)
+        .bind(scope.application)
+        .bind(scope.policy)
+        .fetch_optional(executor)
+        .await?
+        .is_some())
+    }
+
     /// Locks a policy of the application and returns its current revision's
-    /// id and number.
-    pub async fn current_revision_for_update<'e, E>(
-        executor: E,
+    /// id and number. Pass the connection of a caller-owned READ COMMITTED
+    /// transaction so the lock covers the revision read and subsequent mutation.
+    pub async fn current_revision_for_update(
+        executor: &mut PgConnection,
         organization_id: Uuid,
         project_id: Uuid,
         application_id: Uuid,
         policy_id: Uuid,
-    ) -> Result<Option<(Uuid, i64)>, sqlx::Error>
-    where
-        E: PgExecutor<'e>,
-    {
+    ) -> Result<Option<(Uuid, i64)>, sqlx::Error> {
+        if !Self::lock_policy_for_update(
+            executor,
+            PolicyScope {
+                organization: organization_id,
+                project: project_id,
+                application: application_id,
+                policy: policy_id,
+            },
+        )
+        .await?
+        {
+            return Ok(None);
+        }
         sqlx::query_as::<_, (Uuid, i64)>(
             "SELECT current_revision_id,r.revision_number
              FROM runtime_policies p
@@ -1179,8 +1219,7 @@ impl PolicyRepository {
              WHERE p.organization_id=$1
                  AND p.project_id=$2
                  AND p.application_id=$3
-                 AND p.id=$4
-             FOR UPDATE OF p",
+                 AND p.id=$4",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -1191,18 +1230,31 @@ impl PolicyRepository {
     }
 
     /// Locks a policy of the application and returns its current revision
-    /// with the columns of [`Self::revision_page`].
-    pub async fn current_revision_detail_for_update<'e, E, T>(
-        executor: E,
+    /// with the columns of [`Self::revision_page`]. Pass the connection of a
+    /// caller-owned READ COMMITTED transaction to retain the policy row lock.
+    pub async fn current_revision_detail_for_update<T>(
+        executor: &mut PgConnection,
         organization_id: Uuid,
         project_id: Uuid,
         application_id: Uuid,
         policy_id: Uuid,
     ) -> Result<Option<T>, sqlx::Error>
     where
-        E: PgExecutor<'e>,
         T: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
+        if !Self::lock_policy_for_update(
+            executor,
+            PolicyScope {
+                organization: organization_id,
+                project: project_id,
+                application: application_id,
+                policy: policy_id,
+            },
+        )
+        .await?
+        {
+            return Ok(None);
+        }
         sqlx::query_as(
             "SELECT r.id,r.policy_id,r.revision_number,r.prior_revision_id,r.enabled,
                  r.inventory_kind,r.identity_version,r.identity_digest,r.behavior_matcher,
@@ -1214,8 +1266,7 @@ impl PolicyRepository {
              WHERE p.organization_id=$1
                  AND p.project_id=$2
                  AND p.application_id=$3
-                 AND p.id=$4
-             FOR UPDATE OF p",
+                 AND p.id=$4",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -1625,21 +1676,33 @@ mod tests {
         .unwrap();
         assert_eq!(after.iter().map(|p| p.id).collect::<Vec<_>>(), by_id[1..]);
 
-        let locked = |id: Uuid| {
+        let mut locked_tx = pool.begin().await.unwrap();
+        assert_eq!(
             PolicyRepository::current_revision_for_update(
-                &pool,
+                &mut locked_tx,
                 own.organization_id,
                 own.project_id,
                 own.application_id,
-                id,
+                first,
             )
-        };
-        assert_eq!(locked(first).await.unwrap(), Some((r1, 1)));
-        assert_eq!(
-            locked(bare).await.unwrap(),
-            None,
-            "no revision, nothing to lock"
+            .await
+            .unwrap(),
+            Some((r1, 1)),
         );
+        assert_eq!(
+            PolicyRepository::current_revision_for_update(
+                &mut locked_tx,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                bare,
+            )
+            .await
+            .unwrap(),
+            None,
+            "no revision, nothing to read",
+        );
+        locked_tx.commit().await.unwrap();
         let r2 = revise(
             &pool,
             &own,
@@ -1651,8 +1714,9 @@ mod tests {
             Some("requires_review"),
         )
         .await;
+        let mut detail_tx = pool.begin().await.unwrap();
         let current: PolicyRevision = PolicyRepository::current_revision_detail_for_update(
-            &pool,
+            &mut detail_tx,
             own.organization_id,
             own.project_id,
             own.application_id,
@@ -1670,6 +1734,7 @@ mod tests {
             (r2, 2, Some(r1))
         );
         assert_eq!(current.outside_effect.as_deref(), Some("requires_review"));
+        detail_tx.commit().await.unwrap();
         let revisions: Vec<PolicyRevision> = PolicyRepository::revision_page(
             &pool,
             own.organization_id,
@@ -2262,5 +2327,86 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pending, 1, "one per identity of the project");
+    }
+    async fn wait_for_policy_lock(pool: &PgPool, pid: i32) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')",
+                ).bind(pid).fetch_one(pool).await.unwrap();
+                if blocked { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("revision reader must reach the policy row lock");
+    }
+
+    /// A reader waiting behind a replacement must observe its newly committed
+    /// revision rather than lose the policy through a stale joined tuple.
+    #[sqlx::test(migrator = "crate::database::MIGRATOR")]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn concurrent_revision_readers_follow_the_locked_policy(pool: PgPool) {
+        let own = tenant(&pool, "policy-concurrent-revision").await;
+        let actor = user(&pool).await;
+        ingest(&pool, &own, &[exec(&own, "/app", Utc::now())]).await;
+        let item = identity(&pool, &own).await;
+        let policy_id = policy(&pool, &own, actor, "Concurrent").await;
+        let first = revise(&pool, &own, actor, policy_id, 1, None, &item, None).await;
+        let second = revise(&pool, &own, actor, policy_id, 2, Some(first), &item, None).await;
+        for detail in [false, true] {
+            PolicyRepository::set_current_revision(
+                &pool,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                first,
+                policy_id,
+            )
+            .await
+            .unwrap();
+            let mut writer = pool.begin().await.unwrap();
+            PolicyRepository::set_current_revision(
+                &mut *writer,
+                own.organization_id,
+                own.project_id,
+                own.application_id,
+                second,
+                policy_id,
+            )
+            .await
+            .unwrap();
+            let mut reader = pool.begin().await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *reader)
+                .await
+                .unwrap();
+            let task = tokio::spawn(async move {
+                if detail {
+                    let revision: Option<PolicyRevision> =
+                        PolicyRepository::current_revision_detail_for_update(
+                            &mut reader,
+                            own.organization_id,
+                            own.project_id,
+                            own.application_id,
+                            policy_id,
+                        )
+                        .await
+                        .unwrap();
+                    revision.map(|revision| (revision.id, revision.revision_number))
+                } else {
+                    PolicyRepository::current_revision_for_update(
+                        &mut reader,
+                        own.organization_id,
+                        own.project_id,
+                        own.application_id,
+                        policy_id,
+                    )
+                    .await
+                    .unwrap()
+                }
+            });
+            wait_for_policy_lock(&pool, pid).await;
+            writer.commit().await.unwrap();
+            assert_eq!(task.await.unwrap(), Some((second, 2)), "detail={detail}");
+        }
     }
 }

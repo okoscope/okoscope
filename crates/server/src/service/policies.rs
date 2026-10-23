@@ -1009,7 +1009,7 @@ impl PolicyService {
             return Ok(result);
         }
         let current: Option<(Uuid, i64)> = PolicyRepository::current_revision_for_update(
-            &mut *tx,
+            &mut tx,
             principal.organization_id,
             path.project_id,
             path.application_id,
@@ -1083,7 +1083,7 @@ impl PolicyService {
             return Ok(result);
         }
         let row: Option<PolicyRevision> = PolicyRepository::current_revision_detail_for_update(
-            &mut *tx,
+            &mut tx,
             principal.organization_id,
             path.project_id,
             path.application_id,
